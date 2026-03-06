@@ -1,0 +1,76 @@
+[package]
+name = "timesheet"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0", features = ["nightly"] }
+leptos_meta = { version = "0" }
+leptos_router = { version = "0" }
+leptos_axum = { version = "0", optional = true }
+axum = { version = "0.8", features = ["ws"], optional = true }
+tower = { version = "0.4", optional = true }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"], optional = true }
+futures = { version = "0.3", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"], optional = true }
+directories = { version = "6", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Navigator", "Document", "Element", "DomRect", "WebSocket", "MessageEvent", "CloseEvent", "ErrorEvent", "Performance", "BeforeUnloadEvent"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+env_logger = { version = "0.11", optional = true }
+reqwest = { version = "0", features = ["json"], optional = true }
+base64 = { version = "0", optional = true }
+regex = "1"
+log = "0.4"
+send_wrapper = "0.6"
+anyhow = "1"
+gloo-timers = { version = "0", optional = true }
+console_error_panic_hook = { version = "0", optional = true }
+console_log = { version = "1", optional = true }
+
+[features]
+default = []
+ssr = ["leptos/ssr", "leptos_meta/ssr", "leptos_router/ssr", "leptos_axum", "axum", "tower", "tower-http", "futures", "tokio", "directories", "uuid", "env_logger", "reqwest", "base64"]
+hydrate = ["leptos/hydrate", "dep:web-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:gloo-timers", "dep:console_error_panic_hook", "dep:console_log"]
+
+# Defines a size-optimized profile for the WASM bundle in release mode
+[profile.wasm-release]
+inherits = "release"
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[package.metadata.leptos]
+lib-profile-dev = "wasm-dev"
+output-name = "timesheet"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/timesheet.css"
+assets-dir = "public"
+site-addr = "0.0.0.0:8081"
+end2end-cmd = "npx playwright test"
+end2end-dir = "end2end"
+browserquery = "defaults"
+# env = "DEV"
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+lib-profile-release = "wasm-release"
+
+[profile.dev.package."*"]
+opt-level = "s"
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+codegen-units = 1

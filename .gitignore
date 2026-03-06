@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target/
+
+# cargo-leptos tooling
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OAuth credentials
+.env
