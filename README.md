@@ -20,10 +20,10 @@ Only one worklog entry can be tracked at a time. If you start tracking a new ent
 **Note:** Just as manual time tracking, time tracking is not automatically saved. You must click the "Save" button to save your changes.
 
 ## TO DO
-   # Multi user
-   # OAuth2/SSO
-   # CSV/Excel export
-   # Offline worklog queue for intermittent connectivity
-   # Light/Dark mode support
-   # Keyboard navigation in timesheet grid
+   - Multi user
+   - OAuth2/SSO
+   - CSV/Excel export
+   - Offline worklog queue for intermittent connectivity
+   - Light/Dark mode support
+   - Keyboard navigation in timesheet grid
 
