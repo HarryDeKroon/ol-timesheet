@@ -373,8 +373,6 @@ main {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	max-width: 400px;
-	min-width: 200px;
 }
 
 .issue-icon {
@@ -398,6 +396,7 @@ main {
 
 .issue-summary {
 	color: #555;
+	margin-left: 0.66ch;
 }
 
 .issue-total {
@@ -410,11 +409,21 @@ main {
 	text-align: right;
 }
 
+.col-issue-total {
+	text-align: right !important;
+	padding-right: 0.5em;
+	white-space: nowrap;
+	width: 5ch;
+	min-width: 5ch;
+	max-width: 5ch;
+	color: #888;
+}
+
 /* Day columns */
 .col-day,
 .col-weekend {
-	width: 3.25ch;
-	min-width: 3.25ch;
+	width: 5ch;
+	min-width: 5ch;
 }
 
 .col-today {
@@ -426,8 +435,8 @@ main {
 }
 
 .col-total {
-	width: 4ch;
-	min-width: 4ch;
+	width: 5ch;
+	min-width: 5ch;
 	font-weight: 600;
 	background: #f0f4f8;
 }

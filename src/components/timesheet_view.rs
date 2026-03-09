@@ -947,7 +947,7 @@ pub fn TimesheetView() -> impl IntoView {
 
                             let header_total = {
                                 let s = format_hours_short(item_ytd, dec_sep);
-                                if s.is_empty() { String::new() } else { format!("[{}]", s) }
+                                if s.is_empty() { String::new() } else { format!("{}", s) }
                             };
 
                             let icon_url = item.icon_url.clone();
@@ -1214,42 +1214,62 @@ pub fn TimesheetView() -> impl IntoView {
                                         >
                                             {key_display.clone()}
                                         </a>
-                                        <span class="issue-total">{header_total}</span>
                                         <span class="issue-summary">{summary}</span>
+                                    </td>
+                                    <td class="col-issue-total">
+                                        {header_total}
                                     </td>
                                     {week_cells}
                                 </tr>
+
                             }.into_any()
                         })
                         .collect();
 
+                    // ── Build colgroup cols for table-layout:fixed ──
+                    // col-item has no width so it absorbs whatever space remains after
+                    // all fixed-width columns have claimed their share.
+                    let mut colgroup_cols: Vec<AnyView> = Vec::new();
+                    colgroup_cols.push(view! { <col class="col-item"></col> }.into_any());
+                    colgroup_cols.push(view! { <col class="col-issue-total"></col> }.into_any());
+                    for _ in 0..nw {
+                        for _ in 0..5 {
+                            colgroup_cols.push(view! { <col class="col-day"></col> }.into_any());
+                        }
+                        colgroup_cols.push(view! { <col class="col-weekend"></col> }.into_any());
+                        colgroup_cols.push(view! { <col class="col-total"></col> }.into_any());
+                    }
+
                     view! {
                         <div class="timesheet-table-wrap">
                             <table class="timesheet-grid">
-                                <thead>
-                                    <tr>
-                                        <th class="col-item">
-                                            <input
-                                                type="text"
-                                                class="search-input"
-                                                placeholder={move || i18n.get().t(keys::SEARCH_WORK_ITEM)}
-                                                prop:value={move || search_query.get()}
-                                                on:input=on_search_input.clone()
-                                                on:blur=move |_| {
+                                <colgroup>{colgroup_cols}</colgroup>
+
+                            <thead>
+                                <tr>
+                                    <th class="col-item" colspan="2">
+                                        <input
+                                            type="text"
+                                            class="search-input"
+                                            placeholder={move || i18n.get().t(keys::SEARCH_WORK_ITEM)}
+                                            prop:value={move || search_query.get()}
+                                            on:input=on_search_input.clone()
+                                            on:blur=move |_| {
+                                                show_search_dropdown.set(false);
+                                            }
+                                            on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                                                if ev.key() == "Escape" {
                                                     show_search_dropdown.set(false);
+                                                    search_query.set(String::new());
+                                                    search_results.set(vec![]);
+                                                    search_version.set(search_version.get_untracked() + 1);
                                                 }
-                                                on:keydown=move |ev: leptos::ev::KeyboardEvent| {
-                                                    if ev.key() == "Escape" {
-                                                        show_search_dropdown.set(false);
-                                                        search_query.set(String::new());
-                                                        search_results.set(vec![]);
-                                                        search_version.set(search_version.get_untracked() + 1);
-                                                    }
-                                                }
-                                            />
-                                        </th>
-                                        {header_cols}
-                                    </tr>
+                                            }
+                                        />
+                                    </th>
+                                    {header_cols}
+                                </tr>
+
                                 </thead>
                                 <tbody>
                                     {body_rows}
