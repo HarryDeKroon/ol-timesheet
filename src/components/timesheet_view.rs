@@ -150,6 +150,24 @@ pub async fn clear_cache() -> Result<(), ServerFnError> {
     Ok(())
 }
 
+/// Fetch fresh worklogs for a single issue after a save/update/delete.
+/// Invalidates only this issue's cache entry so the next full load is still fast.
+#[server(GetIssueWorklogs, "/api")]
+pub async fn get_issue_worklogs(
+    issue_key: String,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<(Vec<WorklogEntry>, f64), ServerFnError> {
+    let (_, session) = crate::auth::current_user_session().await?;
+    let creds = session.jira_credentials();
+    // Invalidate the per-issue worklog cache and the assembled timesheet cache.
+    crate::api::jira::invalidate_worklogs_for_issue(&creds.account_id, &issue_key);
+    let (entries, ytd) = crate::api::jira::fetch_worklogs(&creds, &issue_key, start, end)
+        .await
+        .map_err(ServerFnError::new)?;
+    Ok((entries, ytd))
+}
+
 #[server(SearchWorkItems, "/api")]
 pub async fn search_work_items(query: String) -> Result<Vec<WorkItem>, ServerFnError> {
     let (_, session) = crate::auth::current_user_session().await?;
@@ -691,8 +709,37 @@ pub fn TimesheetView() -> impl IntoView {
         window_event_listener(leptos::ev::focus, handle_focus);
     }
 
-    let on_popup_changed = Callback::new(move |_: ()| {
-        data.refetch();
+    let on_popup_changed = Callback::new(move |issue_key: String| {
+        // Targeted refresh: re-fetch only the changed issue's worklogs and
+        // patch last_data in-place.  This avoids showing the loading overlay
+        // and is much faster than a full refetch.
+        #[cfg(feature = "hydrate")]
+        {
+            let monday = selected_monday.get_untracked();
+            let nw = num_weeks.get_untracked();
+            let start = monday - Duration::weeks((nw as i64) - 1);
+            let end = monday + Duration::days(6);
+
+            leptos::task::spawn_local(async move {
+                match get_issue_worklogs(issue_key.clone(), start, end).await {
+                    Ok((new_entries, new_ytd)) => {
+                        last_data.update(|opt| {
+                            if let Some(ts) = opt.as_mut() {
+                                // Replace all worklogs for this issue.
+                                ts.worklogs.retain(|w| w.issue_key != issue_key);
+                                ts.worklogs.extend(new_entries);
+                                ts.ytd_hours.insert(issue_key.clone(), new_ytd);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        log::warn!("[on_popup_changed] get_issue_worklogs failed: {}", e);
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "hydrate"))]
+        { let _ = issue_key; }
     });
 
     // ── Search input handler with debounce + cancellation ──

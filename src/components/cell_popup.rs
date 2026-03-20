@@ -109,7 +109,7 @@ pub fn CellPopup(
     #[prop(default = false)]
     is_today: bool,
     on_close: Callback<()>,
-    on_changed: Callback<()>,
+    on_changed: Callback<String>,
     #[prop(default = String::new())]
     site_url: String,
 ) -> impl IntoView {
@@ -346,6 +346,7 @@ pub fn CellPopup(
             on_close.run(());
 
             leptos::task::spawn_local(async move {
+                let issue_key_for_changed = ik.clone();
                 conn.request_started();
                 for (ik, id) in deletes {
                     let _ = server_delete_worklog(ik, id).await;
@@ -363,7 +364,7 @@ pub fn CellPopup(
                 if let Some(latch) = latch {
                     latch.arrive();
                 }
-                on_changed.run(());
+                on_changed.run(issue_key_for_changed);
             });
         }
     };
