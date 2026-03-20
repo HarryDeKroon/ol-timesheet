@@ -97,7 +97,18 @@ cfg_if::cfg_if! {
             use axum::routing::get;
             use leptos_axum::{LeptosRoutes, generate_route_list};
 
+            dotenvy::dotenv().ok();
             env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
+            // Initialise OAuth configuration from environment variables.
+            timesheet::auth::init_oauth(timesheet::auth::OAuthConfig {
+                client_id: std::env::var("JIRA_CLIENT_ID")
+                    .expect("JIRA_CLIENT_ID env var not set"),
+                client_secret: std::env::var("JIRA_CLIENT_SECRET")
+                    .expect("JIRA_CLIENT_SECRET env var not set"),
+                redirect_uri: std::env::var("OAUTH_REDIRECT_URI")
+                    .unwrap_or_else(|_| "http://localhost:8081/auth/callback".to_string()),
+            });
 
             let conf =
                 leptos::config::get_configuration(None).expect("Failed to load Leptos configuration");
@@ -105,20 +116,12 @@ cfg_if::cfg_if! {
             let leptos_options = conf.leptos_options;
             let routes = generate_route_list(timesheet::app::App);
 
-            // Prefetch the current week's timesheet data in the background so the
-            // very first page load is served from cache instead of blocking on
-            // slow Jira API round-trips.
-            tokio::spawn(async {
-                timesheet::api::jira::prefetch_current_week().await;
-            });
-
-            // Build the router with LeptosOptions as the state type.
-            // .leptos_routes() and .fallback(file_and_error_handler(..)) both
-            // require LeptosOptions: FromRef<S>, so the state must be set up
-            // before .with_state() collapses S → ().
-            let app: Router<LeptosOptions> = Router::new();
-            let app = app
+            // Build the router with AppState to carry LeptosOptions.
+            let app: Router = Router::new()
                 .route("/ws/heartbeat", get(heartbeat_ws_handler))
+                .route("/auth/login", get(timesheet::auth::login_handler))
+                .route("/auth/callback", get(timesheet::auth::callback_handler))
+                .route("/auth/logout", get(timesheet::auth::logout_handler))
                 .leptos_routes(&leptos_options, routes, {
                     let leptos_options = leptos_options.clone();
                     move || shell(leptos_options.clone())

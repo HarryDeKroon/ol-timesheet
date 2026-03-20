@@ -53,6 +53,12 @@ pub fn remove_by_prefix(prefix: &str) {
     }
 }
 
+/// Remove all cache entries that belong to a specific user.
+/// Called on logout to prevent stale data being served to a new session.
+pub fn remove_user_cache(account_id: &str) {
+    remove_by_prefix(&format!("{}:", account_id));
+}
+
 /// Remove all entries from the cache.
 pub fn clear_all() {
     if let Ok(mut cache) = CACHE.lock() {

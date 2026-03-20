@@ -18,8 +18,9 @@ pub async fn server_add_worklog(
     hours: f64,
     comment: String,
 ) -> Result<(), ServerFnError> {
-    let settings = crate::model::load_settings();
-    crate::api::jira::add_worklog(&settings, &issue_key, date, hours, &comment)
+    let (_, session) = crate::auth::current_user_session().await?;
+    let creds = session.jira_credentials();
+    crate::api::jira::add_worklog(&creds, &issue_key, date, hours, &comment)
         .await
         .map(|_| ())
         .map_err(|e| ServerFnError::new(e))
@@ -33,9 +34,10 @@ pub async fn server_update_worklog(
     comment: String,
     comment_adf: Option<String>,
 ) -> Result<(), ServerFnError> {
-    let settings = crate::model::load_settings();
+    let (_, session) = crate::auth::current_user_session().await?;
+    let creds = session.jira_credentials();
     crate::api::jira::update_worklog(
-        &settings,
+        &creds,
         &issue_key,
         &worklog_id,
         hours,
@@ -51,17 +53,20 @@ pub async fn server_delete_worklog(
     issue_key: String,
     worklog_id: String,
 ) -> Result<(), ServerFnError> {
-    let settings = crate::model::load_settings();
-    crate::api::jira::delete_worklog(&settings, &issue_key, &worklog_id)
+    let (_, session) = crate::auth::current_user_session().await?;
+    let creds = session.jira_credentials();
+    crate::api::jira::delete_worklog(&creds, &issue_key, &worklog_id)
         .await
         .map_err(|e| ServerFnError::new(e))
 }
 
 /// Build a Jira URL that deep-links to a specific worklog entry.
-fn worklog_url(issue_key: &str, worklog_id: &str) -> String {
+fn worklog_url(site_url: &str, issue_key: &str, worklog_id: &str) -> String {
     format!(
-        "https://uplandsoftware.atlassian.net/browse/{}?focusedWorklogId={}",
-        issue_key, worklog_id,
+        "{}/browse/{}?focusedWorklogId={}",
+        site_url.trim_end_matches('/'),
+        issue_key,
+        worklog_id,
     )
 }
 
@@ -105,6 +110,8 @@ pub fn CellPopup(
     is_today: bool,
     on_close: Callback<()>,
     on_changed: Callback<()>,
+    #[prop(default = String::new())]
+    site_url: String,
 ) -> impl IntoView {
     let i18n = use_context::<RwSignal<I18n>>().expect("I18n context");
     let conn = use_connection();
@@ -648,7 +655,7 @@ pub fn CellPopup(
                         let hours_sig = entry.hours_sig;
                         let comment_sig = entry.comment_sig;
                         let deleted = entry.deleted;
-                        let link_href = worklog_url(&ik, &id);
+                        let link_href = worklog_url(&site_url, &ik, &id);
 
                         let delete_worklog = move |_| {
                             deleted.set(true);

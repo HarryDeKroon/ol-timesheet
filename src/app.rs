@@ -1,4 +1,3 @@
-use crate::components::settings_dialog::SettingsDialog;
 use crate::components::timesheet_view::TimesheetView;
 use crate::connection::provide_connection_context;
 use crate::i18n::I18n;
@@ -10,9 +9,14 @@ use leptos::web_sys;
 // Import SVG flag icons from the shared flags module
 pub use crate::flags::{FLAG_FR, FLAG_NL, FLAG_UK};
 
-#[server(ValidateToken, "/api")]
-pub async fn validate_token(token: String) -> Result<bool, ServerFnError> {
-    Ok(crate::model::validate_token(&token))
+/// Check whether the current request has a valid authenticated session.
+/// Returns `Some(display_name)` when logged in, `None` when not.
+#[server(CheckSession, "/api")]
+pub async fn check_session() -> Result<Option<String>, ServerFnError> {
+    match crate::auth::current_user_session().await {
+        Ok((_, session)) => Ok(Some(session.display_name)),
+        Err(_) => Ok(None),
+    }
 }
 
 #[component]
@@ -25,34 +29,26 @@ pub fn App() -> impl IntoView {
     provide_connection_context();
 
     // ── Auth state ──
-    // None = still checking, Some(false) = show settings, Some(true) = show timesheet
+    // None = still checking, Some(false) = unauthenticated, Some(true) = authenticated
     let view_state = RwSignal::new(Option::<bool>::None);
 
-    #[cfg(not(feature = "ssr"))]
-    {
-        let token = web_sys::window()
-            .and_then(|w| w.local_storage().ok()?)
-            .and_then(|s| s.get_item("timesheet_token").ok()?);
+    leptos::task::spawn_local(async move {
+        let authenticated = matches!(check_session().await, Ok(Some(_)));
+        view_state.set(Some(authenticated));
 
-        leptos::task::spawn_local(async move {
-            let confirmed = if let Some(token) = token {
-                matches!(validate_token(token).await, Ok(true))
-            } else {
-                false
-            };
-            view_state.set(Some(confirmed));
-        });
-    }
-
-    let on_settings_ok = Callback::new(move |_: ()| {
-        view_state.set(Some(true));
+        #[cfg(not(feature = "ssr"))]
+        if !authenticated {
+            if let Some(window) = web_sys::window() {
+                let _ = window.location().set_href("/auth/login");
+            }
+        }
     });
 
     view! {
         <main>
             {move || match view_state.get() {
                 None => view! { <div class="loading">{move || i18n.get().t(crate::i18n::keys::LOADING)}</div> }.into_any(),
-                Some(false) => view! { <SettingsDialog on_ok=on_settings_ok on_cancel=on_settings_ok /> }.into_any(),
+                Some(false) => view! { <div class="loading">{move || i18n.get().t(crate::i18n::keys::LOADING)}</div> }.into_any(),
                 Some(true) => view! { <TimesheetView /> }.into_any(),
             }}
         </main>

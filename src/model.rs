@@ -3,20 +3,13 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
-// ─── User Settings ──────────────────────────────────────────────────────────
+// ─── User preferences (replaces the old credential-bearing Settings) ─────────
 
+/// User-editable preferences stored per-user.  These fields are shown in the
+/// Settings dialog; Jira credentials come from OAuth2 and are never entered
+/// manually.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
-    pub email: String,
-    pub upland_jira_token: String,
-    /// Legacy field – ignored at runtime but kept so that existing
-    /// `settings.json` files that still contain it deserialize without error.
-    #[serde(default, rename = "meeting_keys", skip_serializing)]
-    pub(crate) _meeting_keys: Option<String>,
-    pub bitbucket_username: String,
-    pub bitbucket_app_password: String,
-    pub ol_jira_username: String,
-    pub ol_jira_password: String,
     pub git_folder: String,
     #[serde(default = "default_git_poll_interval_minutes")]
     pub git_poll_interval_minutes: u32,
@@ -35,6 +28,45 @@ fn default_hours_per_week() -> f64 {
 }
 fn default_hours_per_day() -> f64 {
     8.0
+}
+
+// ─── Per-user runtime session (server-side only) ─────────────────────────────
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "ssr")] {
+        /// All runtime state for one authenticated user.
+        #[derive(Clone, Debug, Serialize, Deserialize)]
+        pub struct UserSession {
+            /// Jira `accountId` (stable identifier used as cache-key prefix).
+            pub account_id: String,
+            pub email: String,
+            pub display_name: String,
+            pub avatar_url: String,
+            /// OAuth2 Bearer access token.
+            pub access_token: String,
+            /// Rotating refresh token — update on every refresh.
+            pub refresh_token: String,
+            /// Unix timestamp (UTC) when access_token expires.
+            pub expires_at: i64,
+            /// Atlassian cloud instance ID.
+            pub cloud_id: String,
+            /// Jira site base URL, e.g. "https://uplandsoftware.atlassian.net".
+            pub site_url: String,
+            /// User-editable preferences (git folder, hours/day, etc.).
+            pub preferences: Settings,
+        }
+
+        impl UserSession {
+            pub fn jira_credentials(&self) -> crate::api::jira::JiraCredentials {
+                crate::api::jira::JiraCredentials {
+                    access_token: self.access_token.clone(),
+                    cloud_id: self.cloud_id.clone(),
+                    email: self.email.clone(),
+                    account_id: self.account_id.clone(),
+                }
+            }
+        }
+    }
 }
 
 // ─── Timesheet domain types (shared between client and server) ──────────────
@@ -81,6 +113,10 @@ pub struct TimesheetData {
     /// Git commit messages per (issue_key, date), if available.
     #[serde(default)]
     pub git_commits: Option<std::collections::HashMap<String, Vec<String>>>,
+    /// Jira site base URL, e.g. "https://uplandsoftware.atlassian.net".
+    /// Used by the client to build worklog deep-link URLs.
+    #[serde(default)]
+    pub site_url: String,
 }
 
 impl TimesheetData {
@@ -157,49 +193,4 @@ pub enum ConnectionStatus {
     Online,
     Waiting,
     Offline,
-}
-
-// ─── Server-side persistence ────────────────────────────────────────────────
-
-cfg_if::cfg_if! {
-    if #[cfg(feature = "ssr")] {
-        fn config_dir() -> std::path::PathBuf {
-            let dirs = directories::ProjectDirs::from("com", "objectiflune", "timesheet")
-                .expect("Could not determine config directory");
-            let config_dir = dirs.config_dir().to_path_buf();
-            std::fs::create_dir_all(&config_dir).ok();
-            config_dir
-        }
-
-        pub fn load_settings() -> Settings {
-            let path = config_dir().join("settings.json");
-            if path.exists() {
-                let data = std::fs::read_to_string(&path).unwrap_or_default();
-                serde_json::from_str(&data).unwrap_or_default()
-            } else {
-                Settings::default()
-            }
-        }
-
-        pub fn save_settings(settings: &Settings) -> Result<String, String> {
-            let dir = config_dir();
-            let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-            std::fs::write(dir.join("settings.json"), data).map_err(|e| e.to_string())?;
-
-            // Generate and store a new token
-            let token = uuid::Uuid::new_v4().to_string();
-            std::fs::write(dir.join("token"), &token).map_err(|e| e.to_string())?;
-            Ok(token)
-        }
-
-        pub fn validate_token(token: &str) -> bool {
-            let path = config_dir().join("token");
-            if path.exists() {
-                if let Ok(stored) = std::fs::read_to_string(&path) {
-                    return stored.trim() == token.trim();
-                }
-            }
-            false
-        }
-    }
 }

@@ -117,13 +117,11 @@ pub async fn check_for_new_git_commits(
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<HashMap<String, String>, ServerFnError> {
-    use crate::model::load_settings;
-
-    let settings = load_settings();
-    let git_folder = settings.git_folder;
+    let (_, session) = crate::auth::current_user_session().await?;
+    let git_folder = session.preferences.git_folder;
     let mut users = HashSet::new();
-    if !settings.email.is_empty() {
-        users.insert(settings.email.clone());
+    if !session.email.is_empty() {
+        users.insert(session.email.clone());
     }
 
     let commits = fetch_git_commit_data(&git_folder, start, end)

@@ -1,5 +1,7 @@
 pub mod api;
 pub mod app;
+#[cfg(feature = "ssr")]
+pub mod auth;
 pub mod components;
 pub mod connection;
 pub mod flags;

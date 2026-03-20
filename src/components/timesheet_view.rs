@@ -28,8 +28,12 @@ pub async fn get_timesheet_data(
     end: NaiveDate,
 ) -> Result<(TimesheetData, Option<(String, String)>), ServerFnError> {
     use crate::api::jira::timesheet_data_cache_key;
+    use std::sync::Arc;
 
-    let cache_key = timesheet_data_cache_key(start, end);
+    let (_, session) = crate::auth::current_user_session().await?;
+    let creds = Arc::new(session.jira_credentials());
+
+    let cache_key = timesheet_data_cache_key(&creds.account_id, start, end);
 
     // Check assembled-data cache first — this makes revisiting a week instant.
     if let Some(cached_json) = crate::api::cache::get(&cache_key) {
@@ -39,18 +43,16 @@ pub async fn get_timesheet_data(
             let selected_monday = end - chrono::Duration::days(6);
             let num_weeks = (((end - start).num_days() + 1) / 7).max(1) as usize;
             tokio::spawn(crate::api::jira::prefetch_adjacent_weeks(
+                creds.clone(),
                 selected_monday,
                 num_weeks,
             ));
-            // Return a tuple with None for user_profile (since we don't cache it)
             return Ok((ts, None));
         }
     }
 
-    let settings = crate::model::load_settings();
-
     // 1. Fetch issues from Jira (with worklogs in date range)
-    let jira_items = crate::api::jira::fetch_work_items(&settings, start, end)
+    let jira_items = crate::api::jira::fetch_work_items(&creds, start, end)
         .await
         .map_err(|e| ServerFnError::new(e))?;
 
@@ -61,7 +63,7 @@ pub async fn get_timesheet_data(
     let mut all_worklogs = Vec::new();
     let mut ytd_hours: HashMap<String, f64> = HashMap::new();
     for item in &all_items {
-        match crate::api::jira::fetch_worklogs(&settings, &item.key, start, end).await {
+        match crate::api::jira::fetch_worklogs(&creds, &item.key, start, end).await {
             Ok((wls, total)) => {
                 all_worklogs.extend(wls);
                 ytd_hours.insert(item.key.clone(), total);
@@ -87,12 +89,11 @@ pub async fn get_timesheet_data(
     #[cfg(feature = "ssr")]
     let git_commits = {
         use std::collections::HashSet;
-        let git_folder = settings.git_folder.clone();
+        let git_folder = session.preferences.git_folder.clone();
         let work_item_keys: HashSet<_> = all_items.iter().map(|item| item.key.clone()).collect();
-        // Collect user identifiers for matching git commit authors.
         let mut users: HashSet<String> = HashSet::new();
-        if !settings.email.is_empty() {
-            users.insert(settings.email.clone());
+        if !session.email.is_empty() {
+            users.insert(session.email.clone());
         }
         match fetch_git_commits(&git_folder, &work_item_keys, &users, start, end) {
             Ok(map) => Some(map),
@@ -112,21 +113,16 @@ pub async fn get_timesheet_data(
     let ts = TimesheetData {
         work_items: all_items,
         worklogs: all_worklogs,
-        hours_per_week: settings.hours_per_week,
-        hours_per_day: settings.hours_per_day,
+        hours_per_week: session.preferences.hours_per_week,
+        hours_per_day: session.preferences.hours_per_day,
         ytd_hours,
         git_commits,
+        site_url: session.site_url.clone(),
         ..Default::default()
     };
 
-    // Fetch Jira user profile (avatar and display name)
-    let user_profile = match crate::api::jira::fetch_jira_user_profile(&settings).await {
-        Ok(profile) => Some((profile.avatar_urls.size_48, profile.display_name)),
-        Err(e) => {
-            log::warn!("Failed to fetch Jira user profile: {}", e);
-            None
-        }
-    };
+    // User profile is already in the session — return avatar and display name directly.
+    let user_profile = Some((session.avatar_url.clone(), session.display_name.clone()));
 
     // Cache the assembled result so the same week is instant next time.
     if let Ok(json) = serde_json::to_string(&ts) {
@@ -138,6 +134,7 @@ pub async fn get_timesheet_data(
     let selected_monday = end - chrono::Duration::days(6);
     let num_weeks = (((end - start).num_days() + 1) / 7).max(1) as usize;
     tokio::spawn(crate::api::jira::prefetch_adjacent_weeks(
+        creds,
         selected_monday,
         num_weeks,
     ));
@@ -147,15 +144,17 @@ pub async fn get_timesheet_data(
 
 #[server(ClearCache, "/api")]
 pub async fn clear_cache() -> Result<(), ServerFnError> {
-    log::info!("[clear_cache] clearing all cached work items");
-    crate::api::cache::clear_all();
+    let (_, session) = crate::auth::current_user_session().await?;
+    log::info!("[clear_cache] clearing cache for user {}", session.account_id);
+    crate::api::cache::remove_user_cache(&session.account_id);
     Ok(())
 }
 
 #[server(SearchWorkItems, "/api")]
 pub async fn search_work_items(query: String) -> Result<Vec<WorkItem>, ServerFnError> {
-    let settings = crate::model::load_settings();
-    let items = crate::api::jira::search_issues(&settings, &query, 12)
+    let (_, session) = crate::auth::current_user_session().await?;
+    let creds = session.jira_credentials();
+    let items = crate::api::jira::search_issues(&creds, &query, 12)
         .await
         .map_err(|e| ServerFnError::new(e))?;
     Ok(items)
@@ -192,6 +191,8 @@ struct PopupInfo {
     is_today: bool,
     /// Inline CSS position computed at open time; updated by dragging.
     position_style: RwSignal<String>,
+    /// The Jira site URL, used for worklog deep-link URLs.
+    site_url: String,
 }
 
 impl Clone for PopupInfo {
@@ -208,6 +209,7 @@ impl Clone for PopupInfo {
             is_git_log: self.is_git_log,
             is_today: self.is_today,
             position_style: self.position_style.clone(),
+            site_url: self.site_url.clone(),
         }
     }
 }
@@ -873,6 +875,7 @@ pub fn TimesheetView() -> impl IntoView {
                     let dec_sep = i.decimal_separator;
                     let hpd = ts.hours_per_day;
                     let hpw = ts.hours_per_week;
+                    let site_url = ts.site_url.clone();
                     let w_l = i.t(keys::WEEK_ABBR);
                     let d_l = i.t(keys::DAY_ABBR);
                     let h_l = i.t(keys::HOUR_ABBR);
@@ -1021,6 +1024,7 @@ pub fn TimesheetView() -> impl IntoView {
                                     let suggested_comment = if title.is_empty() { None } else { Some(title.clone()) };
                                     let cell_is_today = is_today;
                                     let cell_summary = summary.clone();
+                                    let site_url_for_cell = site_url.clone();
                                     week_cells.push(view! {
                                         <td class={cls} title={title}>
                                             <span
@@ -1055,6 +1059,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                         is_git_log,
                                                         is_today: cell_is_today,
                                                         position_style: RwSignal::new(pos_style),
+                                                        site_url: site_url_for_cell.clone(),
                                                     };
                                                     open_popups.update(|ps| ps.push(popup));
                                                 }
@@ -1134,6 +1139,7 @@ pub fn TimesheetView() -> impl IntoView {
                                 };
                                 let we_cell_is_today = is_today_weekend;
                                 let we_summary = summary.clone();
+                                let site_url_for_we = site_url.clone();
                                 week_cells.push(view! {
                                     <td class={weekend_cls} title={we_title}>
                                         <span
@@ -1168,6 +1174,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                     is_git_log,
                                                     is_today: we_cell_is_today,
                                                     position_style: RwSignal::new(pos_style),
+                                                    site_url: site_url_for_we.clone(),
                                                 };
                                                 open_popups.update(|ps| ps.push(popup));
                                             }
@@ -1298,6 +1305,13 @@ pub fn TimesheetView() -> impl IntoView {
                     >
                         <span class="icon-settings">{"⚙️"}</span>
                     </button>
+                    <a
+                        class="nav-btn nav-logout"
+                        href="/auth/logout"
+                        title=move || i18n.get().t(keys::LOGOUT)
+                    >
+                        <span class="icon-logout">{"🚪"}</span>
+                    </a>
                     {lang_dropdown()}
                     <span
                         class={move || match conn.status() {
@@ -1377,6 +1391,7 @@ pub fn TimesheetView() -> impl IntoView {
                            is_today={info.is_today}
                            on_close=on_close_popup
                            on_changed=on_popup_changed
+                           site_url={info.site_url}
                         />
                     }
                 }}

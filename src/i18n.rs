@@ -73,6 +73,7 @@ pub mod keys {
     pub const OPEN_IN_JIRA: &str = "open_in_jira";
     pub const OPEN_SETTINGS: &str = "open_settings";
     pub const REFRESH_CACHED: &str = "refresh_cached";
+    pub const LOGOUT: &str = "logout";
     pub const BITBUCKET_DISABLED: &str = "bitbucket_disabled";
     pub const OL_JIRA_DISABLED: &str = "ol_jira_disabled";
     pub const ISSUE_ICON_ALT: &str = "issue_icon_alt";
@@ -148,6 +149,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_IN_JIRA, "Open in Jira"),
         (keys::OPEN_SETTINGS, "Open settings"),
         (keys::REFRESH_CACHED, "Refresh cached work items"),
+        (keys::LOGOUT, "Log out"),
         (keys::BITBUCKET_DISABLED, "Bitbucket integration is currently disabled due to API deprecation."),
         (keys::OL_JIRA_DISABLED, "OL Jira integration is disabled because over three years have passed since the last update."),
         (keys::ISSUE_ICON_ALT, "Issue icon"),
@@ -237,6 +239,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_IN_JIRA, "Ouvrir dans Jira"),
         (keys::OPEN_SETTINGS, "Ouvrir les paramètres"),
         (keys::REFRESH_CACHED, "Rafraîchir les éléments en cache"),
+        (keys::LOGOUT, "Se déconnecter"),
         (keys::BITBUCKET_DISABLED, "L\u{2019}intégration Bitbucket est actuellement désactivée en raison de la dépréciation de l\u{2019}API."),
         (keys::OL_JIRA_DISABLED, "L\u{2019}intégration OL Jira est désactivée car plus de trois ans se sont écoulés depuis la dernière mise à jour."),
         (keys::ISSUE_ICON_ALT, "Icône du ticket"),
@@ -311,6 +314,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_IN_JIRA, "Openen in Jira"),
         (keys::OPEN_SETTINGS, "Instellingen openen"),
         (keys::REFRESH_CACHED, "Werkitems in cache vernieuwen"),
+        (keys::LOGOUT, "Uitloggen"),
         (keys::BITBUCKET_DISABLED, "Bitbucket-integratie is momenteel uitgeschakeld vanwege API-afschaffing."),
         (keys::OL_JIRA_DISABLED, "OL Jira-integratie is uitgeschakeld omdat er meer dan drie jaar zijn verstreken sinds de laatste update."),
         (keys::ISSUE_ICON_ALT, "Ticketpictogram"),
