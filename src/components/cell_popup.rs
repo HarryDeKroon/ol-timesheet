@@ -11,14 +11,32 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, atomic::AtomicBool};
 
+/// Generate a replay-protection nonce in `{unix_secs}:{random_hex}` format.
+/// On WASM uses `js_sys`; on the server side (SSR compilation stub) uses chrono.
+fn new_request_nonce() -> String {
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "ssr")] {
+            // Compiled for SSR but never called at runtime from this path.
+            format!("{}:{}", chrono::Utc::now().timestamp(), uuid::Uuid::new_v4())
+        } else {
+            let ts = (js_sys::Date::now() / 1000.0) as i64;
+            let r1 = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+            let r2 = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+            format!("{}:{:08x}{:08x}", ts, r1, r2)
+        }
+    }
+}
+
 #[server(AddWorklog, "/api")]
 pub async fn server_add_worklog(
     issue_key: String,
     date: NaiveDate,
     hours: f64,
     comment: String,
+    request_nonce: String,
 ) -> Result<(), ServerFnError> {
-    let (_, session) = crate::auth::current_user_session().await?;
+    let (session_id, session) = crate::auth::current_user_session().await?;
+    crate::auth::validate_nonce(&session_id, &request_nonce)?;
     let creds = session.jira_credentials();
     crate::api::jira::add_worklog(&creds, &issue_key, date, hours, &comment)
         .await
@@ -33,8 +51,10 @@ pub async fn server_update_worklog(
     hours: f64,
     comment: String,
     comment_adf: Option<String>,
+    request_nonce: String,
 ) -> Result<(), ServerFnError> {
-    let (_, session) = crate::auth::current_user_session().await?;
+    let (session_id, session) = crate::auth::current_user_session().await?;
+    crate::auth::validate_nonce(&session_id, &request_nonce)?;
     let creds = session.jira_credentials();
     crate::api::jira::update_worklog(
         &creds,
@@ -52,8 +72,10 @@ pub async fn server_update_worklog(
 pub async fn server_delete_worklog(
     issue_key: String,
     worklog_id: String,
+    request_nonce: String,
 ) -> Result<(), ServerFnError> {
-    let (_, session) = crate::auth::current_user_session().await?;
+    let (session_id, session) = crate::auth::current_user_session().await?;
+    crate::auth::validate_nonce(&session_id, &request_nonce)?;
     let creds = session.jira_credentials();
     crate::api::jira::delete_worklog(&creds, &issue_key, &worklog_id)
         .await
@@ -349,13 +371,13 @@ pub fn CellPopup(
                 let issue_key_for_changed = ik.clone();
                 conn.request_started();
                 for (ik, id) in deletes {
-                    let _ = server_delete_worklog(ik, id).await;
+                    let _ = server_delete_worklog(ik, id, new_request_nonce()).await;
                 }
                 for (ik, id, h, comment, adf) in updates {
-                    let _ = server_update_worklog(ik, id, h, comment, adf).await;
+                    let _ = server_update_worklog(ik, id, h, comment, adf, new_request_nonce()).await;
                 }
                 for (ik, date, h, comment) in creates {
-                    let _ = server_add_worklog(ik, date, h, comment).await;
+                    let _ = server_add_worklog(ik, date, h, comment, new_request_nonce()).await;
                 }
                 conn.request_finished();
                 // Signal the flush latch (if any) *before* refetch so that
