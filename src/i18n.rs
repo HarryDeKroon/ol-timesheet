@@ -321,6 +321,9 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
     [("en", en), ("fr", fr), ("nl", nl)].into_iter().collect()
 });
 
+static DEFAULT_TRANSLATIONS: LazyLock<&HashMap<&str, &str>> =
+    LazyLock::new(|| TRANSLATIONS.get("en").unwrap());
+
 /// Internationalisation context provided to all components.
 #[derive(Clone, Debug, PartialEq)]
 pub struct I18n {
@@ -343,6 +346,14 @@ impl I18n {
             lang,
             decimal_separator,
         }
+    }
+
+    pub fn tr<'t>(&self, key: &'t str) -> &'t str {
+        TRANSLATIONS
+            .get(self.lang.as_str())
+            .and_then(|lang_map| lang_map.get(key).copied())
+            .or_else(|| DEFAULT_TRANSLATIONS.get(key).map(|s| *s))
+            .unwrap_or(key)
     }
 
     /// Look up a translation by key. Falls back to English, then to "[key]".

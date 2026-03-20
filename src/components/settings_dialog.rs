@@ -4,8 +4,6 @@ use crate::components::settings_group::SettingsGroup;
 use crate::i18n::{I18n, keys};
 use crate::model::Settings;
 use leptos::prelude::*;
-#[cfg(not(feature = "ssr"))]
-use leptos::web_sys;
 
 #[server(GetSettings, "/api")]
 pub async fn get_settings() -> Result<Settings, ServerFnError> {
@@ -24,8 +22,6 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     // Compute translated labels eagerly — safe because this component only
     // renders after hydration, when the browser locale has already been set.
     let ti = i18n.get_untracked();
-    let title_jira = ti.t(keys::UPLAND_JIRA);
-    let title_bb = ti.t(keys::BITBUCKET);
     let title_ol = ti.t(keys::OL_JIRA);
     let title_git = ti.t(keys::GIT_WORKSPACE);
     let title_prefs = ti.t(keys::PREFERENCES);
@@ -83,9 +79,11 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     Effect::new(move |_| {
         #[allow(unused_variables)]
         if let Some(Ok(token)) = save_action.value().get() {
-            #[cfg(not(feature = "ssr"))]
+            #[cfg(feature = "hydrate")]
             {
-                if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok()?) {
+                if let Some(storage) =
+                    leptos::web_sys::window().and_then(|w| w.local_storage().ok()?)
+                {
                     let _ = storage.set_item("timesheet_token", &token);
                 }
             }
@@ -120,7 +118,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
 
                 <Suspense fallback=move || view! { <p>{move || i18n.get().t(keys::LOADING_SETTINGS)}</p> }>
 
-                    <SettingsGroup title=title_jira.clone()>
+                    <SettingsGroup title={ti.tr(keys::UPLAND_JIRA)}>
                             <label>{lbl_email.clone()}":"</label>
                             <input
                                 type="text"
@@ -137,7 +135,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                             />
                         </SettingsGroup>
 
-                        <SettingsGroup title=title_bb.clone() disabled=true>
+                        <SettingsGroup title={ti.t(keys::BITBUCKET)} disabled=true>
                             <div class="warning warning-full-row">
                                 {bitbucket_disabled_msg.clone()}
                             </div>

@@ -543,6 +543,7 @@ main {
 	grid-column: 1;
 	grid-row: 2;
 	font-size: x-small;
+	text-align: center;
 }
 
 .popup-summary {
@@ -562,9 +563,9 @@ main {
 .popup-date {
 	grid-column: 1;
 	grid-row: 1;
-	margin-left: 0.75em;
 	color: #888;
 	font-size: x-small;
+	text-align: center;
 }
 
 .popup-entries {

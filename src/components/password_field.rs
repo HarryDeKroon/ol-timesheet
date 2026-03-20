@@ -8,20 +8,19 @@ pub fn PasswordField(
     value: RwSignal<String>,
     #[prop(optional)] disabled: bool,
 ) -> impl IntoView {
-    let label_view = if let Some(url) = link_url {
-        let label_clone = label.clone();
+    let password_label = if let Some(url) = link_url {
         view! {
             <label>
-                <a href={url} target="_blank" rel="noopener noreferrer">{label_clone}</a>":"
+                <a href={url} target="_blank" rel="noopener noreferrer">{label}</a>":"
             </label>
         }
         .into_any()
     } else {
-        view! { <label>{label.clone()}":"</label> }.into_any()
+        view! { <label>{label}":"</label> }.into_any()
     };
 
     view! {
-        {label_view}
+        {password_label}
         <input
             type="password"
             placeholder={placeholder}

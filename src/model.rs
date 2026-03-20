@@ -161,45 +161,45 @@ pub enum ConnectionStatus {
 
 // ─── Server-side persistence ────────────────────────────────────────────────
 
-#[cfg(feature = "ssr")]
-fn config_dir() -> std::path::PathBuf {
-    let dirs = directories::ProjectDirs::from("com", "objectiflune", "timesheet")
-        .expect("Could not determine config directory");
-    let config_dir = dirs.config_dir().to_path_buf();
-    std::fs::create_dir_all(&config_dir).ok();
-    config_dir
-}
+cfg_if::cfg_if! {
+    if #[cfg(feature = "ssr")] {
+        fn config_dir() -> std::path::PathBuf {
+            let dirs = directories::ProjectDirs::from("com", "objectiflune", "timesheet")
+                .expect("Could not determine config directory");
+            let config_dir = dirs.config_dir().to_path_buf();
+            std::fs::create_dir_all(&config_dir).ok();
+            config_dir
+        }
 
-#[cfg(feature = "ssr")]
-pub fn load_settings() -> Settings {
-    let path = config_dir().join("settings.json");
-    if path.exists() {
-        let data = std::fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        Settings::default()
-    }
-}
+        pub fn load_settings() -> Settings {
+            let path = config_dir().join("settings.json");
+            if path.exists() {
+                let data = std::fs::read_to_string(&path).unwrap_or_default();
+                serde_json::from_str(&data).unwrap_or_default()
+            } else {
+                Settings::default()
+            }
+        }
 
-#[cfg(feature = "ssr")]
-pub fn save_settings(settings: &Settings) -> Result<String, String> {
-    let dir = config_dir();
-    let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("settings.json"), data).map_err(|e| e.to_string())?;
+        pub fn save_settings(settings: &Settings) -> Result<String, String> {
+            let dir = config_dir();
+            let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+            std::fs::write(dir.join("settings.json"), data).map_err(|e| e.to_string())?;
 
-    // Generate and store a new token
-    let token = uuid::Uuid::new_v4().to_string();
-    std::fs::write(dir.join("token"), &token).map_err(|e| e.to_string())?;
-    Ok(token)
-}
+            // Generate and store a new token
+            let token = uuid::Uuid::new_v4().to_string();
+            std::fs::write(dir.join("token"), &token).map_err(|e| e.to_string())?;
+            Ok(token)
+        }
 
-#[cfg(feature = "ssr")]
-pub fn validate_token(token: &str) -> bool {
-    let path = config_dir().join("token");
-    if path.exists() {
-        if let Ok(stored) = std::fs::read_to_string(&path) {
-            return stored.trim() == token.trim();
+        pub fn validate_token(token: &str) -> bool {
+            let path = config_dir().join("token");
+            if path.exists() {
+                if let Ok(stored) = std::fs::read_to_string(&path) {
+                    return stored.trim() == token.trim();
+                }
+            }
+            false
         }
     }
-    false
 }

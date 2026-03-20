@@ -531,7 +531,7 @@ pub async fn fetch_jira_user_profile(
         .map_err(|e| e.to_string())?;
 
     let text = resp.text().await.map_err(|e| e.to_string())?;
-    log::info!("Raw Jira /myself response: {}", text);
+    log::trace!("Raw Jira /myself response: {}", text);
 
     serde_json::from_str::<JiraUserProfile>(&text)
         .map_err(|e| format!("deserialization error: {e}"))
@@ -621,7 +621,7 @@ pub async fn fetch_work_items(
         settings.email
     );
 
-    log::info!("[fetch_work_items] worklogDate >= {start} AND worklogDate <= {end}");
+    log::trace!("[fetch_work_items] worklogDate >= {start} AND worklogDate <= {end}");
 
     // Fetch both result sets and merge/deduplicate by issue key
     let worklog_items = fetch_work_items_by_jql(settings, &worklog_jql).await?;
@@ -759,7 +759,7 @@ pub async fn search_issues(
         urlencoding_jql(trimmed),
     );
 
-    log::info!("[search_issues] picker query={}", trimmed);
+    log::trace!("[search_issues] picker query={}", trimmed);
 
     let resp = HTTP
         .get(&url)
@@ -1023,7 +1023,7 @@ pub async fn add_worklog(
         .header("Content-Type", "application/json")
         .json(&body);
 
-    log::info!("About to request: {resp:?}\nwith: {body:?}");
+    log::trace!("About to request: {resp:?}\nwith: {body:?}");
 
     let resp = HTTP
         .post(&url)
@@ -1135,13 +1135,13 @@ async fn prefetch_range(start: NaiveDate, end: NaiveDate) -> bool {
 
     // Already in cache — nothing to do.
     if cache::get(&cache_key).is_some() {
-        log::info!("[prefetch] Already cached: {} .. {}", start, end);
+        log::debug!("[prefetch] Already cached: {} .. {}", start, end);
         return false;
     }
 
     let settings = crate::model::load_settings();
     if settings.email.is_empty() || settings.upland_jira_token.is_empty() {
-        log::info!("[prefetch] Skipping – Jira credentials not configured");
+        log::warn!("[prefetch] Skipping – Jira credentials not configured");
         return false;
     }
 
@@ -1248,7 +1248,7 @@ pub async fn prefetch_current_week() {
 
     let settings = crate::model::load_settings();
     if settings.email.is_empty() || settings.upland_jira_token.is_empty() {
-        log::info!("[prefetch] Skipping – Jira credentials not configured");
+        log::warn!("[prefetch] Skipping – Jira credentials not configured");
         return;
     }
 
