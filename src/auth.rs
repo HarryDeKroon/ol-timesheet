@@ -412,6 +412,30 @@ pub async fn current_user_session(
     Ok((session_id, user))
 }
 
+/// Lightweight synchronous check: returns `true` if the request carries a
+/// valid, non-expired signed session cookie.  Used by non-Leptos handlers
+/// (e.g. the WebSocket heartbeat upgrade) that cannot call `current_user_session`.
+/// Does **not** reset the sliding TTL — use `current_user_session` for that.
+pub fn is_authenticated(headers: &HeaderMap) -> bool {
+    let raw_token = match extract_raw_cookie(headers) {
+        Some(t) => t,
+        None => return false,
+    };
+    let session_id = match verify_session_token(&raw_token) {
+        Some(id) => id,
+        None => return false,
+    };
+    let now_unix = chrono::Utc::now().timestamp();
+    let sessions = match SESSIONS.lock() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    sessions
+        .get(&session_id)
+        .map(|e| now_unix < e.expires_unix)
+        .unwrap_or(false)
+}
+
 /// Validate a replay-protection nonce for a state-changing request.
 ///
 /// The `nonce` must be in the format `{unix_timestamp_secs}:{random_hex}`.

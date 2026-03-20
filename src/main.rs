@@ -30,10 +30,17 @@ cfg_if::cfg_if! {
         ///
         /// The connection staying open signals "online" to the client.  We send
         /// a periodic ping so proxies / browsers don't close the idle socket.
+        /// Requires a valid authenticated session; unauthenticated upgrades are
+        /// rejected with 401.
         async fn heartbeat_ws_handler(
             ws: axum::extract::ws::WebSocketUpgrade,
-        ) -> impl axum::response::IntoResponse {
-            ws.on_upgrade(handle_heartbeat_socket)
+            headers: axum::http::HeaderMap,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            if !timesheet::auth::is_authenticated(&headers) {
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+            ws.on_upgrade(handle_heartbeat_socket).into_response()
         }
 
         /// Handle the WebSocket connection for heartbeat.
