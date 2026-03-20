@@ -28,8 +28,12 @@ pub fn App() -> impl IntoView {
     // ── Connection heartbeat context ──
     provide_connection_context();
 
-    // ── Auth check — Resource works on both SSR and client ──
-    let session_resource = Resource::new(|| (), |_| check_session());
+    // ── Auth check ──
+    // LocalResource only runs on the client (never during SSR), which is
+    // required because TimesheetView uses Rc-based non-Send types that panic
+    // when dropped on a different thread during SSR async rendering.
+    // On SSR the resource stays pending → the Suspense fallback is rendered.
+    let session_resource = LocalResource::new(|| check_session());
 
     view! {
         <main>
@@ -43,7 +47,7 @@ pub fn App() -> impl IntoView {
                         }.into_any(),
                         Some(Ok(Some(_))) => view! { <TimesheetView /> }.into_any(),
                         Some(_) => {
-                            // Unauthenticated — redirect to login page on the client.
+                            // Unauthenticated — redirect to login page.
                             #[cfg(not(feature = "ssr"))]
                             {
                                 if let Some(window) = web_sys::window() {
