@@ -182,13 +182,19 @@ pub async fn login_handler() -> impl IntoResponse {
 
     let scopes = "read:jira-work write:jira-work read:jira-user offline_access";
     let auth_url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256&prompt=consent",
+        "{}?audience=api.atlassian.com&response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256&prompt=consent",
         ATLASSIAN_AUTH_URL,
         percent_encode(&config.client_id),
         percent_encode(&config.redirect_uri),
         percent_encode(scopes),
         percent_encode(&csrf),
         percent_encode(&pkce_challenge),
+    );
+
+    log::info!(
+        "[auth] Redirecting to Atlassian OAuth (client_id={}…, redirect_uri={})",
+        config.client_id.chars().take(8).collect::<String>(),
+        config.redirect_uri,
     );
 
     Redirect::to(&auth_url)
