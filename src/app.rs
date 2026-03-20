@@ -28,29 +28,35 @@ pub fn App() -> impl IntoView {
     // ── Connection heartbeat context ──
     provide_connection_context();
 
-    // ── Auth state ──
-    // None = still checking, Some(false) = unauthenticated, Some(true) = authenticated
-    let view_state = RwSignal::new(Option::<bool>::None);
-
-    leptos::task::spawn_local(async move {
-        let authenticated = matches!(check_session().await, Ok(Some(_)));
-        view_state.set(Some(authenticated));
-
-        #[cfg(not(feature = "ssr"))]
-        if !authenticated {
-            if let Some(window) = web_sys::window() {
-                let _ = window.location().set_href("/auth/login");
-            }
-        }
-    });
+    // ── Auth check — Resource works on both SSR and client ──
+    let session_resource = Resource::new(|| (), |_| check_session());
 
     view! {
         <main>
-            {move || match view_state.get() {
-                None => view! { <div class="loading">{move || i18n.get().t(crate::i18n::keys::LOADING)}</div> }.into_any(),
-                Some(false) => view! { <div class="loading">{move || i18n.get().t(crate::i18n::keys::LOADING)}</div> }.into_any(),
-                Some(true) => view! { <TimesheetView /> }.into_any(),
-            }}
+            <Suspense fallback=move || view! {
+                <div class="loading">{move || i18n.get().t(crate::i18n::keys::LOADING)}</div>
+            }>
+                {move || {
+                    match session_resource.get() {
+                        None => view! {
+                            <div class="loading">{move || i18n.get().t(crate::i18n::keys::LOADING)}</div>
+                        }.into_any(),
+                        Some(Ok(Some(_))) => view! { <TimesheetView /> }.into_any(),
+                        Some(_) => {
+                            // Unauthenticated — redirect to login page on the client.
+                            #[cfg(not(feature = "ssr"))]
+                            {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_href("/auth/login");
+                                }
+                            }
+                            view! {
+                                <div class="loading">{move || i18n.get().t(crate::i18n::keys::LOADING)}</div>
+                            }.into_any()
+                        }
+                    }
+                }}
+            </Suspense>
         </main>
     }
 }
