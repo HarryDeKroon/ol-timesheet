@@ -14,8 +14,7 @@ pub async fn get_settings() -> Result<Settings, ServerFnError> {
 #[server(SaveSettings, "/api")]
 pub async fn save_settings(settings: Settings) -> Result<(), ServerFnError> {
     let (session_id, session) = crate::auth::current_user_session().await?;
-    crate::auth::save_user_prefs(&session.account_id, &settings)
-        .map_err(ServerFnError::new)?;
+    crate::auth::save_user_prefs(&session.account_id, &settings).map_err(ServerFnError::new)?;
     crate::auth::update_session_prefs(&session_id, settings);
     Ok(())
 }

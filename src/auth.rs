@@ -28,8 +28,7 @@ const NONCE_WINDOW_SECS: i64 = 300;
 
 const ATLASSIAN_AUTH_URL: &str = "https://auth.atlassian.com/authorize";
 const ATLASSIAN_TOKEN_URL: &str = "https://auth.atlassian.com/oauth/token";
-const ATLASSIAN_RESOURCES_URL: &str =
-    "https://api.atlassian.com/oauth/token/accessible-resources";
+const ATLASSIAN_RESOURCES_URL: &str = "https://api.atlassian.com/oauth/token/accessible-resources";
 
 // ─── App config directory ─────────────────────────────────────────────────────
 
@@ -346,8 +345,8 @@ pub fn save_user_prefs(account_id: &str, prefs: &Settings) -> Result<(), String>
 /// Verifies the HMAC-signed session cookie, checks the 4-day sliding expiry,
 /// refreshes the OAuth access token when needed, and resets the 4-day sliding
 /// window (marking the session dirty for background persistence).
-pub async fn current_user_session(
-) -> Result<(String, UserSession), leptos::prelude::ServerFnError> {
+pub async fn current_user_session() -> Result<(String, UserSession), leptos::prelude::ServerFnError>
+{
     let headers: axum::http::HeaderMap = leptos_axum::extract()
         .await
         .map_err(|_| leptos::prelude::ServerFnError::new("Failed to extract request headers"))?;
@@ -441,10 +440,7 @@ pub fn is_authenticated(headers: &HeaderMap) -> bool {
 /// The `nonce` must be in the format `{unix_timestamp_secs}:{random_hex}`.
 /// Checks that the timestamp is within ±5 minutes of server time and that
 /// the random part has not been seen in the current replay window.
-pub fn validate_nonce(
-    session_id: &str,
-    nonce: &str,
-) -> Result<(), leptos::prelude::ServerFnError> {
+pub fn validate_nonce(session_id: &str, nonce: &str) -> Result<(), leptos::prelude::ServerFnError> {
     let colon = nonce
         .find(':')
         .ok_or_else(|| leptos::prelude::ServerFnError::new("Invalid nonce format"))?;

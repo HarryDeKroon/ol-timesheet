@@ -11,10 +11,7 @@ use log;
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 fn jira_base(cloud_id: &str) -> String {
-    format!(
-        "https://api.atlassian.com/ex/jira/{}/rest/api/3",
-        cloud_id
-    )
+    format!("https://api.atlassian.com/ex/jira/{}/rest/api/3", cloud_id)
 }
 
 fn bearer_header(token: &str) -> String {
@@ -553,10 +550,15 @@ pub fn timesheet_data_cache_key(account_id: &str, start: NaiveDate, end: NaiveDa
 /// Called after add/update/delete worklog operations.
 pub fn invalidate_worklogs_for_issue(account_id: &str, issue_key: &str) {
     cache::remove(&worklog_cache_key(account_id, issue_key));
-    // Also invalidate all assembled timesheet data for this user since any of
+    // Invalidate all assembled timesheet data for this user since any of
     // them might include this issue.
     let user_prefix = format!("{}:{}", account_id, TIMESHEET_DATA_PREFIX);
     cache::remove_by_prefix(&user_prefix);
+    // Also invalidate all JQL search caches for this user. The worklog
+    // author query (worklogAuthor = "..." AND worklogDate >= ...) won't
+    // include a newly-worklocked issue until its cached result is evicted.
+    let search_prefix = format!("{}:jira_search:", account_id);
+    cache::remove_by_prefix(&search_prefix);
 }
 
 // ─── Cached worklog entry (serialised into the cache) ───────────────────────
@@ -618,7 +620,10 @@ pub async fn fetch_work_items(
 
 /// Helper: fetch work items matching a single JQL query, with caching and
 /// cursor-based pagination.
-async fn fetch_work_items_by_jql(creds: &JiraCredentials, jql: &str) -> Result<Vec<WorkItem>, String> {
+async fn fetch_work_items_by_jql(
+    creds: &JiraCredentials,
+    jql: &str,
+) -> Result<Vec<WorkItem>, String> {
     // Check cache
     let cache_key = format!("{}:jira_search:{}", creds.account_id, jql);
     if let Some(cached) = cache::get(&cache_key) {
@@ -989,19 +994,20 @@ pub async fn add_worklog(
     let started = format!("{}T12:00:00.000+0000", date);
     let seconds = (hours * 3600.0).round() as u64;
 
-    let body = serde_json::json!({
-        "started": started,
-        "timeSpentSeconds": seconds,
-        "comment": make_adf_comment(comment),
-    });
+    let body = if comment.is_empty() {
+        serde_json::json!({
+            "started": started,
+            "timeSpentSeconds": seconds,
+        })
+    } else {
+        serde_json::json!({
+            "started": started,
+            "timeSpentSeconds": seconds,
+            "comment": make_adf_comment(comment),
+        })
+    };
 
-    let resp = HTTP
-        .post(&url)
-        .header("Authorization", bearer_header(&creds.access_token))
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    log::trace!("About to request: {resp:?}\nwith: {body:?}");
+    log::trace!("[add_worklog] POST {url} body={body:?}");
 
     let resp = HTTP
         .post(&url)
@@ -1041,18 +1047,29 @@ pub async fn update_worklog(
     comment: &str,
     original_adf: Option<&str>,
 ) -> Result<(), String> {
-    let url = format!("{}/issue/{}/worklog/{}", jira_base(&creds.cloud_id), issue_key, worklog_id);
+    let url = format!(
+        "{}/issue/{}/worklog/{}",
+        jira_base(&creds.cloud_id),
+        issue_key,
+        worklog_id
+    );
     let seconds = (hours * 3600.0).round() as u64;
-    let comment_value = match original_adf {
-        Some(adf_json) => {
-            serde_json::from_str(adf_json).unwrap_or_else(|_| make_adf_comment(comment))
-        }
-        None => make_adf_comment(comment),
+    let body = if comment.is_empty() {
+        serde_json::json!({
+            "timeSpentSeconds": seconds,
+        })
+    } else {
+        let comment_value = match original_adf {
+            Some(adf_json) => {
+                serde_json::from_str(adf_json).unwrap_or_else(|_| make_adf_comment(comment))
+            }
+            None => make_adf_comment(comment),
+        };
+        serde_json::json!({
+            "timeSpentSeconds": seconds,
+            "comment": comment_value,
+        })
     };
-    let body = serde_json::json!({
-        "timeSpentSeconds": seconds,
-        "comment": comment_value,
-    });
 
     let resp = HTTP
         .put(&url)
@@ -1080,7 +1097,12 @@ pub async fn delete_worklog(
     issue_key: &str,
     worklog_id: &str,
 ) -> Result<(), String> {
-    let url = format!("{}/issue/{}/worklog/{}", jira_base(&creds.cloud_id), issue_key, worklog_id);
+    let url = format!(
+        "{}/issue/{}/worklog/{}",
+        jira_base(&creds.cloud_id),
+        issue_key,
+        worklog_id
+    );
     let resp = HTTP
         .delete(&url)
         .header("Authorization", bearer_header(&creds.access_token))

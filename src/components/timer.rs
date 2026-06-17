@@ -18,15 +18,17 @@
 //! 5. **Stop** — cancel the running/paused timer. The duration is **not**
 //!    updated (the previous interval already accounted for it).
 
+use cfg_if::cfg_if;
 use leptos::prelude::*;
 use std::collections::HashMap;
 
-#[cfg(feature = "hydrate")]
-const MINUTES_TO_MILLISECONDS: u32 = 60_000;
-#[cfg(feature = "hydrate")]
+cfg_if! {
+    if #[cfg(feature = "hydrate")] {
+    const MINUTES_TO_MILLISECONDS: u32 = 60_000;
 const TIMER_INTERVAL: u32 = 5 * MINUTES_TO_MILLISECONDS;
-#[cfg(feature = "hydrate")]
 const TIMER_INTERVAL_SHORT: u32 = TIMER_INTERVAL >> 1;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TimerId — uniquely identifies a timer row (issue_key + worklog-row index)

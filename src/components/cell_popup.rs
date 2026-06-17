@@ -132,8 +132,7 @@ pub fn CellPopup(
     is_today: bool,
     on_close: Callback<()>,
     on_changed: Callback<String>,
-    #[prop(default = String::new())]
-    site_url: String,
+    #[prop(default = String::new())] site_url: String,
 ) -> impl IntoView {
     let i18n = use_context::<RwSignal<I18n>>().expect("I18n context");
     let conn = use_connection();
@@ -370,16 +369,33 @@ pub fn CellPopup(
             leptos::task::spawn_local(async move {
                 let issue_key_for_changed = ik.clone();
                 conn.request_started();
+                let mut errors: Vec<String> = Vec::new();
                 for (ik, id) in deletes {
-                    let _ = server_delete_worklog(ik, id, new_request_nonce()).await;
+                    if let Err(e) = server_delete_worklog(ik, id, new_request_nonce()).await {
+                        errors.push(format!("Delete failed: {}", e));
+                    }
                 }
                 for (ik, id, h, comment, adf) in updates {
-                    let _ = server_update_worklog(ik, id, h, comment, adf, new_request_nonce()).await;
+                    if let Err(e) =
+                        server_update_worklog(ik, id, h, comment, adf, new_request_nonce()).await
+                    {
+                        errors.push(format!("Update failed: {}", e));
+                    }
                 }
                 for (ik, date, h, comment) in creates {
-                    let _ = server_add_worklog(ik, date, h, comment, new_request_nonce()).await;
+                    if let Err(e) =
+                        server_add_worklog(ik, date, h, comment, new_request_nonce()).await
+                    {
+                        errors.push(format!("Save failed: {}", e));
+                    }
                 }
                 conn.request_finished();
+                if !errors.is_empty() {
+                    let msg = errors.join("\n");
+                    log::error!("[CellPopup] Worklog save error(s): {}", msg);
+                    #[cfg(feature = "hydrate")]
+                    web_sys::window().map(|w| w.alert_with_message(&msg));
+                }
                 // Signal the flush latch (if any) *before* refetch so that
                 // callers waiting on the latch (e.g. language-switch reload)
                 // can proceed now that the server state is up-to-date.

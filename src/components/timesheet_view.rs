@@ -145,7 +145,10 @@ pub async fn get_timesheet_data(
 #[server(ClearCache, "/api")]
 pub async fn clear_cache() -> Result<(), ServerFnError> {
     let (_, session) = crate::auth::current_user_session().await?;
-    log::info!("[clear_cache] clearing cache for user {}", session.account_id);
+    log::info!(
+        "[clear_cache] clearing cache for user {}",
+        session.account_id
+    );
     crate::api::cache::remove_user_cache(&session.account_id);
     Ok(())
 }
@@ -739,7 +742,9 @@ pub fn TimesheetView() -> impl IntoView {
             });
         }
         #[cfg(not(feature = "hydrate"))]
-        { let _ = issue_key; }
+        {
+            let _ = issue_key;
+        }
     });
 
     // ── Search input handler with debounce + cancellation ──
