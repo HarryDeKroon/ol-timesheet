@@ -428,7 +428,10 @@ pub fn provide_timer_context() -> TimerManager {
 
 /// Obtain the [`TimerManager`] from context.
 pub fn use_timer() -> TimerManager {
-    use_context::<TimerManager>().expect("TimerManager context not provided")
+    use_context::<TimerManager>().unwrap_or_else(|| {
+        log::error!("TimerManager context not provided, using fallback manager");
+        TimerManager::new()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -465,13 +468,16 @@ fn schedule_interval(
         );
     }) as Box<dyn FnOnce()>);
 
-    let handle = web_sys::window()
-        .expect("no window")
-        .set_timeout_with_callback_and_timeout_and_arguments_0(
-            cb.as_ref().unchecked_ref(),
-            delay_ms as i32,
-        )
-        .unwrap_or(0);
+    let handle = if let Some(window) = web_sys::window() {
+        window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                delay_ms as i32,
+            )
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
     cb.forget();
     handle

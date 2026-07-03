@@ -33,10 +33,20 @@ const ATLASSIAN_RESOURCES_URL: &str = "https://api.atlassian.com/oauth/token/acc
 // ─── App config directory ─────────────────────────────────────────────────────
 
 fn app_config_dir() -> std::path::PathBuf {
-    let dirs = directories::ProjectDirs::from("com", "objectiflune", "timesheet")
-        .expect("Could not determine config directory");
-    let dir = dirs.config_dir().to_path_buf();
-    std::fs::create_dir_all(&dir).ok();
+    let dir = if let Some(dirs) = directories::ProjectDirs::from("com", "objectiflune", "timesheet")
+    {
+        dirs.config_dir().to_path_buf()
+    } else {
+        let fallback = std::env::temp_dir().join("objectiflune-timesheet");
+        log::warn!(
+            "[auth] Could not determine config directory, using {}",
+            fallback.display()
+        );
+        fallback
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("[auth] Could not create config directory {}: {}", dir.display(), e);
+    }
     dir
 }
 
@@ -80,7 +90,12 @@ fn load_or_generate_secret_key() -> Vec<u8> {
 /// Sign `session_id` with HMAC-SHA256 and return `{session_id}.{hmac_hex}`.
 /// The session_id is an opaque UUID — no user information is embedded.
 fn sign_session_token(session_id: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(&SECRET_KEY).expect("HMAC init");
+    let mut mac = if let Ok(mac) = HmacSha256::new_from_slice(&SECRET_KEY) {
+        mac
+    } else {
+        log::error!("[auth] Failed to initialise HMAC signer");
+        return format!("{}.", session_id);
+    };
     mac.update(session_id.as_bytes());
     let code = mac.finalize().into_bytes();
     format!("{}.{}", session_id, hex::encode(code))
@@ -106,14 +121,20 @@ pub struct OAuthConfig {
 }
 
 static OAUTH_CONFIG: OnceLock<OAuthConfig> = OnceLock::new();
+static FALLBACK_OAUTH_CONFIG: LazyLock<OAuthConfig> = LazyLock::new(|| OAuthConfig {
+    client_id: std::env::var("JIRA_CLIENT_ID").unwrap_or_default(),
+    client_secret: std::env::var("JIRA_CLIENT_SECRET").unwrap_or_default(),
+    redirect_uri: std::env::var("OAUTH_REDIRECT_URI")
+        .unwrap_or_else(|_| "http://localhost:8081/auth/callback".to_string()),
+});
 
 /// Initialise OAuth config, secret key, persistent sessions, and background
 /// flush task.  Must be called once inside the async runtime before any
 /// request is handled.
 pub fn init_oauth(config: OAuthConfig) {
-    OAUTH_CONFIG
-        .set(config)
-        .expect("OAuth config already initialised");
+    if OAUTH_CONFIG.set(config).is_err() {
+        log::warn!("[auth] OAuth config already initialised");
+    }
     // Eagerly initialise the secret key so any generation happens at startup.
     let _ = &*SECRET_KEY;
     // Load sessions persisted from previous runs.
@@ -123,9 +144,10 @@ pub fn init_oauth(config: OAuthConfig) {
 }
 
 fn oauth_config() -> &'static OAuthConfig {
-    OAUTH_CONFIG
-        .get()
-        .expect("OAuth config not initialised — call auth::init_oauth() at startup")
+    OAUTH_CONFIG.get().unwrap_or_else(|| {
+        log::error!("[auth] OAuth config not initialised — using fallback environment values");
+        &FALLBACK_OAUTH_CONFIG
+    })
 }
 
 // ─── Session store ────────────────────────────────────────────────────────────
@@ -181,7 +203,12 @@ fn load_sessions_from_disk() {
         Err(_) => return,
     };
     let now_unix = chrono::Utc::now().timestamp();
-    let mut sessions = SESSIONS.lock().expect("session lock");
+    let mut sessions = if let Ok(sessions) = SESSIONS.lock() {
+        sessions
+    } else {
+        log::error!("[auth] Session lock unavailable while loading sessions");
+        return;
+    };
     let mut loaded = 0usize;
     let mut skipped = 0usize;
     for entry in read_dir.flatten() {
@@ -264,7 +291,12 @@ fn flush_dirty_sessions() {
     let mut to_delete: Vec<String> = Vec::new();
 
     {
-        let mut sessions = SESSIONS.lock().expect("session lock");
+        let mut sessions = if let Ok(sessions) = SESSIONS.lock() {
+            sessions
+        } else {
+            log::error!("[auth] Session lock unavailable while flushing sessions");
+            return;
+        };
         // Remove expired entries from memory and collect them for file deletion.
         sessions.retain(|sid, entry| {
             if now_unix >= entry.expires_unix {
@@ -496,22 +528,26 @@ pub fn update_session_prefs(session_id: &str, prefs: Settings) {
 // ─── Axum route handlers ──────────────────────────────────────────────────────
 
 /// GET /auth/login — build PKCE challenge, store pending state, redirect to Atlassian.
-pub async fn login_handler() -> impl IntoResponse {
+pub async fn login_handler() -> Response {
     let config = oauth_config();
     let (pkce_verifier, pkce_challenge) = generate_pkce();
     let csrf = uuid::Uuid::new_v4().to_string();
 
     {
-        let mut pending = PENDING.lock().unwrap();
-        let now = Instant::now();
-        pending.retain(|_, e| now.duration_since(e.created_at) < PENDING_TTL);
-        pending.insert(
-            csrf.clone(),
-            PendingEntry {
-                pkce_verifier,
-                created_at: Instant::now(),
-            },
-        );
+        if let Ok(mut pending) = PENDING.lock() {
+            let now = Instant::now();
+            pending.retain(|_, e| now.duration_since(e.created_at) < PENDING_TTL);
+            pending.insert(
+                csrf.clone(),
+                PendingEntry {
+                    pkce_verifier,
+                    created_at: Instant::now(),
+                },
+            );
+        } else {
+            log::error!("[auth] Pending OAuth state lock unavailable");
+            return error_redirect("state_store_unavailable");
+        }
     }
 
     let scopes = "read:jira-work write:jira-work read:jira-user offline_access";
@@ -531,7 +567,7 @@ pub async fn login_handler() -> impl IntoResponse {
         config.redirect_uri,
     );
 
-    Redirect::to(&auth_url)
+    Redirect::to(&auth_url).into_response()
 }
 
 #[derive(Deserialize)]
@@ -559,15 +595,18 @@ pub async fn callback_handler(Query(params): Query<CallbackQuery>) -> Response {
 
     // Validate CSRF token and retrieve PKCE verifier.
     let pkce_verifier = {
-        let mut pending = PENDING.lock().unwrap();
-        match pending.remove(&state) {
-            Some(entry) => {
-                if Instant::now().duration_since(entry.created_at) > PENDING_TTL {
-                    return error_redirect("expired_state");
+        if let Ok(mut pending) = PENDING.lock() {
+            match pending.remove(&state) {
+                Some(entry) => {
+                    if Instant::now().duration_since(entry.created_at) > PENDING_TTL {
+                        return error_redirect("expired_state");
+                    }
+                    entry.pkce_verifier
                 }
-                entry.pkce_verifier
+                None => return error_redirect("invalid_state"),
             }
-            None => return error_redirect("invalid_state"),
+        } else {
+            return error_redirect("state_store_unavailable");
         }
     };
 
@@ -620,18 +659,22 @@ pub async fn callback_handler(Query(params): Query<CallbackQuery>) -> Response {
     let expires_unix = now_unix + SESSION_TTL_SECS;
 
     {
-        let mut sessions = SESSIONS.lock().unwrap();
-        sessions.insert(
-            session_id.clone(),
-            SessionEntry {
-                user: user.clone(),
-                expires_at: Instant::now() + SESSION_TTL,
-                expires_unix,
-                created_unix: now_unix,
-                dirty: true, // persist immediately on next flush
-                seen_nonces: HashMap::new(),
-            },
-        );
+        if let Ok(mut sessions) = SESSIONS.lock() {
+            sessions.insert(
+                session_id.clone(),
+                SessionEntry {
+                    user: user.clone(),
+                    expires_at: Instant::now() + SESSION_TTL,
+                    expires_unix,
+                    created_unix: now_unix,
+                    dirty: true, // persist immediately on next flush
+                    seen_nonces: HashMap::new(),
+                },
+            );
+        } else {
+            log::error!("[auth] Session lock unavailable while creating session");
+            return error_redirect("session_store_unavailable");
+        }
     }
 
     log::info!("[auth] Session created for account_id={}", account_id);
@@ -645,10 +688,12 @@ pub async fn callback_handler(Query(params): Query<CallbackQuery>) -> Response {
         SESSION_TTL.as_secs()
     );
     let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::SET_COOKIE,
-        HeaderValue::from_str(&cookie_value).unwrap(),
-    );
+    let set_cookie = if let Ok(value) = HeaderValue::from_str(&cookie_value) {
+        value
+    } else {
+        return error_redirect("invalid_cookie_header");
+    };
+    headers.insert(axum::http::header::SET_COOKIE, set_cookie);
 
     (headers, Redirect::to("/")).into_response()
 }
@@ -658,8 +703,11 @@ pub async fn logout_handler(raw_headers: axum::http::HeaderMap) -> Response {
     if let Some(raw_token) = extract_raw_cookie(&raw_headers) {
         if let Some(sid) = verify_session_token(&raw_token) {
             let account_id = {
-                let mut sessions = SESSIONS.lock().unwrap();
-                sessions.remove(&sid).map(|e| e.user.account_id)
+                if let Ok(mut sessions) = SESSIONS.lock() {
+                    sessions.remove(&sid).map(|e| e.user.account_id)
+                } else {
+                    None
+                }
             };
             if let Some(aid) = account_id {
                 crate::api::cache::remove_user_cache(&aid);
@@ -674,10 +722,11 @@ pub async fn logout_handler(raw_headers: axum::http::HeaderMap) -> Response {
         SESSION_COOKIE
     );
     let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::SET_COOKIE,
-        HeaderValue::from_str(&clear_cookie).unwrap(),
-    );
+    if let Ok(value) = HeaderValue::from_str(&clear_cookie) {
+        headers.insert(axum::http::header::SET_COOKIE, value);
+    } else {
+        log::warn!("[auth] Failed to build logout Set-Cookie header");
+    }
 
     (headers, Redirect::to("/auth/login")).into_response()
 }

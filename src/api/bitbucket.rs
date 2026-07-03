@@ -12,7 +12,8 @@
 //
 // static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 //
-// static JIRA_KEY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Z][A-Z0-9]+-\d+").unwrap());
+// static JIRA_KEY_RE: LazyLock<Option<Regex>> =
+//     LazyLock::new(|| Regex::new(r"[A-Z][A-Z0-9]+-\d+").ok());
 //
 // // ─── Bitbucket API response types ───────────────────────────────────────────
 //

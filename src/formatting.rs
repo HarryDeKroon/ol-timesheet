@@ -88,8 +88,8 @@ pub fn format_hours_long(
     }
 }
 
-static LONG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:(\d+)\s*w)?\s*(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?").unwrap()
+static LONG_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:(\d+)\s*w)?\s*(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?").ok()
 });
 
 /// Build a locale-aware regex for the long duration format.
@@ -97,7 +97,7 @@ static LONG_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// The pattern matches `<digits><label>` pairs in the order
 /// weeks / days / hours / minutes, where each label comes from i18n.
 /// All groups are optional. The regex is case-insensitive.
-fn build_long_re(w: &str, d: &str, h: &str, m: &str) -> Regex {
+fn build_long_re(w: &str, d: &str, h: &str, m: &str) -> Option<Regex> {
     Regex::new(&format!(
         r"(?i)(?:(\d+)\s*{w})?\s*(?:(\d+)\s*{d})?\s*(?:(\d+)\s*{h})?\s*(?:(\d+)\s*{m})?",
         w = regex::escape(w),
@@ -105,7 +105,8 @@ fn build_long_re(w: &str, d: &str, h: &str, m: &str) -> Regex {
         h = regex::escape(h),
         m = regex::escape(m),
     ))
-    .unwrap_or_else(|_| LONG_RE.clone())
+    .ok()
+    .or_else(|| LONG_RE.clone())
 }
 
 /// Try to parse the long duration format against a given regex.
@@ -174,14 +175,17 @@ pub fn parse_hours(
     }
 
     // Try locale-specific long format first (e.g. "1u 5m" for Dutch).
-    let locale_re = build_long_re(w_label, d_label, h_label, m_label);
-    if let Some(total) = try_long_format(&locale_re, trimmed, hours_per_day, hours_per_week) {
-        return Some(total);
+    if let Some(locale_re) = build_long_re(w_label, d_label, h_label, m_label) {
+        if let Some(total) = try_long_format(&locale_re, trimmed, hours_per_day, hours_per_week) {
+            return Some(total);
+        }
     }
 
     // Fall back to English labels (w/d/h/m) so input like "1h 30m" always works.
-    if let Some(total) = try_long_format(&LONG_RE, trimmed, hours_per_day, hours_per_week) {
-        return Some(total);
+    if let Some(default_re) = LONG_RE.as_ref() {
+        if let Some(total) = try_long_format(default_re, trimmed, hours_per_day, hours_per_week) {
+            return Some(total);
+        }
     }
 
     None

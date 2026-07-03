@@ -350,7 +350,10 @@ fn compute_num_weeks(viewport_width: f64) -> usize {
 
 #[component]
 pub fn TimesheetView() -> impl IntoView {
-    let i18n = use_context::<RwSignal<I18n>>().expect("I18n context");
+    let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| {
+        log::error!("I18n context not provided in TimesheetView, using English fallback");
+        RwSignal::new(I18n::default())
+    });
 
     // ── Timer context ──
     provide_timer_context();
@@ -684,12 +687,14 @@ pub fn TimesheetView() -> impl IntoView {
             }) as Box<dyn Fn()>);
 
             if let Some(window) = web_sys::window() {
-                window
+                if let Err(e) = window
                     .set_interval_with_callback_and_timeout_and_arguments_0(
                         closure.as_ref().unchecked_ref(),
                         poll_interval_ms as i32,
                     )
-                    .expect("failed to set interval");
+                {
+                    log::warn!("failed to set git polling interval: {:?}", e);
+                }
             }
             closure.forget();
         });
@@ -769,10 +774,16 @@ pub fn TimesheetView() -> impl IntoView {
         leptos::task::spawn_local(async move {
             // 300 ms debounce via a JS Promise-based sleep.
             let promise = js_sys::Promise::new(&mut |resolve, _| {
-                web_sys::window()
-                    .unwrap()
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 300)
-                    .unwrap();
+                if let Some(window) = web_sys::window() {
+                    if window
+                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 300)
+                        .is_err()
+                    {
+                        let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+                    }
+                } else {
+                    let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+                }
             });
             let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 

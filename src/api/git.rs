@@ -92,13 +92,16 @@ cfg_if::cfg_if! {
                         if let Some(key) = extract_work_item_key(&commit.message) {
                             if work_item_keys.contains(&key) {
                                 let map_key = format!("{}:{}", key, date);
-                                let key_strip_regex =
+                                let cleaned_message = if let Ok(key_strip_regex) =
                                     Regex::new(&format!(r"(?i)^{}[:\\-\\s]+", regex::escape(&key)))
-                                        .unwrap();
-                                let cleaned_message = key_strip_regex
-                                    .replace(&commit.message, "")
-                                    .trim_start()
-                                    .to_string();
+                                {
+                                    key_strip_regex
+                                        .replace(&commit.message, "")
+                                        .trim_start()
+                                        .to_string()
+                                } else {
+                                    commit.message.trim_start().to_string()
+                                };
                                 map.entry(map_key).or_default().push(cleaned_message);
                             }
                         }

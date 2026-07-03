@@ -325,8 +325,9 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
     [("en", en), ("fr", fr), ("nl", nl)].into_iter().collect()
 });
 
+static EMPTY_TRANSLATIONS: LazyLock<HashMap<&str, &str>> = LazyLock::new(HashMap::new);
 static DEFAULT_TRANSLATIONS: LazyLock<&HashMap<&str, &str>> =
-    LazyLock::new(|| TRANSLATIONS.get("en").unwrap());
+    LazyLock::new(|| TRANSLATIONS.get("en").unwrap_or(&EMPTY_TRANSLATIONS));
 
 /// Internationalisation context provided to all components.
 #[derive(Clone, Debug, PartialEq)]

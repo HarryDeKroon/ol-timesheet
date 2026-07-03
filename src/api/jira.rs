@@ -919,7 +919,8 @@ pub async fn fetch_worklogs(
     // Year-to-date total: sum only worklogs whose date falls within the
     // current calendar year.
     let current_year = chrono::Local::now().date_naive().year();
-    let ytd_start = NaiveDate::from_ymd_opt(current_year, 1, 1).unwrap();
+    let ytd_start = NaiveDate::from_ymd_opt(current_year, 1, 1)
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
 
     let ytd_total: f64 = user_worklogs
         .iter()

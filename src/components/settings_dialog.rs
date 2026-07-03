@@ -21,7 +21,10 @@ pub async fn save_settings(settings: Settings) -> Result<(), ServerFnError> {
 
 #[component]
 pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl IntoView {
-    let i18n = use_context::<RwSignal<I18n>>().expect("I18n context");
+    let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| {
+        log::error!("I18n context not provided in SettingsDialog, using English fallback");
+        RwSignal::new(I18n::default())
+    });
 
     let ti = i18n.get_untracked();
     let title_git = ti.t(keys::GIT_WORKSPACE);

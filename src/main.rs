@@ -108,17 +108,34 @@ cfg_if::cfg_if! {
             env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
             // Initialise OAuth configuration from environment variables.
+            let client_id = match std::env::var("JIRA_CLIENT_ID") {
+                Ok(value) => value,
+                Err(e) => {
+                    log::error!("JIRA_CLIENT_ID env var not set: {}", e);
+                    return;
+                }
+            };
+            let client_secret = match std::env::var("JIRA_CLIENT_SECRET") {
+                Ok(value) => value,
+                Err(e) => {
+                    log::error!("JIRA_CLIENT_SECRET env var not set: {}", e);
+                    return;
+                }
+            };
             timesheet::auth::init_oauth(timesheet::auth::OAuthConfig {
-                client_id: std::env::var("JIRA_CLIENT_ID")
-                    .expect("JIRA_CLIENT_ID env var not set"),
-                client_secret: std::env::var("JIRA_CLIENT_SECRET")
-                    .expect("JIRA_CLIENT_SECRET env var not set"),
+                client_id,
+                client_secret,
                 redirect_uri: std::env::var("OAUTH_REDIRECT_URI")
                     .unwrap_or_else(|_| "http://localhost:8081/auth/callback".to_string()),
             });
 
-            let conf =
-                leptos::config::get_configuration(None).expect("Failed to load Leptos configuration");
+            let conf = match leptos::config::get_configuration(None) {
+                Ok(conf) => conf,
+                Err(e) => {
+                    log::error!("Failed to load Leptos configuration: {}", e);
+                    return;
+                }
+            };
             let addr = conf.leptos_options.site_addr;
             let leptos_options = conf.leptos_options;
             let routes = generate_route_list(timesheet::app::App);
@@ -136,13 +153,17 @@ cfg_if::cfg_if! {
                 .fallback(leptos_axum::file_and_error_handler(shell))
                 .with_state(leptos_options);
 
-            let listener = tokio::net::TcpListener::bind(&addr)
-                .await
-                .unwrap_or_else(|_| panic!("Failed to bind to {}", &addr));
+            let listener = match tokio::net::TcpListener::bind(&addr).await {
+                Ok(listener) => listener,
+                Err(e) => {
+                    log::error!("Failed to bind to {}: {}", &addr, e);
+                    return;
+                }
+            };
 
-            axum::serve(listener, app.into_make_service())
-                .await
-                .expect("Server failed to start");
+            if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+                log::error!("Server failed to start: {}", e);
+            }
         }
 
     } else {

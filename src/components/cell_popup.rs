@@ -134,7 +134,10 @@ pub fn CellPopup(
     on_changed: Callback<String>,
     #[prop(default = String::new())] site_url: String,
 ) -> impl IntoView {
-    let i18n = use_context::<RwSignal<I18n>>().expect("I18n context");
+    let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| {
+        log::error!("I18n context not provided in CellPopup, using English fallback");
+        RwSignal::new(I18n::default())
+    });
     let conn = use_connection();
     let timer_mgr = use_timer();
     let flush_mgr = use_popup_flush();
