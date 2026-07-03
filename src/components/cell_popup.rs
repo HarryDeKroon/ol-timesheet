@@ -1,5 +1,9 @@
 use crate::components::popup_flush::{FlushLatch, use_popup_flush};
-use crate::components::timer::{ProgressInfo, TimerId, TimerPhase, use_timer};
+use crate::components::timer::{
+    PersistedTimerPhase, PersistedTimerPopup, PersistedTimerRow, PersistedTimerState, ProgressInfo,
+    TimerId, TimerPhase, ensure_timer_storage_initialized, remove_persisted_timer_popup,
+    save_persisted_timer_popup, upsert_persisted_timer_row, use_timer,
+};
 use crate::connection::use_connection;
 use crate::formatting::{format_hours_long, parse_hours};
 use crate::i18n::{I18n, keys};
@@ -8,6 +12,7 @@ use chrono::NaiveDate;
 use leptos::prelude::*;
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -100,6 +105,8 @@ pub fn CellPopup(
     hours_per_week: f64,
     suggested_comment: Option<String>,
     is_git_log: bool,
+    #[prop(default = false)] is_weekend: bool,
+    restored_timer_popup: Option<PersistedTimerPopup>,
     /// Whether this popup's date column is today (enables timer controls).
     #[prop(default = false)]
     is_today: bool,
@@ -113,6 +120,41 @@ pub fn CellPopup(
 
     let issue_key_for_close = issue_key.clone();
     let date_for_close = date;
+
+    let restored_popup = restored_timer_popup.filter(|popup| {
+        popup.issue_key == issue_key && popup.date == date && !popup.rows.is_empty()
+    });
+    let restored_existing_rows: HashMap<String, PersistedTimerRow> = restored_popup
+        .as_ref()
+        .map(|popup| {
+            popup
+                .rows
+                .iter()
+                .filter_map(|row| row.worklog_id.clone().map(|id| (id, row.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let restored_rows_by_index: HashMap<usize, PersistedTimerRow> = restored_popup
+        .as_ref()
+        .map(|popup| {
+            popup
+                .rows
+                .iter()
+                .map(|row| (row.row_index, row.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let restored_new_rows: Vec<PersistedTimerRow> = restored_popup
+        .as_ref()
+        .map(|popup| {
+            popup
+                .rows
+                .iter()
+                .filter(|row| row.worklog_id.is_none() && row.row_index >= 1000)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Create editable signals for each existing entry
     let existing: Vec<ExistingEntry> = entries
@@ -129,11 +171,20 @@ pub fn CellPopup(
                 &w.t(keys::MINUTE_ABBR),
             );
             let display_comment = e.comment.split_whitespace().collect::<Vec<_>>().join(" ");
+            let restored_row = restored_existing_rows.get(&e.id);
             ExistingEntry {
                 id: e.id.clone(),
-                hours_sig: RwSignal::new(hours_text.clone()),
+                hours_sig: RwSignal::new(
+                    restored_row
+                        .map(|row| row.hours_text.clone())
+                        .unwrap_or_else(|| hours_text.clone()),
+                ),
                 initial_hours: hours_text,
-                comment_sig: RwSignal::new(display_comment.clone()),
+                comment_sig: RwSignal::new(
+                    restored_row
+                        .map(|row| row.comment_text.clone())
+                        .unwrap_or_else(|| display_comment.clone()),
+                ),
                 display_comment,
                 comment_html: e.comment_html.clone(),
                 comment_adf: e.comment_adf.clone(),
@@ -145,14 +196,25 @@ pub fn CellPopup(
     // ── Dynamic new entry rows ──────────────────────────────────────────
     // Each new row is a tuple of (hours_signal, comment_signal).
     // There is always at least one (the blank "extra" row).
-    let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> = RwSignal::new(vec![(
+    let mut initial_new_entries: Vec<(RwSignal<String>, RwSignal<String>)> = restored_new_rows
+        .iter()
+        .map(|row| {
+            (
+                RwSignal::new(row.hours_text.clone()),
+                RwSignal::new(row.comment_text.clone()),
+            )
+        })
+        .collect();
+    initial_new_entries.push((
         RwSignal::new(String::new()),
-        RwSignal::new(if is_git_log {
-            suggested_comment.unwrap_or_default()
+        RwSignal::new(if is_git_log && restored_new_rows.is_empty() {
+            suggested_comment.clone().unwrap_or_default()
         } else {
             String::new()
         }),
-    )]);
+    ));
+    let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> =
+        RwSignal::new(initial_new_entries);
 
     // ── Drag support ──
     // We use Rc<Cell<>> for drag state because these closures
@@ -185,6 +247,216 @@ pub fn CellPopup(
 
     let issue_key_clone = issue_key.clone();
     let ik = issue_key.clone();
+    let restored_new_rows_for_restore = restored_new_rows.clone();
+    let issue_summary_for_persist = issue_summary.clone();
+    let suggested_comment_for_persist = suggested_comment.clone();
+    let saving_timer_rows = Rc::new(Cell::new(false));
+    let persist_tick = RwSignal::new(0u64);
+
+    let persist_timer_popup: Rc<dyn Fn()> = {
+        let existing = existing.clone();
+        let timer_mgr = timer_mgr.clone();
+        let new_entries = new_entries;
+        let pos_sig = pos_sig;
+        let issue_key = issue_key.clone();
+        let issue_summary = issue_summary_for_persist.clone();
+        let suggested_comment = suggested_comment_for_persist.clone();
+        Rc::new(move || {
+            let mut rows = Vec::new();
+
+            for (row_idx, entry) in existing.iter().enumerate() {
+                if entry.deleted.get_untracked() {
+                    continue;
+                }
+
+                let timer_id = TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: row_idx,
+                };
+                let Some(timer_state) = timer_mgr.persisted_state(&timer_id) else {
+                    continue;
+                };
+
+                rows.push(PersistedTimerRow {
+                    row_index: row_idx,
+                    worklog_id: Some(entry.id.clone()),
+                    hours_text: entry.hours_sig.get_untracked(),
+                    comment_text: if entry.comment_html.is_empty() {
+                        entry.comment_sig.get_untracked()
+                    } else {
+                        entry.display_comment.clone()
+                    },
+                    timer_state,
+                });
+            }
+
+            let existing_count = existing.len();
+            let new_rows = new_entries.get_untracked();
+            for (idx, (hours_sig, comment_sig)) in new_rows.iter().enumerate() {
+                let timer_id = TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: existing_count + 1000 + idx,
+                };
+                let Some(timer_state) = timer_mgr.persisted_state(&timer_id) else {
+                    continue;
+                };
+
+                rows.push(PersistedTimerRow {
+                    row_index: existing_count + 1000 + idx,
+                    worklog_id: None,
+                    hours_text: hours_sig.get_untracked(),
+                    comment_text: comment_sig.get_untracked(),
+                    timer_state,
+                });
+            }
+
+            if rows.is_empty() {
+                return;
+            }
+
+            save_persisted_timer_popup(PersistedTimerPopup {
+                issue_key: issue_key.clone(),
+                issue_summary: issue_summary.clone(),
+                date,
+                suggested_comment: suggested_comment.clone(),
+                is_git_log,
+                is_weekend,
+                position_style: Some(pos_sig.get_untracked()),
+                rows,
+            });
+        })
+    };
+
+    let popup_has_active_timers: Rc<dyn Fn() -> bool> = {
+        let existing = existing.clone();
+        let timer_mgr = timer_mgr.clone();
+        let new_entries = new_entries;
+        let issue_key = issue_key.clone();
+        Rc::new(move || {
+            for (row_idx, entry) in existing.iter().enumerate() {
+                if entry.deleted.get_untracked() {
+                    continue;
+                }
+                let timer_id = TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: row_idx,
+                };
+                if timer_mgr.is_active(&timer_id) {
+                    return true;
+                }
+            }
+
+            let existing_count = existing.len();
+            let new_rows = new_entries.get_untracked();
+            for idx in 0..new_rows.len() {
+                let timer_id = TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: existing_count + 1000 + idx,
+                };
+                if timer_mgr.is_active(&timer_id) {
+                    return true;
+                }
+            }
+
+            false
+        })
+    };
+
+    for (row_idx, entry) in existing.iter().enumerate() {
+        if let Some(restored_row) = restored_existing_rows
+            .get(&entry.id)
+            .or_else(|| restored_rows_by_index.get(&row_idx))
+        {
+            timer_mgr.restore_persisted_state(
+                TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: row_idx,
+                },
+                entry.hours_sig,
+                hours_per_day,
+                hours_per_week,
+                i18n.get_untracked().decimal_separator,
+                restored_row.timer_state.clone(),
+            );
+        }
+    }
+
+    let restored_new_entries = new_entries.get_untracked();
+    let existing_count = existing.len();
+    for (idx, restored_row) in restored_new_rows_for_restore.iter().enumerate() {
+        if let Some((hours_sig, _)) = restored_new_entries.get(idx) {
+            timer_mgr.restore_persisted_state(
+                TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: existing_count + 1000 + idx,
+                },
+                *hours_sig,
+                hours_per_day,
+                hours_per_week,
+                i18n.get_untracked().decimal_separator,
+                restored_row.timer_state.clone(),
+            );
+        }
+    }
+
+    Effect::new({
+        let existing = existing.clone();
+        let timer_mgr = timer_mgr.clone();
+        let new_entries = new_entries;
+        let issue_key = issue_key.clone();
+        let persist_timer_popup = persist_timer_popup.clone();
+        let persist_tick = persist_tick;
+        move |_| {
+            let _ = persist_tick.get();
+            for (row_idx, entry) in existing.iter().enumerate() {
+                let _ = entry.deleted.get();
+                let _ = entry.hours_sig.get();
+                let _ = entry.comment_sig.get();
+                let timer_id = TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: row_idx,
+                };
+                let _ = timer_mgr.phase(&timer_id);
+            }
+
+            let existing_count = existing.len();
+            let rows = new_entries.get();
+            for (idx, (hours_sig, comment_sig)) in rows.iter().enumerate() {
+                let _ = hours_sig.get();
+                let _ = comment_sig.get();
+                let timer_id = TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: existing_count + 1000 + idx,
+                };
+                let _ = timer_mgr.phase(&timer_id);
+            }
+
+            persist_timer_popup();
+        }
+    });
+
+    #[cfg(feature = "hydrate")]
+    {
+        use gloo_timers::callback::Interval;
+
+        let alive = alive.clone();
+        let persist_timer_popup = persist_timer_popup.clone();
+        Interval::new(60_000, move || {
+            if !alive.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            persist_timer_popup();
+        })
+        .forget();
+    }
 
     // ── Validation (Save enablement) ────────────────────────────────────
     let existing_for_validation = existing.clone();
@@ -262,6 +534,7 @@ pub fn CellPopup(
     let on_save = {
         let ik = issue_key.clone();
         let issue_key_for_stop = issue_key.clone();
+        let saving_timer_rows = saving_timer_rows.clone();
         move |latch: Option<FlushLatch>| {
             let w = i18n.get_untracked();
             let dec_sep = w.decimal_separator;
@@ -272,6 +545,7 @@ pub fn CellPopup(
             let ik = ik.clone();
 
             // Stop all timers for this popup on save
+            saving_timer_rows.set(true);
             timer_mgr.stop_all_for_popup(&issue_key_for_stop, date);
 
             let deletes: Vec<(String, String)> = existing_for_save
@@ -340,14 +614,24 @@ pub fn CellPopup(
 
             leptos::task::spawn_local(async move {
                 conn.request_started();
+                let mut saved_ok = true;
                 for (ik, id) in deletes {
-                    let _ = server_delete_worklog(ik, id).await;
+                    if server_delete_worklog(ik, id).await.is_err() {
+                        saved_ok = false;
+                    }
                 }
                 for (ik, id, h, comment, adf) in updates {
-                    let _ = server_update_worklog(ik, id, h, comment, adf).await;
+                    if server_update_worklog(ik, id, h, comment, adf)
+                        .await
+                        .is_err()
+                    {
+                        saved_ok = false;
+                    }
                 }
                 for (ik, date, h, comment) in creates {
-                    let _ = server_add_worklog(ik, date, h, comment).await;
+                    if server_add_worklog(ik, date, h, comment).await.is_err() {
+                        saved_ok = false;
+                    }
                 }
                 conn.request_finished();
                 // Signal the flush latch (if any) *before* refetch so that
@@ -355,6 +639,9 @@ pub fn CellPopup(
                 // can proceed now that the server state is up-to-date.
                 if let Some(latch) = latch {
                     latch.arrive();
+                }
+                if saved_ok {
+                    remove_persisted_timer_popup(&ik, date);
                 }
                 on_changed.run(());
             });
@@ -367,7 +654,11 @@ pub fn CellPopup(
     // navigation actions can auto-save this popup.
     {
         let existing_for_dirty = existing.clone();
+        let popup_has_active_timers = popup_has_active_timers.clone();
         let is_dirty: Rc<dyn Fn() -> bool> = Rc::new(move || {
+            if popup_has_active_timers() {
+                return false;
+            }
             // Any existing entry deleted?
             if existing_for_dirty.iter().any(|e| e.deleted.get_untracked()) {
                 return true;
@@ -400,7 +691,7 @@ pub fn CellPopup(
 
         let is_valid: Rc<dyn Fn() -> bool> = {
             let save_enabled = save_enabled.clone();
-            Rc::new(move || save_enabled.get_untracked())
+            Rc::new(move || save_enabled.get_untracked() && conn.is_available())
         };
 
         let on_save_for_flush = on_save.clone();
@@ -422,8 +713,11 @@ pub fn CellPopup(
     // ── Close handler that also stops timers ────────────────────────────
     let on_close_with_timers = {
         let ik = issue_key_for_close.clone();
+        let saving_timer_rows = saving_timer_rows.clone();
         move || {
+            saving_timer_rows.set(false);
             timer_mgr.stop_all_for_popup(&ik, date_for_close);
+            remove_persisted_timer_popup(&ik, date_for_close);
             on_close.run(());
         }
     };
@@ -434,7 +728,7 @@ pub fn CellPopup(
         let on_close_with_timers = on_close_with_timers.clone();
         move |ev: leptos::ev::KeyboardEvent| match ev.key().as_str() {
             "Enter" => {
-                if save_enabled.get() {
+                if save_enabled.get() && conn.is_available() {
                     on_save(None);
                 }
             }
@@ -485,7 +779,7 @@ pub fn CellPopup(
     // Returns a view fragment with play/pause + stop buttons, or an empty
     // spacer when timers are not applicable.
     let build_timer_buttons = move |timer_id: TimerId, hours_sig: RwSignal<String>| {
-        if !is_today {
+        if !is_today && !timer_mgr.is_active(&timer_id) {
             return view! { <span class="popup-spacer"></span> }.into_any();
         }
 
@@ -493,6 +787,11 @@ pub fn CellPopup(
         let tid_start = timer_id.clone();
         let tid_pause = timer_id.clone();
         let tid_resume = timer_id.clone();
+        let tid_persist = timer_id.clone();
+        let persist_tick = persist_tick;
+        let issue_summary = issue_summary_for_persist.clone();
+        let suggested_comment = suggested_comment_for_persist.clone();
+        let pos_sig = pos_sig;
         let on_play_pause = move |_| {
             let phase = timer_mgr.phase(&tid_for_phase);
             let dec_sep = i18n.get_untracked().decimal_separator;
@@ -514,6 +813,65 @@ pub fn CellPopup(
                     timer_mgr.resume(&tid_resume, dec_sep);
                 }
             }
+            ensure_timer_storage_initialized();
+            if let Some(timer_state) = timer_mgr.persisted_state(&tid_persist) {
+                upsert_persisted_timer_row(
+                    &tid_persist.issue_key,
+                    &issue_summary,
+                    tid_persist.date,
+                    suggested_comment.clone(),
+                    is_git_log,
+                    is_weekend,
+                    Some(pos_sig.get_untracked()),
+                    PersistedTimerRow {
+                        row_index: tid_persist.row_index,
+                        worklog_id: None,
+                        hours_text: hours_sig.get_untracked(),
+                        comment_text: String::new(),
+                        timer_state,
+                    },
+                );
+            } else if let Some(phase_now) = timer_mgr.phase(&tid_persist) {
+                let fallback_state = match phase_now {
+                    TimerPhase::Running => PersistedTimerState {
+                        phase: PersistedTimerPhase::Running,
+                        is_first_interval: true,
+                        remaining_ms: 1,
+                        elapsed_ms: 0,
+                        generation: 0,
+                        snapshot_at_epoch_ms: None,
+                    },
+                    TimerPhase::Paused { remaining_ms } => PersistedTimerState {
+                        phase: PersistedTimerPhase::Paused,
+                        is_first_interval: true,
+                        remaining_ms,
+                        elapsed_ms: 0,
+                        generation: 0,
+                        snapshot_at_epoch_ms: None,
+                    },
+                    TimerPhase::Stopped => {
+                        persist_tick.update(|value| *value += 1);
+                        return;
+                    }
+                };
+                upsert_persisted_timer_row(
+                    &tid_persist.issue_key,
+                    &issue_summary,
+                    tid_persist.date,
+                    suggested_comment.clone(),
+                    is_git_log,
+                    is_weekend,
+                    Some(pos_sig.get_untracked()),
+                    PersistedTimerRow {
+                        row_index: tid_persist.row_index,
+                        worklog_id: None,
+                        hours_text: hours_sig.get_untracked(),
+                        comment_text: String::new(),
+                        timer_state: fallback_state,
+                    },
+                );
+            }
+            persist_tick.update(|value| *value += 1);
         };
 
         let tid_phase_display = timer_id.clone();
