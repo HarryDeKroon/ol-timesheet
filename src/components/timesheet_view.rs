@@ -1,7 +1,9 @@
 use crate::components::cell_popup::CellPopup;
 use crate::components::popup_flush::{provide_popup_flush_context, use_popup_flush};
 use crate::components::settings_dialog::SettingsDialog;
-use crate::components::timer::provide_timer_context;
+use crate::components::timer::{
+    PersistedTimerPopup, load_persisted_timer_popups, provide_timer_context,
+};
 use crate::components::week_navigator::{WeekNavigator, week_monday};
 use crate::connection::use_connection;
 use crate::formatting::{format_hours_long, format_hours_short};
@@ -158,8 +160,15 @@ pub async fn get_timesheet_data(
         ..Default::default()
     };
 
-    // User profile is already in the session — return avatar and display name directly.
-    let user_profile = Some((session.avatar_url.clone(), session.display_name.clone()));
+    // Fetch Jira user profile (avatar and display name)
+    let user_profile = match crate::api::jira::fetch_jira_user_profile(&settings).await {
+        Ok(profile) => Some((profile.avatar_urls.size_48, profile.display_name)),
+        Err(e) => {
+            // /myself may be blocked by SSO; fall back to email as display name
+            log::warn!("Failed to fetch Jira user profile ({}); using email as fallback", e);
+            Some((String::new(), settings.email.clone()))
+        }
+    };
 
     // Cache the assembled result so the same week is instant next time.
     if let Ok(json) = serde_json::to_string(&ts) {
@@ -244,12 +253,16 @@ struct PopupInfo {
     hours_per_day: f64,
     hours_per_week: f64,
     suggested_comments: Vec<String>,
+    is_git_log: bool,
+    is_weekend: bool,
     /// Whether the popup's date column is "today" (enables timer controls).
     is_today: bool,
     /// Inline CSS position computed at open time; updated by dragging.
     position_style: RwSignal<String>,
     /// The Jira site URL, used for worklog deep-link URLs.
     site_url: String,
+    /// Optional timer draft restored from local storage.
+    restored_timer_popup: Option<PersistedTimerPopup>,
 }
 
 impl Clone for PopupInfo {
@@ -266,6 +279,12 @@ impl Clone for PopupInfo {
             is_today: self.is_today,
             position_style: self.position_style.clone(),
             site_url: self.site_url.clone(),
+            suggested_comment: self.suggested_comment.clone(),
+            is_git_log: self.is_git_log,
+            is_weekend: self.is_weekend,
+            is_today: self.is_today,
+            position_style: self.position_style.clone(),
+            restored_timer_popup: self.restored_timer_popup.clone(),
         }
     }
 }
@@ -365,6 +384,18 @@ fn compute_search_dropdown_style() -> String {
 
 #[cfg(not(feature = "hydrate"))]
 fn compute_search_dropdown_style() -> String {
+    String::new()
+}
+
+#[cfg(feature = "hydrate")]
+fn restored_popup_style(index: usize) -> String {
+    let left = 32 + ((index % 3) as i32 * 36);
+    let top = 96 + ((index % 6) as i32 * 28);
+    format!("left:{left}px;top:{top}px")
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn restored_popup_style(_index: usize) -> String {
     String::new()
 }
 
@@ -652,6 +683,90 @@ pub fn TimesheetView() -> impl IntoView {
 
     // ── Popup state — multiple popups can be open simultaneously ──
     let open_popups: RwSignal<Vec<PopupInfo>> = RwSignal::new(Vec::new());
+    let restored_timer_popups_loaded = RwSignal::new(false);
+    // Capture component-level owner so signals created during restore are not
+    // owned by the Effect's reactive scope (which gets disposed on re-runs).
+    let component_owner = Owner::current().expect("TimesheetView must run inside a reactive owner");
+    let component_owner_for_restore = component_owner.clone();
+
+    Effect::new(move |_| {
+        let Some(ts) = last_data.get() else {
+            return;
+        };
+        if restored_timer_popups_loaded.get() {
+            return;
+        }
+
+        restored_timer_popups_loaded.set(true);
+
+        let today_date = today.get_untracked();
+        let mut restored = load_persisted_timer_popups();
+        if restored.is_empty() {
+            return;
+        }
+
+        open_popups.update(|popups| {
+            for (index, draft) in restored.drain(..).enumerate() {
+                if popups
+                    .iter()
+                    .any(|popup| popup.issue_key == draft.issue_key && popup.date == draft.date)
+                {
+                    continue;
+                }
+
+                let issue_summary = if draft.issue_summary.is_empty() {
+                    ts.work_items
+                        .iter()
+                        .find(|item| item.key == draft.issue_key)
+                        .map(|item| item.summary.clone())
+                        .unwrap_or_default()
+                } else {
+                    draft.issue_summary.clone()
+                };
+
+                let entries = if draft.is_weekend {
+                    ts.cell_worklogs(&draft.issue_key, draft.date)
+                        .into_iter()
+                        .chain(ts.cell_worklogs(&draft.issue_key, draft.date + Duration::days(1)))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    ts.cell_worklogs(&draft.issue_key, draft.date)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+
+                let is_today = if draft.is_weekend {
+                    today_date == draft.date || today_date == draft.date + Duration::days(1)
+                } else {
+                    today_date == draft.date
+                };
+
+                popups.push(PopupInfo {
+                    popup_id: NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    issue_key: draft.issue_key.clone(),
+                    issue_summary,
+                    date: draft.date,
+                    entries,
+                    hours_per_day: ts.hours_per_day,
+                    hours_per_week: ts.hours_per_week,
+                    suggested_comment: draft.suggested_comment.clone(),
+                    is_git_log: draft.is_git_log,
+                    is_weekend: draft.is_weekend,
+                    is_today,
+                    position_style: component_owner_for_restore.with(|| RwSignal::new(
+                        draft
+                            .position_style
+                            .clone()
+                            .filter(|style| !style.trim().is_empty())
+                            .unwrap_or_else(|| restored_popup_style(index)),
+                    )),
+                    restored_timer_popup: Some(draft),
+                });
+            }
+        });
+    });
 
     // State for showing the settings dialog
     let show_settings = RwSignal::new(false);
@@ -1046,6 +1161,7 @@ pub fn TimesheetView() -> impl IntoView {
                                     let cell_is_today = is_today;
                                     let cell_summary = summary.clone();
                                     let site_url_for_cell = site_url.clone();
+                                    let owner_for_cell_popup = component_owner.clone();
                                     week_cells.push(view! {
                                         <td class={cls} title={title}>
                                             <span
@@ -1056,6 +1172,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                     if !conn.is_available() {
                                                         return;
                                                     }
+                                                    let is_git_log = entries2.is_empty() && git_commits_for_closure.as_ref().and_then(|map| map.get(&format!("{}:{}", ck2, cell_date))).is_some();
                                                     // Don't open a duplicate popup for the same cell.
                                                     let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == ck2 && p.date == cell_date));
                                                     if already_open {
@@ -1094,6 +1211,13 @@ pub fn TimesheetView() -> impl IntoView {
                                                         is_today: cell_is_today,
                                                         position_style: RwSignal::new(pos_style),
                                                         site_url: site_url_for_cell.clone(),
+                                                        suggested_comment: suggested_comment.clone(),
+                                                        is_git_log,
+                                                        is_weekend: false,
+                                                        is_today: cell_is_today,
+                                                        position_style: owner_for_cell_popup
+                                                            .with(|| RwSignal::new(pos_style)),
+                                                        restored_timer_popup: None,
                                                     };
                                                     open_popups.update(|ps| ps.push(popup));
                                                 }
@@ -1195,6 +1319,7 @@ pub fn TimesheetView() -> impl IntoView {
                                 let we_cell_is_today = is_today_weekend;
                                 let we_summary = summary.clone();
                                 let site_url_for_we = site_url.clone();
+                                let owner_for_weekend_popup = component_owner.clone();
                                 week_cells.push(view! {
                                     <td class={weekend_cls} title={we_tooltip}>
                                         <span
@@ -1206,6 +1331,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                 if !conn.is_available() {
                                                     return;
                                                 }
+                                                let is_git_log = we_entries2.is_empty() && git_commits_for_closure.as_ref().and_then(|map| map.get(&format!("{}:{}", we_key2, sat))).is_some();
                                                 let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == we_key2 && p.date == sat));
                                                 if already_open {
                                                     return;
@@ -1249,6 +1375,13 @@ pub fn TimesheetView() -> impl IntoView {
                                                     is_today: we_cell_is_today,
                                                     position_style: RwSignal::new(pos_style),
                                                     site_url: site_url_for_we.clone(),
+                                                    suggested_comment: suggested_comment.clone(),
+                                                    is_git_log,
+                                                    is_weekend: true,
+                                                    is_today: we_cell_is_today,
+                                                    position_style: owner_for_weekend_popup
+                                                        .with(|| RwSignal::new(pos_style)),
+                                                    restored_timer_popup: None,
                                                 };
                                                 open_popups.update(|ps| ps.push(popup));
                                             }
@@ -1461,6 +1594,10 @@ pub fn TimesheetView() -> impl IntoView {
                            hours_per_day={info.hours_per_day}
                            hours_per_week={info.hours_per_week}
                            suggested_comments={info.suggested_comments.clone()}
+                           suggested_comment={info.suggested_comment.clone()}
+                           is_git_log={info.is_git_log}
+                           is_weekend={info.is_weekend}
+                           restored_timer_popup={info.restored_timer_popup.clone()}
                            is_today={info.is_today}
                            on_close=on_close_popup
                            on_changed=on_popup_changed

@@ -20,6 +20,7 @@
 
 use cfg_if::cfg_if;
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 cfg_if! {
@@ -29,6 +30,8 @@ const TIMER_INTERVAL: u32 = 5 * MINUTES_TO_MILLISECONDS;
 const TIMER_INTERVAL_SHORT: u32 = TIMER_INTERVAL >> 1;
     }
 }
+#[cfg(feature = "hydrate")]
+const TIMER_STORAGE_KEY: &str = "timesheet_timers.yaml";
 
 // ---------------------------------------------------------------------------
 // TimerId — uniquely identifies a timer row (issue_key + worklog-row index)
@@ -41,6 +44,58 @@ pub struct TimerId {
     pub date: chrono::NaiveDate,
     /// Index of the worklog entry row inside the popup (0-based).
     pub row_index: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum PersistedTimerPhase {
+    Running,
+    Paused,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PersistedTimerState {
+    pub phase: PersistedTimerPhase,
+    pub is_first_interval: bool,
+    #[serde(alias = "interval_ms")]
+    pub remaining_ms: u32,
+    pub elapsed_ms: u32,
+    pub generation: u32,
+    #[serde(default)]
+    pub snapshot_at_epoch_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PersistedTimerRow {
+    #[serde(default)]
+    pub row_index: usize,
+    pub worklog_id: Option<String>,
+    pub hours_text: String,
+    pub comment_text: String,
+    pub timer_state: PersistedTimerState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PersistedTimerPopup {
+    pub issue_key: String,
+    pub issue_summary: String,
+    pub date: chrono::NaiveDate,
+    #[serde(default)]
+    pub suggested_comment: Option<String>,
+    #[serde(default)]
+    pub is_git_log: bool,
+    #[serde(default)]
+    pub is_weekend: bool,
+    #[serde(default)]
+    pub position_style: Option<String>,
+    #[serde(default)]
+    pub rows: Vec<PersistedTimerRow>,
+}
+
+#[cfg(feature = "hydrate")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+struct PersistedTimerFile {
+    #[serde(default)]
+    popups: Vec<PersistedTimerPopup>,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +183,199 @@ fn now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
+#[cfg(feature = "hydrate")]
+fn now_epoch_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+#[cfg(feature = "hydrate")]
+fn timer_storage() -> Option<web_sys::Storage> {
+    let Some(window) = web_sys::window() else {
+        log::warn!("timer persistence: window unavailable");
+        return None;
+    };
+    match window.local_storage() {
+        Ok(Some(storage)) => Some(storage),
+        Ok(None) => {
+            log::warn!("timer persistence: localStorage not available");
+            None
+        }
+        Err(err) => {
+            log::warn!("timer persistence: localStorage access error: {:?}", err);
+            None
+        }
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn read_persisted_timer_file() -> PersistedTimerFile {
+    let Some(storage) = timer_storage() else {
+        return PersistedTimerFile::default();
+    };
+    let Some(raw) = storage.get_item(TIMER_STORAGE_KEY).ok().flatten() else {
+        return PersistedTimerFile::default();
+    };
+
+    match serde_yaml::from_str::<PersistedTimerFile>(&raw) {
+        Ok(file) => file,
+        Err(err) => {
+            log::warn!("failed to parse persisted timers from local storage: {err}");
+            PersistedTimerFile::default()
+        }
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn write_persisted_timer_file(file: &PersistedTimerFile) {
+    let Some(storage) = timer_storage() else {
+        return;
+    };
+
+    if file.popups.is_empty() {
+        if let Err(err) = storage.remove_item(TIMER_STORAGE_KEY) {
+            log::warn!(
+                "timer persistence: failed removing key {}: {:?}",
+                TIMER_STORAGE_KEY,
+                err
+            );
+        }
+        return;
+    }
+
+    match serde_yaml::to_string(file) {
+        Ok(raw) => {
+            if let Err(err) = storage.set_item(TIMER_STORAGE_KEY, &raw) {
+                log::warn!(
+                    "timer persistence: failed writing key {}: {:?}",
+                    TIMER_STORAGE_KEY,
+                    err
+                );
+            }
+        }
+        Err(err) => {
+            log::warn!("failed to serialize persisted timers to local storage: {err}");
+        }
+    }
+}
+
+#[cfg(feature = "hydrate")]
+pub fn load_persisted_timer_popups() -> Vec<PersistedTimerPopup> {
+    read_persisted_timer_file().popups
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub fn load_persisted_timer_popups() -> Vec<PersistedTimerPopup> {
+    Vec::new()
+}
+
+#[cfg(feature = "hydrate")]
+pub fn save_persisted_timer_popup(popup: PersistedTimerPopup) {
+    let mut file = read_persisted_timer_file();
+    if let Some(existing) = file
+        .popups
+        .iter_mut()
+        .find(|p| p.issue_key == popup.issue_key && p.date == popup.date)
+    {
+        *existing = popup;
+    } else {
+        file.popups.push(popup);
+    }
+    write_persisted_timer_file(&file);
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub fn save_persisted_timer_popup(_popup: PersistedTimerPopup) {}
+
+#[cfg(feature = "hydrate")]
+pub fn upsert_persisted_timer_row(
+    issue_key: &str,
+    issue_summary: &str,
+    date: chrono::NaiveDate,
+    suggested_comment: Option<String>,
+    is_git_log: bool,
+    is_weekend: bool,
+    position_style: Option<String>,
+    row: PersistedTimerRow,
+) {
+    let mut file = read_persisted_timer_file();
+    if let Some(popup) = file
+        .popups
+        .iter_mut()
+        .find(|p| p.issue_key == issue_key && p.date == date)
+    {
+        popup.issue_summary = issue_summary.to_string();
+        popup.suggested_comment = suggested_comment;
+        popup.is_git_log = is_git_log;
+        popup.is_weekend = is_weekend;
+        popup.position_style = position_style;
+        popup.rows.retain(|existing| {
+            if existing.row_index == row.row_index {
+                return false;
+            }
+            if let Some(row_id) = &row.worklog_id {
+                return existing.worklog_id.as_ref() != Some(row_id);
+            }
+            true
+        });
+        popup.rows.push(row);
+    } else {
+        file.popups.push(PersistedTimerPopup {
+            issue_key: issue_key.to_string(),
+            issue_summary: issue_summary.to_string(),
+            date,
+            suggested_comment,
+            is_git_log,
+            is_weekend,
+            position_style,
+            rows: vec![row],
+        });
+    }
+    write_persisted_timer_file(&file);
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub fn upsert_persisted_timer_row(
+    _issue_key: &str,
+    _issue_summary: &str,
+    _date: chrono::NaiveDate,
+    _suggested_comment: Option<String>,
+    _is_git_log: bool,
+    _is_weekend: bool,
+    _position_style: Option<String>,
+    _row: PersistedTimerRow,
+) {
+}
+
+#[cfg(feature = "hydrate")]
+pub fn ensure_timer_storage_initialized() {
+    let Some(storage) = timer_storage() else {
+        return;
+    };
+    if storage.get_item(TIMER_STORAGE_KEY).ok().flatten().is_none() {
+        if let Err(err) = storage.set_item(TIMER_STORAGE_KEY, "popups: []\n") {
+            log::warn!(
+                "timer persistence: failed initializing key {}: {:?}",
+                TIMER_STORAGE_KEY,
+                err
+            );
+        }
+    }
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub fn ensure_timer_storage_initialized() {}
+
+#[cfg(feature = "hydrate")]
+pub fn remove_persisted_timer_popup(issue_key: &str, date: chrono::NaiveDate) {
+    let mut file = read_persisted_timer_file();
+    file.popups
+        .retain(|popup| popup.issue_key != issue_key || popup.date != date);
+    write_persisted_timer_file(&file);
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub fn remove_persisted_timer_popup(_issue_key: &str, _date: chrono::NaiveDate) {}
+
 // ---------------------------------------------------------------------------
 // TimerManager — the global singleton
 // ---------------------------------------------------------------------------
@@ -204,6 +452,150 @@ impl TimerManager {
                 TimerPhase::Stopped => None,
             })
         })
+    }
+
+    #[cfg(feature = "hydrate")]
+    pub fn persisted_state(&self, id: &TimerId) -> Option<PersistedTimerState> {
+        self.inner.with_untracked(|map| {
+            let entry = map.get(id)?;
+            let elapsed_ms = match entry.phase {
+                TimerPhase::Running => {
+                    let segment_elapsed = (now_ms() - entry.interval_started_at).max(0.0) as u32;
+                    (entry.accumulated_ms + segment_elapsed).min(entry.total_interval_ms)
+                }
+                TimerPhase::Paused { .. } => entry.accumulated_ms.min(entry.total_interval_ms),
+                TimerPhase::Stopped => return None,
+            };
+
+            let phase = match entry.phase {
+                TimerPhase::Running => PersistedTimerPhase::Running,
+                TimerPhase::Paused { .. } => PersistedTimerPhase::Paused,
+                TimerPhase::Stopped => return None,
+            };
+
+            let remaining_ms = match &entry.phase {
+                TimerPhase::Running => {
+                    let segment_elapsed = (now_ms() - entry.interval_started_at).max(0.0) as u32;
+                    entry.interval_ms.saturating_sub(segment_elapsed).max(1)
+                }
+                TimerPhase::Paused { remaining_ms } => *remaining_ms,
+                TimerPhase::Stopped => return None,
+            };
+
+            Some(PersistedTimerState {
+                phase,
+                is_first_interval: entry.is_first_interval,
+                remaining_ms,
+                elapsed_ms,
+                generation: entry.generation,
+                snapshot_at_epoch_ms: matches!(&entry.phase, TimerPhase::Running)
+                    .then_some(now_epoch_ms()),
+            })
+        })
+    }
+
+    #[cfg(feature = "hydrate")]
+    pub fn restore_persisted_state(
+        &self,
+        id: TimerId,
+        hours_signal: RwSignal<String>,
+        hours_per_day: f64,
+        hours_per_week: f64,
+        decimal_sep: char,
+        state: PersistedTimerState,
+    ) {
+        let mut remaining_ms = state.remaining_ms.max(1);
+        let mut elapsed_ms = state.elapsed_ms;
+        let mut generation = state.generation;
+        let mut is_first_interval = state.is_first_interval;
+        let mut completed_intervals = 0u32;
+        let is_running = matches!(&state.phase, PersistedTimerPhase::Running);
+
+        if is_running {
+            let mut extra_elapsed = state
+                .snapshot_at_epoch_ms
+                .map(|snapshot| (now_epoch_ms() - snapshot).max(0) as u32)
+                .unwrap_or(0);
+
+            if extra_elapsed < remaining_ms {
+                remaining_ms -= extra_elapsed;
+                elapsed_ms += extra_elapsed;
+            } else {
+                extra_elapsed = extra_elapsed.saturating_sub(remaining_ms);
+                completed_intervals += 1;
+                generation += 1;
+                is_first_interval = false;
+                remaining_ms = TIMER_INTERVAL;
+                elapsed_ms = 0;
+
+                if extra_elapsed >= TIMER_INTERVAL {
+                    let extra_intervals = extra_elapsed / TIMER_INTERVAL;
+                    completed_intervals += extra_intervals;
+                    generation += extra_intervals;
+                    extra_elapsed %= TIMER_INTERVAL;
+                }
+
+                if extra_elapsed > 0 {
+                    remaining_ms = TIMER_INTERVAL.saturating_sub(extra_elapsed).max(1);
+                    elapsed_ms = extra_elapsed;
+                }
+            }
+        }
+
+        if completed_intervals > 0 {
+            add_completed_intervals_to_hours(
+                hours_signal,
+                completed_intervals,
+                hours_per_day,
+                hours_per_week,
+                decimal_sep,
+            );
+        }
+
+        let total_interval_ms = if completed_intervals > 0 || !is_first_interval {
+            TIMER_INTERVAL
+        } else {
+            remaining_ms.saturating_add(elapsed_ms).max(1)
+        };
+
+        let timeout_handle = if is_running {
+            schedule_interval(
+                self.inner,
+                id.clone(),
+                remaining_ms,
+                hours_signal,
+                hours_per_day,
+                hours_per_week,
+                decimal_sep,
+            )
+        } else {
+            0
+        };
+
+        let phase = if is_running {
+            TimerPhase::Running
+        } else {
+            TimerPhase::Paused { remaining_ms }
+        };
+
+        self.inner.update(|map| {
+            map.insert(
+                id,
+                TimerEntry {
+                    phase,
+                    is_first_interval,
+                    interval_ms: remaining_ms,
+                    timeout_handle,
+                    interval_started_at: now_ms(),
+                    hours_signal,
+                    hours_per_day,
+                    hours_per_week,
+                    total_interval_ms,
+                    accumulated_ms: elapsed_ms.min(total_interval_ms),
+                    generation,
+                },
+            );
+        });
     }
 
     // -- Mutations (client-only implementations) ---------------------------
@@ -417,6 +809,23 @@ impl TimerManager {
 
     #[cfg(not(feature = "hydrate"))]
     pub fn stop_all(&self) {}
+
+    #[cfg(not(feature = "hydrate"))]
+    pub fn persisted_state(&self, _id: &TimerId) -> Option<PersistedTimerState> {
+        None
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    pub fn restore_persisted_state(
+        &self,
+        _id: TimerId,
+        _hours_signal: RwSignal<String>,
+        _hours_per_day: f64,
+        _hours_per_week: f64,
+        _decimal_sep: char,
+        _state: PersistedTimerState,
+    ) {
+    }
 }
 
 /// Provide a [`TimerManager`] via Leptos context. Call once at app startup.
@@ -441,6 +850,60 @@ pub fn use_timer() -> TimerManager {
 /// Schedule a JS `setTimeout` that, when it fires:
 /// 1. Bumps the hours signal by 5 minutes.
 /// 2. Schedules the next 5-minute interval.
+#[cfg(feature = "hydrate")]
+fn add_completed_intervals_to_hours(
+    hours_signal: RwSignal<String>,
+    completed_intervals: u32,
+    hours_per_day: f64,
+    hours_per_week: f64,
+    decimal_sep: char,
+) {
+    use crate::formatting::{format_hours_long, parse_hours};
+    use crate::i18n::{I18n, keys};
+
+    if completed_intervals == 0 {
+        return;
+    }
+
+    let i18n = use_context::<RwSignal<I18n>>()
+        .map(|s| s.get_untracked())
+        .unwrap_or_default();
+    let wl = i18n.t(keys::WEEK_ABBR);
+    let dl = i18n.t(keys::DAY_ABBR);
+    let hl = i18n.t(keys::HOUR_ABBR);
+    let ml = i18n.t(keys::MINUTE_ABBR);
+
+    let Some(current_text) = hours_signal.try_get_untracked() else {
+        return;
+    };
+
+    let current_hours = parse_hours(
+        &current_text,
+        hours_per_day,
+        hours_per_week,
+        decimal_sep,
+        &wl,
+        &dl,
+        &hl,
+        &ml,
+    )
+    .unwrap_or(0.0);
+    let added_hours = completed_intervals as f64 * (5.0 / 60.0);
+    let new_text = format_hours_long(
+        current_hours + added_hours,
+        hours_per_day,
+        hours_per_week,
+        &wl,
+        &dl,
+        &hl,
+        &ml,
+    );
+
+    if hours_signal.try_set(new_text).is_some() {
+        log::warn!("failed to restore timer hours because signal was disposed");
+    }
+}
+
 #[cfg(feature = "hydrate")]
 fn schedule_interval(
     inner: RwSignal<HashMap<TimerId, TimerEntry>>,
@@ -494,9 +957,6 @@ fn on_interval_fire(
     hours_per_week: f64,
     decimal_sep: char,
 ) {
-    use crate::formatting::{format_hours_long, parse_hours};
-    use crate::i18n::{I18n, keys};
-
     leptos::logging::log!("interval elapsed: id={:?}.", id);
 
     // If the timer was removed (e.g. popup closed), the hours_signal is
@@ -509,53 +969,7 @@ fn on_interval_fire(
         return;
     }
 
-    // Bump the duration by 5 minutes (= 5/60 hours).
-    let five_min_hours: f64 = 5.0 / 60.0;
-
-    // Resolve i18n labels early so we can use them for both parsing and formatting.
-    let i18n = use_context::<RwSignal<I18n>>()
-        .map(|s| s.get_untracked())
-        .unwrap_or_default();
-    let wl = i18n.t(keys::WEEK_ABBR);
-    let dl = i18n.t(keys::DAY_ABBR);
-    let hl = i18n.t(keys::HOUR_ABBR);
-    let ml = i18n.t(keys::MINUTE_ABBR);
-
-    // Guard against disposed signal (popup closed between scheduling and firing).
-    let current_text = match hours_signal.try_get_untracked() {
-        Some(t) => t,
-        None => {
-            leptos::logging::log!(
-                "interval fire: hours_signal disposed for {:?}, skipping.",
-                id
-            );
-            return;
-        }
-    };
-    let current_hours = parse_hours(
-        &current_text,
-        hours_per_day,
-        hours_per_week,
-        decimal_sep,
-        &wl,
-        &dl,
-        &hl,
-        &ml,
-    )
-    .unwrap_or(0.0);
-    let new_hours = current_hours + five_min_hours;
-
-    let new_text = format_hours_long(new_hours, hours_per_day, hours_per_week, &wl, &dl, &hl, &ml);
-    // Guard: signal may have been disposed between the get and the set.
-    // `try_set` returns `Some(value)` when the signal is disposed (set failed),
-    // and `None` on success.
-    if hours_signal.try_set(new_text).is_some() {
-        leptos::logging::log!(
-            "interval fire: hours_signal disposed during set for {:?}, skipping.",
-            id
-        );
-        return;
-    }
+    add_completed_intervals_to_hours(hours_signal, 1, hours_per_day, hours_per_week, decimal_sep);
 
     // Check if this timer is still Running before scheduling the next tick.
     // This runs inside a setTimeout callback, outside any reactive tracking
