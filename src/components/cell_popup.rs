@@ -234,25 +234,29 @@ pub fn CellPopup(
         .map(|comment| (RwSignal::new(String::new()), RwSignal::new(comment)))
         .collect();
     initial_rows.push((RwSignal::new(String::new()), RwSignal::new(String::new())));
-    let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> =
-        RwSignal::new(initial_rows);
-    let mut initial_new_entries: Vec<(RwSignal<String>, RwSignal<String>)> = restored_new_rows
-        .iter()
-        .map(|row| {
-            (
-                RwSignal::new(row.hours_text.clone()),
-                RwSignal::new(row.comment_text.clone()),
-            )
-        })
-        .collect();
-    initial_new_entries.push((
-        RwSignal::new(String::new()),
-        RwSignal::new(if is_git_log && restored_new_rows.is_empty() {
-            suggested_comment.clone().unwrap_or_default()
+    let initial_new_entries: Vec<(RwSignal<String>, RwSignal<String>)> =
+        if restored_new_rows.is_empty() {
+            initial_rows
         } else {
-            String::new()
-        }),
-    ));
+            let mut restored = restored_new_rows
+                .iter()
+                .map(|row| {
+                    (
+                        RwSignal::new(row.hours_text.clone()),
+                        RwSignal::new(row.comment_text.clone()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            restored.push((
+                RwSignal::new(String::new()),
+                RwSignal::new(if is_git_log {
+                    suggested_comment.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                }),
+            ));
+            restored
+        };
     let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> =
         RwSignal::new(initial_new_entries);
 
@@ -673,23 +677,6 @@ pub fn CellPopup(
                         server_add_worklog(ik, date, h, comment, new_request_nonce()).await
                     {
                         errors.push(format!("Save failed: {}", e));
-                let mut saved_ok = true;
-                for (ik, id) in deletes {
-                    if server_delete_worklog(ik, id).await.is_err() {
-                        saved_ok = false;
-                    }
-                }
-                for (ik, id, h, comment, adf) in updates {
-                    if server_update_worklog(ik, id, h, comment, adf)
-                        .await
-                        .is_err()
-                    {
-                        saved_ok = false;
-                    }
-                }
-                for (ik, date, h, comment) in creates {
-                    if server_add_worklog(ik, date, h, comment).await.is_err() {
-                        saved_ok = false;
                     }
                 }
                 conn.request_finished();
@@ -705,7 +692,7 @@ pub fn CellPopup(
                 if let Some(latch) = latch {
                     latch.arrive();
                 }
-                if saved_ok {
+                if errors.is_empty() {
                     remove_persisted_timer_popup(&ik, date);
                 }
                 on_changed.run(issue_key_for_changed);

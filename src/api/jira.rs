@@ -511,51 +511,6 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn auth_header(settings: &Settings) -> String {
-    let credentials = format!("{}:{}", settings.email, settings.upland_jira_token);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
-    format!("Basic {}", encoded)
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct JiraUserProfile {
-    #[serde(rename = "displayName")]
-    pub display_name: String,
-    #[serde(rename = "avatarUrls")]
-    pub avatar_urls: AvatarUrls,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct AvatarUrls {
-    #[serde(rename = "48x48")]
-    pub size_48: String,
-    // Add other sizes if needed
-}
-
-pub async fn fetch_jira_user_profile(
-    settings: &crate::model::Settings,
-) -> Result<JiraUserProfile, String> {
-    let client = reqwest::Client::new();
-    let url = format!("{}/myself", JIRA_BASE);
-    let resp = client
-        .get(url)
-        .header("Authorization", auth_header(settings))
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-
-    if !status.is_success() {
-        return Err(format!("HTTP {status}: {text}"));
-    }
-
-    serde_json::from_str::<JiraUserProfile>(&text)
-        .map_err(|e| format!("deserialization error: {e}"))
-}
-
 /// Wrap a plain-text string in Atlassian Document Format (ADF),
 /// which is required by the v3 worklog write endpoints.
 fn make_adf_comment(text: &str) -> serde_json::Value {

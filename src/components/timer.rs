@@ -19,6 +19,8 @@
 //!    updated (the previous interval already accounted for it).
 
 use cfg_if::cfg_if;
+#[cfg(feature = "hydrate")]
+use chrono::Utc;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
