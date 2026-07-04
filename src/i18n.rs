@@ -73,7 +73,7 @@ pub mod keys {
     pub const OPEN_IN_JIRA: &str = "open_in_jira";
     pub const OPEN_SETTINGS: &str = "open_settings";
     pub const REFRESH_CACHED: &str = "refresh_cached";
-    pub const BITBUCKET_DISABLED: &str = "bitbucket_disabled";
+    pub const LOGOUT: &str = "logout";
     pub const OL_JIRA_DISABLED: &str = "ol_jira_disabled";
     pub const ISSUE_ICON_ALT: &str = "issue_icon_alt";
 }
@@ -148,7 +148,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_IN_JIRA, "Open in Jira"),
         (keys::OPEN_SETTINGS, "Open settings"),
         (keys::REFRESH_CACHED, "Refresh cached work items"),
-        (keys::BITBUCKET_DISABLED, "Bitbucket integration is currently disabled due to API deprecation."),
+        (keys::LOGOUT, "Log out"),
         (keys::OL_JIRA_DISABLED, "OL Jira integration is disabled because over three years have passed since the last update."),
         (keys::ISSUE_ICON_ALT, "Issue icon"),
     ]
@@ -237,7 +237,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_IN_JIRA, "Ouvrir dans Jira"),
         (keys::OPEN_SETTINGS, "Ouvrir les paramètres"),
         (keys::REFRESH_CACHED, "Rafraîchir les éléments en cache"),
-        (keys::BITBUCKET_DISABLED, "L\u{2019}intégration Bitbucket est actuellement désactivée en raison de la dépréciation de l\u{2019}API."),
+        (keys::LOGOUT, "Se déconnecter"),
         (keys::OL_JIRA_DISABLED, "L\u{2019}intégration OL Jira est désactivée car plus de trois ans se sont écoulés depuis la dernière mise à jour."),
         (keys::ISSUE_ICON_ALT, "Icône du ticket"),
     ]
@@ -311,7 +311,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_IN_JIRA, "Openen in Jira"),
         (keys::OPEN_SETTINGS, "Instellingen openen"),
         (keys::REFRESH_CACHED, "Werkitems in cache vernieuwen"),
-        (keys::BITBUCKET_DISABLED, "Bitbucket-integratie is momenteel uitgeschakeld vanwege API-afschaffing."),
+        (keys::LOGOUT, "Uitloggen"),
         (keys::OL_JIRA_DISABLED, "OL Jira-integratie is uitgeschakeld omdat er meer dan drie jaar zijn verstreken sinds de laatste update."),
         (keys::ISSUE_ICON_ALT, "Ticketpictogram"),
     ]
@@ -320,6 +320,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
 
     [("en", en), ("fr", fr), ("nl", nl)].into_iter().collect()
 });
+
+static EMPTY_TRANSLATIONS: LazyLock<HashMap<&str, &str>> = LazyLock::new(HashMap::new);
+static DEFAULT_TRANSLATIONS: LazyLock<&HashMap<&str, &str>> =
+    LazyLock::new(|| TRANSLATIONS.get("en").unwrap_or(&EMPTY_TRANSLATIONS));
 
 /// Internationalisation context provided to all components.
 #[derive(Clone, Debug, PartialEq)]
@@ -343,6 +347,14 @@ impl I18n {
             lang,
             decimal_separator,
         }
+    }
+
+    pub fn tr<'t>(&self, key: &'t str) -> &'t str {
+        TRANSLATIONS
+            .get(self.lang.as_str())
+            .and_then(|lang_map| lang_map.get(key).copied())
+            .or_else(|| DEFAULT_TRANSLATIONS.get(key).map(|s| *s))
+            .unwrap_or(key)
     }
 
     /// Look up a translation by key. Falls back to English, then to "[key]".

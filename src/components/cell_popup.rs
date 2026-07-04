@@ -16,15 +16,34 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, atomic::AtomicBool};
 
+/// Generate a replay-protection nonce in `{unix_secs}:{random_hex}` format.
+/// On WASM uses `js_sys`; on the server side (SSR compilation stub) uses chrono.
+fn new_request_nonce() -> String {
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "ssr")] {
+            // Compiled for SSR but never called at runtime from this path.
+            format!("{}:{}", chrono::Utc::now().timestamp(), uuid::Uuid::new_v4())
+        } else {
+            let ts = (js_sys::Date::now() / 1000.0) as i64;
+            let r1 = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+            let r2 = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+            format!("{}:{:08x}{:08x}", ts, r1, r2)
+        }
+    }
+}
+
 #[server(AddWorklog, "/api")]
 pub async fn server_add_worklog(
     issue_key: String,
     date: NaiveDate,
     hours: f64,
     comment: String,
+    request_nonce: String,
 ) -> Result<(), ServerFnError> {
-    let settings = crate::model::load_settings();
-    crate::api::jira::add_worklog(&settings, &issue_key, date, hours, &comment)
+    let (session_id, session) = crate::auth::current_user_session().await?;
+    crate::auth::validate_nonce(&session_id, &request_nonce)?;
+    let creds = session.jira_credentials();
+    crate::api::jira::add_worklog(&creds, &issue_key, date, hours, &comment)
         .await
         .map(|_| ())
         .map_err(|e| ServerFnError::new(e))
@@ -37,10 +56,13 @@ pub async fn server_update_worklog(
     hours: f64,
     comment: String,
     comment_adf: Option<String>,
+    request_nonce: String,
 ) -> Result<(), ServerFnError> {
-    let settings = crate::model::load_settings();
+    let (session_id, session) = crate::auth::current_user_session().await?;
+    crate::auth::validate_nonce(&session_id, &request_nonce)?;
+    let creds = session.jira_credentials();
     crate::api::jira::update_worklog(
-        &settings,
+        &creds,
         &issue_key,
         &worklog_id,
         hours,
@@ -55,18 +77,23 @@ pub async fn server_update_worklog(
 pub async fn server_delete_worklog(
     issue_key: String,
     worklog_id: String,
+    request_nonce: String,
 ) -> Result<(), ServerFnError> {
-    let settings = crate::model::load_settings();
-    crate::api::jira::delete_worklog(&settings, &issue_key, &worklog_id)
+    let (session_id, session) = crate::auth::current_user_session().await?;
+    crate::auth::validate_nonce(&session_id, &request_nonce)?;
+    let creds = session.jira_credentials();
+    crate::api::jira::delete_worklog(&creds, &issue_key, &worklog_id)
         .await
         .map_err(|e| ServerFnError::new(e))
 }
 
 /// Build a Jira URL that deep-links to a specific worklog entry.
-fn worklog_url(issue_key: &str, worklog_id: &str) -> String {
+fn worklog_url(site_url: &str, issue_key: &str, worklog_id: &str) -> String {
     format!(
-        "https://uplandsoftware.atlassian.net/browse/{}?focusedWorklogId={}",
-        issue_key, worklog_id,
+        "{}/browse/{}?focusedWorklogId={}",
+        site_url.trim_end_matches('/'),
+        issue_key,
+        worklog_id,
     )
 }
 
@@ -103,6 +130,7 @@ pub fn CellPopup(
     entries: Vec<WorklogEntry>,
     hours_per_day: f64,
     hours_per_week: f64,
+    #[prop(default = Vec::new())] suggested_comments: Vec<String>,
     suggested_comment: Option<String>,
     is_git_log: bool,
     #[prop(default = false)] is_weekend: bool,
@@ -111,9 +139,13 @@ pub fn CellPopup(
     #[prop(default = false)]
     is_today: bool,
     on_close: Callback<()>,
-    on_changed: Callback<()>,
+    on_changed: Callback<String>,
+    #[prop(default = String::new())] site_url: String,
 ) -> impl IntoView {
-    let i18n = use_context::<RwSignal<I18n>>().expect("I18n context");
+    let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| {
+        log::error!("I18n context not provided in CellPopup, using English fallback");
+        RwSignal::new(I18n::default())
+    });
     let conn = use_connection();
     let timer_mgr = use_timer();
     let flush_mgr = use_popup_flush();
@@ -196,6 +228,14 @@ pub fn CellPopup(
     // ── Dynamic new entry rows ──────────────────────────────────────────
     // Each new row is a tuple of (hours_signal, comment_signal).
     // There is always at least one (the blank "extra" row).
+    let initial_prefills: Vec<String> = suggested_comments;
+    let mut initial_rows: Vec<(RwSignal<String>, RwSignal<String>)> = initial_prefills
+        .into_iter()
+        .map(|comment| (RwSignal::new(String::new()), RwSignal::new(comment)))
+        .collect();
+    initial_rows.push((RwSignal::new(String::new()), RwSignal::new(String::new())));
+    let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> =
+        RwSignal::new(initial_rows);
     let mut initial_new_entries: Vec<(RwSignal<String>, RwSignal<String>)> = restored_new_rows
         .iter()
         .map(|row| {
@@ -613,7 +653,26 @@ pub fn CellPopup(
             on_close.run(());
 
             leptos::task::spawn_local(async move {
+                let issue_key_for_changed = ik.clone();
                 conn.request_started();
+                let mut errors: Vec<String> = Vec::new();
+                for (ik, id) in deletes {
+                    if let Err(e) = server_delete_worklog(ik, id, new_request_nonce()).await {
+                        errors.push(format!("Delete failed: {}", e));
+                    }
+                }
+                for (ik, id, h, comment, adf) in updates {
+                    if let Err(e) =
+                        server_update_worklog(ik, id, h, comment, adf, new_request_nonce()).await
+                    {
+                        errors.push(format!("Update failed: {}", e));
+                    }
+                }
+                for (ik, date, h, comment) in creates {
+                    if let Err(e) =
+                        server_add_worklog(ik, date, h, comment, new_request_nonce()).await
+                    {
+                        errors.push(format!("Save failed: {}", e));
                 let mut saved_ok = true;
                 for (ik, id) in deletes {
                     if server_delete_worklog(ik, id).await.is_err() {
@@ -634,6 +693,12 @@ pub fn CellPopup(
                     }
                 }
                 conn.request_finished();
+                if !errors.is_empty() {
+                    let msg = errors.join("\n");
+                    log::error!("[CellPopup] Worklog save error(s): {}", msg);
+                    #[cfg(feature = "hydrate")]
+                    web_sys::window().map(|w| w.alert_with_message(&msg));
+                }
                 // Signal the flush latch (if any) *before* refetch so that
                 // callers waiting on the latch (e.g. language-switch reload)
                 // can proceed now that the server state is up-to-date.
@@ -643,7 +708,7 @@ pub fn CellPopup(
                 if saved_ok {
                     remove_persisted_timer_popup(&ik, date);
                 }
-                on_changed.run(());
+                on_changed.run(issue_key_for_changed);
             });
         }
     };
@@ -1006,7 +1071,7 @@ pub fn CellPopup(
                         let hours_sig = entry.hours_sig;
                         let comment_sig = entry.comment_sig;
                         let deleted = entry.deleted;
-                        let link_href = worklog_url(&ik, &id);
+                        let link_href = worklog_url(&site_url, &ik, &id);
 
                         let delete_worklog = move |_| {
                             deleted.set(true);

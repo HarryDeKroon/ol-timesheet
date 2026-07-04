@@ -18,19 +18,18 @@
 //! 5. **Stop** — cancel the running/paused timer. The duration is **not**
 //!    updated (the previous interval already accounted for it).
 
+use cfg_if::cfg_if;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[cfg(feature = "hydrate")]
-use chrono::Utc;
-
-#[cfg(feature = "hydrate")]
-const MINUTES_TO_MILLISECONDS: u32 = 60_000;
-#[cfg(feature = "hydrate")]
+cfg_if! {
+    if #[cfg(feature = "hydrate")] {
+    const MINUTES_TO_MILLISECONDS: u32 = 60_000;
 const TIMER_INTERVAL: u32 = 5 * MINUTES_TO_MILLISECONDS;
-#[cfg(feature = "hydrate")]
 const TIMER_INTERVAL_SHORT: u32 = TIMER_INTERVAL >> 1;
+    }
+}
 #[cfg(feature = "hydrate")]
 const TIMER_STORAGE_KEY: &str = "timesheet_timers.yaml";
 
@@ -838,7 +837,10 @@ pub fn provide_timer_context() -> TimerManager {
 
 /// Obtain the [`TimerManager`] from context.
 pub fn use_timer() -> TimerManager {
-    use_context::<TimerManager>().expect("TimerManager context not provided")
+    use_context::<TimerManager>().unwrap_or_else(|| {
+        log::error!("TimerManager context not provided, using fallback manager");
+        TimerManager::new()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -929,13 +931,16 @@ fn schedule_interval(
         );
     }) as Box<dyn FnOnce()>);
 
-    let handle = web_sys::window()
-        .expect("no window")
-        .set_timeout_with_callback_and_timeout_and_arguments_0(
-            cb.as_ref().unchecked_ref(),
-            delay_ms as i32,
-        )
-        .unwrap_or(0);
+    let handle = if let Some(window) = web_sys::window() {
+        window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                delay_ms as i32,
+            )
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
     cb.forget();
     handle

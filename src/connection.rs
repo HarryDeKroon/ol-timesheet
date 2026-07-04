@@ -92,7 +92,10 @@ pub fn provide_connection_context() -> ConnectionState {
 
 /// Obtain the [`ConnectionState`] from context.
 pub fn use_connection() -> ConnectionState {
-    use_context::<ConnectionState>().expect("ConnectionState context not provided")
+    use_context::<ConnectionState>().unwrap_or_else(|| {
+        log::error!("ConnectionState context not provided, using fallback state");
+        ConnectionState::new()
+    })
 }
 
 // ── Client-side WebSocket logic ─────────────────────────────────────────────
@@ -108,7 +111,10 @@ fn start_websocket(state: ConnectionState) {
     /// WebSocket instance.
     fn connect(state: ConnectionState) -> Result<WebSocket, JsValue> {
         // Build the ws:// or wss:// URL from the current page location.
-        let location = web_sys::window().expect("no window").location();
+        let Some(window) = web_sys::window() else {
+            return Err(JsValue::from_str("window unavailable"));
+        };
+        let location = window.location();
         let protocol = location.protocol().unwrap_or_else(|_| "http:".into());
         let ws_protocol = if protocol == "https:" { "wss:" } else { "ws:" };
         let host = location.host().unwrap_or_else(|_| "localhost:3093".into());
@@ -233,14 +239,17 @@ fn start_websocket(state: ConnectionState) {
             }
         }) as Box<dyn FnMut()>);
 
-        web_sys::window()
-            .expect("no window")
-            .set_timeout_with_callback_and_timeout_and_arguments_0(
+        if let Some(window) = web_sys::window() {
+            if let Err(e) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
                 cb.as_ref().unchecked_ref(),
                 delay as i32,
-            )
-            .expect("setTimeout failed");
-        cb.forget();
+            ) {
+                log::warn!("setTimeout failed while scheduling reconnect: {:?}", e);
+            }
+            cb.forget();
+        } else {
+            log::warn!("window unavailable while scheduling reconnect");
+        }
     }
 
     // Kick off the initial connection.

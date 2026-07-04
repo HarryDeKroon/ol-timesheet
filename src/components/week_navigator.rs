@@ -13,7 +13,10 @@ pub fn WeekNavigator(
     /// The currently selected Monday (start of selected week).
     selected_monday: RwSignal<NaiveDate>,
 ) -> impl IntoView {
-    let i18n = use_context::<RwSignal<I18n>>().expect("I18n context");
+    let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| {
+        log::error!("I18n context not provided in WeekNavigator, using English fallback");
+        RwSignal::new(I18n::default())
+    });
     let flush_mgr = use_popup_flush();
 
     let today_monday = week_monday(Local::now().date_naive());

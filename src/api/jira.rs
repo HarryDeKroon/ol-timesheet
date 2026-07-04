@@ -1,17 +1,32 @@
 #![cfg(feature = "ssr")]
 
 use crate::api::cache;
-use crate::model::{Settings, WorkItem, WorklogEntry};
-use base64::Engine;
+use crate::model::{WorkItem, WorklogEntry};
 use chrono::{Datelike, NaiveDate};
 use serde::Deserialize;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use log;
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
-const JIRA_BASE: &str = "https://uplandsoftware.atlassian.net/rest/api/3";
+fn jira_base(cloud_id: &str) -> String {
+    format!("https://api.atlassian.com/ex/jira/{}/rest/api/3", cloud_id)
+}
+
+fn bearer_header(token: &str) -> String {
+    format!("Bearer {}", token)
+}
+
+/// Credentials extracted from the user's active session.
+/// All Jira API functions take `&JiraCredentials` instead of `&Settings`.
+#[derive(Clone, Debug)]
+pub struct JiraCredentials {
+    pub access_token: String,
+    pub cloud_id: String,
+    pub email: String,
+    pub account_id: String,
+}
 
 // ─── Jira API response types ────────────────────────────────────────────────
 
@@ -563,26 +578,32 @@ fn make_adf_comment(text: &str) -> serde_json::Value {
 
 // ─── Cache-key helpers ──────────────────────────────────────────────────────
 
-/// Cache key for all worklogs of a specific issue (user-filtered, all dates).
-fn worklog_cache_key(issue_key: &str) -> String {
-    format!("jira_worklogs:{}", issue_key)
+/// Cache key for all worklogs of a specific issue (user-namespaced).
+fn worklog_cache_key(account_id: &str, issue_key: &str) -> String {
+    format!("{}:jira_worklogs:{}", account_id, issue_key)
 }
 
 /// Prefix for all assembled TimesheetData cache entries.
 pub const TIMESHEET_DATA_PREFIX: &str = "timesheet_data:";
 
-/// Cache key for assembled TimesheetData for a specific date range.
-pub fn timesheet_data_cache_key(start: NaiveDate, end: NaiveDate) -> String {
-    format!("timesheet_data:{}:{}", start, end)
+/// Cache key for assembled TimesheetData for a specific user + date range.
+pub fn timesheet_data_cache_key(account_id: &str, start: NaiveDate, end: NaiveDate) -> String {
+    format!("{}:timesheet_data:{}:{}", account_id, start, end)
 }
 
-/// Invalidate all cached data related to a specific issue.
+/// Invalidate all cached data related to a specific issue for a specific user.
 /// Called after add/update/delete worklog operations.
-pub fn invalidate_worklogs_for_issue(issue_key: &str) {
-    cache::remove(&worklog_cache_key(issue_key));
-    // Also invalidate all assembled timesheet data since any of them
-    // might include this issue.
-    cache::remove_by_prefix(TIMESHEET_DATA_PREFIX);
+pub fn invalidate_worklogs_for_issue(account_id: &str, issue_key: &str) {
+    cache::remove(&worklog_cache_key(account_id, issue_key));
+    // Invalidate all assembled timesheet data for this user since any of
+    // them might include this issue.
+    let user_prefix = format!("{}:{}", account_id, TIMESHEET_DATA_PREFIX);
+    cache::remove_by_prefix(&user_prefix);
+    // Also invalidate all JQL search caches for this user. The worklog
+    // author query (worklogAuthor = "..." AND worklogDate >= ...) won't
+    // include a newly-worklocked issue until its cached result is evicted.
+    let search_prefix = format!("{}:jira_search:", account_id);
+    cache::remove_by_prefix(&search_prefix);
 }
 
 // ─── Cached worklog entry (serialised into the cache) ───────────────────────
@@ -609,27 +630,27 @@ struct CachedWorklogs {
 ///
 /// Uses the new `/rest/api/3/search/jql` endpoint with cursor-based pagination.
 pub async fn fetch_work_items(
-    settings: &Settings,
+    creds: &JiraCredentials,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<WorkItem>, String> {
     // JQL for work items with worklogs in the date range
     let worklog_jql = format!(
         "worklogAuthor = \"{}\" AND worklogDate >= \"{}\" AND worklogDate <= \"{}\"",
-        settings.email, start, end
+        creds.email, start, end
     );
 
     // JQL for assigned active tickets
     let assigned_jql = format!(
         "assignee = \"{}\" AND status IN (\"Code Review\", \"In Progress\")",
-        settings.email
+        creds.email
     );
 
-    log::info!("[fetch_work_items] worklogDate >= {start} AND worklogDate <= {end}");
+    log::trace!("[fetch_work_items] worklogDate >= {start} AND worklogDate <= {end}");
 
     // Fetch both result sets and merge/deduplicate by issue key
-    let worklog_items = fetch_work_items_by_jql(settings, &worklog_jql).await?;
-    let assigned_items = fetch_work_items_by_jql(settings, &assigned_jql).await?;
+    let worklog_items = fetch_work_items_by_jql(creds, &worklog_jql).await?;
+    let assigned_items = fetch_work_items_by_jql(creds, &assigned_jql).await?;
 
     let mut seen = std::collections::HashSet::new();
     let mut items: Vec<WorkItem> = Vec::new();
@@ -642,11 +663,50 @@ pub async fn fetch_work_items(
     Ok(items)
 }
 
+/// Fetch a specific set of Jira issues by key.
+pub async fn fetch_work_items_by_keys(
+    creds: &JiraCredentials,
+    keys: &[String],
+) -> Result<Vec<WorkItem>, String> {
+    if keys.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let ordered_keys: Vec<String> = keys
+        .iter()
+        .map(|k| k.trim().to_uppercase())
+        .filter(|k| !k.is_empty())
+        .filter(|k| seen.insert(k.clone()))
+        .collect();
+    if ordered_keys.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let keys_clause = ordered_keys
+        .iter()
+        .map(|k| format!("\"{}\"", k))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let jql = format!("key in ({})", keys_clause);
+    let fetched = fetch_work_items_by_jql(creds, &jql).await?;
+    let by_key: std::collections::HashMap<String, WorkItem> =
+        fetched.into_iter().map(|w| (w.key.clone(), w)).collect();
+
+    Ok(ordered_keys
+        .into_iter()
+        .filter_map(|k| by_key.get(&k).cloned())
+        .collect())
+}
+
 /// Helper: fetch work items matching a single JQL query, with caching and
 /// cursor-based pagination.
-async fn fetch_work_items_by_jql(settings: &Settings, jql: &str) -> Result<Vec<WorkItem>, String> {
+async fn fetch_work_items_by_jql(
+    creds: &JiraCredentials,
+    jql: &str,
+) -> Result<Vec<WorkItem>, String> {
     // Check cache
-    let cache_key = format!("jira_search:{}", jql);
+    let cache_key = format!("{}:jira_search:{}", creds.account_id, jql);
     if let Some(cached) = cache::get(&cache_key) {
         if let Ok(items) = serde_json::from_str::<Vec<WorkItem>>(&cached) {
             return Ok(items);
@@ -659,7 +719,7 @@ async fn fetch_work_items_by_jql(settings: &Settings, jql: &str) -> Result<Vec<W
     loop {
         let mut url = format!(
             "{}/search/jql?jql={}&fields=summary,issuetype&maxResults=100",
-            JIRA_BASE,
+            jira_base(&creds.cloud_id),
             urlencoding_jql(jql)
         );
         if let Some(ref token) = next_page_token {
@@ -668,7 +728,7 @@ async fn fetch_work_items_by_jql(settings: &Settings, jql: &str) -> Result<Vec<W
 
         let resp = HTTP
             .get(&url)
-            .header("Authorization", auth_header(settings))
+            .header("Authorization", bearer_header(&creds.access_token))
             .header("Accept", "application/json")
             .send()
             .await
@@ -745,7 +805,7 @@ struct PickerIssue {
 ///
 /// Returns at most `max_results` items (capped at 12).
 pub async fn search_issues(
-    settings: &Settings,
+    creds: &JiraCredentials,
     query: &str,
     max_results: usize,
 ) -> Result<Vec<WorkItem>, String> {
@@ -759,15 +819,15 @@ pub async fn search_issues(
     // ── Step 1: fuzzy search via the issue picker ───────────────────────
     let url = format!(
         "{}/issue/picker?query={}&showSubTasks=true&showSubTaskParent=true",
-        JIRA_BASE,
+        jira_base(&creds.cloud_id),
         urlencoding_jql(trimmed),
     );
 
-    log::info!("[search_issues] picker query={}", trimmed);
+    log::trace!("[search_issues] picker query={}", trimmed);
 
     let resp = HTTP
         .get(&url)
-        .header("Authorization", auth_header(settings))
+        .header("Authorization", bearer_header(&creds.access_token))
         .header("Accept", "application/json")
         .send()
         .await
@@ -820,14 +880,14 @@ pub async fn search_issues(
 
     let jql_url = format!(
         "{}/search/jql?jql={}&fields=summary,issuetype&maxResults={}",
-        JIRA_BASE,
+        jira_base(&creds.cloud_id),
         urlencoding_jql(&jql),
         cap,
     );
 
     let jql_resp = HTTP
         .get(&jql_url)
-        .header("Authorization", auth_header(settings))
+        .header("Authorization", bearer_header(&creds.access_token))
         .header("Accept", "application/json")
         .send()
         .await
@@ -882,12 +942,12 @@ pub async fn search_issues(
 /// so that navigating to a different week does not require a new round-trip to Jira.
 /// The `start`/`end` filtering is applied after the cache look-up.
 pub async fn fetch_worklogs(
-    settings: &Settings,
+    creds: &JiraCredentials,
     issue_key: &str,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<(Vec<WorklogEntry>, f64), String> {
-    let ck = worklog_cache_key(issue_key);
+    let ck = worklog_cache_key(&creds.account_id, issue_key);
 
     // Try cache first – returns all user worklogs regardless of date range.
     if let Some(cached_json) = cache::get(&ck) {
@@ -907,10 +967,10 @@ pub async fn fetch_worklogs(
     }
 
     // Cache miss – fetch from Jira
-    let url = format!("{}/issue/{}/worklog", JIRA_BASE, issue_key);
+    let url = format!("{}/issue/{}/worklog", jira_base(&creds.cloud_id), issue_key);
     let resp = HTTP
         .get(&url)
-        .header("Authorization", auth_header(settings))
+        .header("Authorization", bearer_header(&creds.access_token))
         .header("Accept", "application/json")
         .send()
         .await
@@ -921,7 +981,7 @@ pub async fn fetch_worklogs(
     }
 
     let wl_resp: WorklogResponse = resp.json().await.map_err(|e| e.to_string())?;
-    let email_lower = settings.email.to_lowercase();
+    let email_lower = creds.email.to_lowercase();
 
     // Collect all worklogs by this user (regardless of date) so we can
     // compute both the date-filtered entries and the all-time total.
@@ -940,7 +1000,8 @@ pub async fn fetch_worklogs(
     // Year-to-date total: sum only worklogs whose date falls within the
     // current calendar year.
     let current_year = chrono::Local::now().date_naive().year();
-    let ytd_start = NaiveDate::from_ymd_opt(current_year, 1, 1).unwrap();
+    let ytd_start = NaiveDate::from_ymd_opt(current_year, 1, 1)
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
 
     let ytd_total: f64 = user_worklogs
         .iter()
@@ -1005,33 +1066,34 @@ pub async fn fetch_worklogs(
 /// Add a worklog entry to a Jira issue.
 /// Uses ADF format for the comment as required by the v3 API.
 pub async fn add_worklog(
-    settings: &Settings,
+    creds: &JiraCredentials,
     issue_key: &str,
     date: NaiveDate,
     hours: f64,
     comment: &str,
 ) -> Result<String, String> {
-    let url = format!("{}/issue/{}/worklog", JIRA_BASE, issue_key);
+    let url = format!("{}/issue/{}/worklog", jira_base(&creds.cloud_id), issue_key);
     let started = format!("{}T12:00:00.000+0000", date);
     let seconds = (hours * 3600.0).round() as u64;
 
-    let body = serde_json::json!({
-        "started": started,
-        "timeSpentSeconds": seconds,
-        "comment": make_adf_comment(comment),
-    });
+    let body = if comment.is_empty() {
+        serde_json::json!({
+            "started": started,
+            "timeSpentSeconds": seconds,
+        })
+    } else {
+        serde_json::json!({
+            "started": started,
+            "timeSpentSeconds": seconds,
+            "comment": make_adf_comment(comment),
+        })
+    };
+
+    log::trace!("[add_worklog] POST {url} body={body:?}");
 
     let resp = HTTP
         .post(&url)
-        .header("Authorization", auth_header(settings))
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    log::info!("About to request: {resp:?}\nwith: {body:?}");
-
-    let resp = HTTP
-        .post(&url)
-        .header("Authorization", auth_header(settings))
+        .header("Authorization", bearer_header(&creds.access_token))
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -1046,7 +1108,7 @@ pub async fn add_worklog(
     }
 
     // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(issue_key);
+    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
 
     // Return the new worklog ID
     let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -1060,29 +1122,40 @@ pub async fn add_worklog(
 /// formatting).  When `None`, a fresh single-paragraph ADF document
 /// is created from `comment`.
 pub async fn update_worklog(
-    settings: &Settings,
+    creds: &JiraCredentials,
     issue_key: &str,
     worklog_id: &str,
     hours: f64,
     comment: &str,
     original_adf: Option<&str>,
 ) -> Result<(), String> {
-    let url = format!("{}/issue/{}/worklog/{}", JIRA_BASE, issue_key, worklog_id);
+    let url = format!(
+        "{}/issue/{}/worklog/{}",
+        jira_base(&creds.cloud_id),
+        issue_key,
+        worklog_id
+    );
     let seconds = (hours * 3600.0).round() as u64;
-    let comment_value = match original_adf {
-        Some(adf_json) => {
-            serde_json::from_str(adf_json).unwrap_or_else(|_| make_adf_comment(comment))
-        }
-        None => make_adf_comment(comment),
+    let body = if comment.is_empty() {
+        serde_json::json!({
+            "timeSpentSeconds": seconds,
+        })
+    } else {
+        let comment_value = match original_adf {
+            Some(adf_json) => {
+                serde_json::from_str(adf_json).unwrap_or_else(|_| make_adf_comment(comment))
+            }
+            None => make_adf_comment(comment),
+        };
+        serde_json::json!({
+            "timeSpentSeconds": seconds,
+            "comment": comment_value,
+        })
     };
-    let body = serde_json::json!({
-        "timeSpentSeconds": seconds,
-        "comment": comment_value,
-    });
 
     let resp = HTTP
         .put(&url)
-        .header("Authorization", auth_header(settings))
+        .header("Authorization", bearer_header(&creds.access_token))
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -1095,21 +1168,26 @@ pub async fn update_worklog(
     }
 
     // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(issue_key);
+    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
 
     Ok(())
 }
 
 /// Delete a worklog entry.
 pub async fn delete_worklog(
-    settings: &Settings,
+    creds: &JiraCredentials,
     issue_key: &str,
     worklog_id: &str,
 ) -> Result<(), String> {
-    let url = format!("{}/issue/{}/worklog/{}", JIRA_BASE, issue_key, worklog_id);
+    let url = format!(
+        "{}/issue/{}/worklog/{}",
+        jira_base(&creds.cloud_id),
+        issue_key,
+        worklog_id
+    );
     let resp = HTTP
         .delete(&url)
-        .header("Authorization", auth_header(settings))
+        .header("Authorization", bearer_header(&creds.access_token))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1120,7 +1198,7 @@ pub async fn delete_worklog(
     }
 
     // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(issue_key);
+    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
 
     Ok(())
 }
@@ -1132,27 +1210,21 @@ pub async fn delete_worklog(
 /// `false` if it was already cached or if an error occurred.
 ///
 /// This is the shared building block for all prefetch functions.
-async fn prefetch_range(start: NaiveDate, end: NaiveDate) -> bool {
+async fn prefetch_range(creds: Arc<JiraCredentials>, start: NaiveDate, end: NaiveDate) -> bool {
     use std::collections::HashMap;
 
-    let cache_key = timesheet_data_cache_key(start, end);
+    let cache_key = timesheet_data_cache_key(&creds.account_id, start, end);
 
     // Already in cache — nothing to do.
     if cache::get(&cache_key).is_some() {
-        log::info!("[prefetch] Already cached: {} .. {}", start, end);
-        return false;
-    }
-
-    let settings = crate::model::load_settings();
-    if settings.email.is_empty() || settings.upland_jira_token.is_empty() {
-        log::info!("[prefetch] Skipping – Jira credentials not configured");
+        log::debug!("[prefetch] Already cached: {} .. {}", start, end);
         return false;
     }
 
     log::debug!("[prefetch] Warming cache for {} .. {}", start, end);
 
     // 1. Fetch work items (populates jira_search cache)
-    let items = match fetch_work_items(&settings, start, end).await {
+    let items = match fetch_work_items(&creds, start, end).await {
         Ok(items) => items,
         Err(e) => {
             log::warn!("[prefetch] fetch_work_items failed for {}: {}", start, e);
@@ -1164,7 +1236,7 @@ async fn prefetch_range(start: NaiveDate, end: NaiveDate) -> bool {
     let mut all_worklogs = Vec::new();
     let mut ytd_hours: HashMap<String, f64> = HashMap::new();
     for item in &items {
-        match fetch_worklogs(&settings, &item.key, start, end).await {
+        match fetch_worklogs(&creds, &item.key, start, end).await {
             Ok((wls, total)) => {
                 all_worklogs.extend(wls);
                 ytd_hours.insert(item.key.clone(), total);
@@ -1187,13 +1259,14 @@ async fn prefetch_range(start: NaiveDate, end: NaiveDate) -> bool {
         ap.cmp(bp).then_with(|| an.cmp(&bn))
     });
 
+    let prefs = crate::auth::load_user_prefs(&creds.account_id);
     let ts = crate::model::TimesheetData {
         work_items: all_items,
         worklogs: all_worklogs,
-        hours_per_week: settings.hours_per_week,
-        hours_per_day: settings.hours_per_day,
+        hours_per_week: prefs.hours_per_week,
+        hours_per_day: prefs.hours_per_day,
         ytd_hours,
-        git_commits: None,
+        bitbucket_activity: HashMap::new(),
         ..Default::default()
     };
 
@@ -1206,8 +1279,9 @@ async fn prefetch_range(start: NaiveDate, end: NaiveDate) -> bool {
 }
 
 /// Convenience wrapper: prefetch a single week by its Monday date.
-async fn prefetch_week(monday: NaiveDate) -> bool {
-    prefetch_range(monday, monday + chrono::Duration::days(6)).await
+#[allow(dead_code)]
+async fn prefetch_week(creds: Arc<JiraCredentials>, monday: NaiveDate) -> bool {
+    prefetch_range(creds, monday, monday + chrono::Duration::days(6)).await
 }
 
 /// Prefetch the date ranges that would be requested when the user navigates
@@ -1221,7 +1295,11 @@ async fn prefetch_week(monday: NaiveDate) -> bool {
 ///
 /// Designed to be called from a background `tokio::spawn` so it never blocks
 /// the response to the client.
-pub async fn prefetch_adjacent_weeks(selected_monday: NaiveDate, num_weeks: usize) {
+pub async fn prefetch_adjacent_weeks(
+    creds: Arc<JiraCredentials>,
+    selected_monday: NaiveDate,
+    num_weeks: usize,
+) {
     let today = chrono::Local::now().date_naive();
     let nw = num_weeks.max(1) as i64;
 
@@ -1229,7 +1307,7 @@ pub async fn prefetch_adjacent_weeks(selected_monday: NaiveDate, num_weeks: usiz
     let prev_monday = selected_monday - chrono::Duration::weeks(1);
     let prev_start = prev_monday - chrono::Duration::weeks(nw - 1);
     let prev_end = prev_monday + chrono::Duration::days(6);
-    prefetch_range(prev_start, prev_end).await;
+    prefetch_range(creds.clone(), prev_start, prev_end).await;
 
     // Next: user navigates one week forward, but only when the next
     // selected Monday is not after today (i.e. the week has already
@@ -1238,33 +1316,8 @@ pub async fn prefetch_adjacent_weeks(selected_monday: NaiveDate, num_weeks: usiz
     if next_monday <= today {
         let next_start = next_monday - chrono::Duration::weeks(nw - 1);
         let next_end = next_monday + chrono::Duration::days(6);
-        prefetch_range(next_start, next_end).await;
+        prefetch_range(creds, next_start, next_end).await;
     }
-}
-
-/// Prefetch timesheet data for the current week (and its neighbours) so the
-/// very first page load is served from cache instead of blocking on slow Jira
-/// API calls.
-///
-/// Call this once from a background `tokio::spawn` during server startup.
-pub async fn prefetch_current_week() {
-    use crate::components::week_navigator::week_monday;
-
-    let settings = crate::model::load_settings();
-    if settings.email.is_empty() || settings.upland_jira_token.is_empty() {
-        log::info!("[prefetch] Skipping – Jira credentials not configured");
-        return;
-    }
-
-    let today = chrono::Local::now().date_naive();
-    let monday = week_monday(today);
-
-    // Current week first (highest priority).
-    prefetch_week(monday).await;
-
-    // Then the adjacent weeks (startup uses num_weeks=1 since we don't
-    // know the client's viewport yet).
-    prefetch_adjacent_weeks(monday, 1).await;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -257,5 +257,8 @@ pub fn provide_popup_flush_context() {
 
 /// Retrieve the [`PopupDraftManager`] from Leptos context.
 pub fn use_popup_flush() -> PopupDraftManager {
-    use_context::<PopupDraftManager>().expect("PopupDraftManager context must be provided")
+    use_context::<PopupDraftManager>().unwrap_or_else(|| {
+        log::error!("PopupDraftManager context not provided, using fallback manager");
+        PopupDraftManager::new()
+    })
 }
