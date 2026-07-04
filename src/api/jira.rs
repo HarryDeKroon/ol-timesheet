@@ -530,8 +530,12 @@ pub async fn fetch_jira_user_profile(
         .await
         .map_err(|e| e.to_string())?;
 
+    let status = resp.status();
     let text = resp.text().await.map_err(|e| e.to_string())?;
-    log::info!("Raw Jira /myself response: {}", text);
+
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {text}"));
+    }
 
     serde_json::from_str::<JiraUserProfile>(&text)
         .map_err(|e| format!("deserialization error: {e}"))

@@ -259,4 +259,3 @@ pub fn provide_popup_flush_context() {
 pub fn use_popup_flush() -> PopupDraftManager {
     use_context::<PopupDraftManager>().expect("PopupDraftManager context must be provided")
 }
-
