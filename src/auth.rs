@@ -45,7 +45,11 @@ fn app_config_dir() -> std::path::PathBuf {
         fallback
     };
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        log::warn!("[auth] Could not create config directory {}: {}", dir.display(), e);
+        log::warn!(
+            "[auth] Could not create config directory {}: {}",
+            dir.display(),
+            e
+        );
     }
     dir
 }

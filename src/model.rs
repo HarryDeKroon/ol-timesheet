@@ -10,17 +10,10 @@ use serde::{Deserialize, Serialize};
 /// manually.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
-    pub git_folder: String,
-    #[serde(default = "default_git_poll_interval_minutes")]
-    pub git_poll_interval_minutes: u32,
     #[serde(default = "default_hours_per_week")]
     pub hours_per_week: f64,
     #[serde(default = "default_hours_per_day")]
     pub hours_per_day: f64,
-}
-
-fn default_git_poll_interval_minutes() -> u32 {
-    5
 }
 
 fn default_hours_per_week() -> f64 {
@@ -52,7 +45,7 @@ cfg_if::cfg_if! {
             pub cloud_id: String,
             /// Jira site base URL, e.g. "https://uplandsoftware.atlassian.net".
             pub site_url: String,
-            /// User-editable preferences (git folder, hours/day, etc.).
+            /// User-editable preferences.
             pub preferences: Settings,
         }
 
@@ -98,6 +91,14 @@ pub struct WorklogEntry {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CellActivity {
+    #[serde(default)]
+    pub commit_messages: Vec<String>,
+    #[serde(default)]
+    pub has_pr_review: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct TimesheetData {
     pub work_items: Vec<WorkItem>,
     pub worklogs: Vec<WorklogEntry>,
@@ -110,9 +111,9 @@ pub struct TimesheetData {
     /// Year-to-date total hours logged by the current user per issue key.
     #[serde(default, alias = "all_time_hours")]
     pub ytd_hours: HashMap<String, f64>,
-    /// Git commit messages per (issue_key, date), if available.
+    /// Bitbucket activity by (issue_key, date), key format: `ISSUE-1234:YYYY-MM-DD`.
     #[serde(default)]
-    pub git_commits: Option<std::collections::HashMap<String, Vec<String>>>,
+    pub bitbucket_activity: HashMap<String, CellActivity>,
     /// Jira site base URL, e.g. "https://uplandsoftware.atlassian.net".
     /// Used by the client to build worklog deep-link URLs.
     #[serde(default)]

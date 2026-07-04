@@ -618,6 +618,42 @@ pub async fn fetch_work_items(
     Ok(items)
 }
 
+/// Fetch a specific set of Jira issues by key.
+pub async fn fetch_work_items_by_keys(
+    creds: &JiraCredentials,
+    keys: &[String],
+) -> Result<Vec<WorkItem>, String> {
+    if keys.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let ordered_keys: Vec<String> = keys
+        .iter()
+        .map(|k| k.trim().to_uppercase())
+        .filter(|k| !k.is_empty())
+        .filter(|k| seen.insert(k.clone()))
+        .collect();
+    if ordered_keys.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let keys_clause = ordered_keys
+        .iter()
+        .map(|k| format!("\"{}\"", k))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let jql = format!("key in ({})", keys_clause);
+    let fetched = fetch_work_items_by_jql(creds, &jql).await?;
+    let by_key: std::collections::HashMap<String, WorkItem> =
+        fetched.into_iter().map(|w| (w.key.clone(), w)).collect();
+
+    Ok(ordered_keys
+        .into_iter()
+        .filter_map(|k| by_key.get(&k).cloned())
+        .collect())
+}
+
 /// Helper: fetch work items matching a single JQL query, with caching and
 /// cursor-based pagination.
 async fn fetch_work_items_by_jql(
@@ -1185,7 +1221,7 @@ async fn prefetch_range(creds: Arc<JiraCredentials>, start: NaiveDate, end: Naiv
         hours_per_week: prefs.hours_per_week,
         hours_per_day: prefs.hours_per_day,
         ytd_hours,
-        git_commits: None,
+        bitbucket_activity: HashMap::new(),
         ..Default::default()
     };
 

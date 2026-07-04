@@ -125,8 +125,7 @@ pub fn CellPopup(
     entries: Vec<WorklogEntry>,
     hours_per_day: f64,
     hours_per_week: f64,
-    suggested_comment: Option<String>,
-    is_git_log: bool,
+    #[prop(default = Vec::new())] suggested_comments: Vec<String>,
     /// Whether this popup's date column is today (enables timer controls).
     #[prop(default = false)]
     is_today: bool,
@@ -176,14 +175,14 @@ pub fn CellPopup(
     // ── Dynamic new entry rows ──────────────────────────────────────────
     // Each new row is a tuple of (hours_signal, comment_signal).
     // There is always at least one (the blank "extra" row).
-    let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> = RwSignal::new(vec![(
-        RwSignal::new(String::new()),
-        RwSignal::new(if is_git_log {
-            suggested_comment.unwrap_or_default()
-        } else {
-            String::new()
-        }),
-    )]);
+    let initial_prefills: Vec<String> = suggested_comments;
+    let mut initial_rows: Vec<(RwSignal<String>, RwSignal<String>)> = initial_prefills
+        .into_iter()
+        .map(|comment| (RwSignal::new(String::new()), RwSignal::new(comment)))
+        .collect();
+    initial_rows.push((RwSignal::new(String::new()), RwSignal::new(String::new())));
+    let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> =
+        RwSignal::new(initial_rows);
 
     // ── Drag support ──
     // We use Rc<Cell<>> for drag state because these closures

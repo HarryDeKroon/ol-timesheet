@@ -83,8 +83,6 @@ on:click=move |_| {
     	- average hours per week
     	- average hours per day
 
-    - Bitbucket integration is currently disabled due to API deprecation.
-
 #### Internationalisation
 
     - No literal strings should be used inside Leptos' view! blocks, but translated strings based on the locale reported by the browser
@@ -110,10 +108,8 @@ This is the main view of the application. Here a overview of hours spent per wor
 - The settings dialog can be accessed at any time by clicking the gear icon button located at the right side of the bottom navigation bar. This button has only an icon and a title attribute ("Open settings") for accessibility.
 - When the settings dialog is open, you can update your credentials and preferences. The dialog now includes both an **OK** button (to save changes) and a **Cancel** button (to close the dialog without saving).
 - Pressing **Cancel** will discard any changes and return you to the timesheet view.
-- The Bitbucket credentials fields are visible but disabled, with a note explaining that Bitbucket integration is currently disabled due to API deprecation. You may still store credentials, but they are not used.
+- The Bitbucket credentials fields are editable and used for Bitbucket API calls.
 - The refresh button is also located at the right of the navigation bar, next to the settings button, and is icon-only (no label), with a title attribute ("Refresh cached work items").
-
-(Bitbucket work item integration is disabled due to API deprecation.)
 
 Each work item is presented as a row header, with the Jira icon for the work item type, the reference key (e.g., SHARED-12345 or TIM-104) and it's summary. The row header also includes the year-to-date total of hours logged by the current user for that work item.
 

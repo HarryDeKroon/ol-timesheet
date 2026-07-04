@@ -11,10 +11,9 @@ use chrono::{Datelike, Duration, Local, NaiveDate};
 use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
-use crate::api::git::fetch_git_commits;
-
-#[cfg(feature = "hydrate")]
-use crate::api::git::check_for_new_git_commits;
+use crate::api::bitbucket::fetch_timesheet_activity;
+#[cfg(feature = "ssr")]
+use crate::model::CellActivity;
 
 // Import flag SVGs from shared flags module
 use crate::flags::{FLAG_FR, FLAG_NL, FLAG_UK};
@@ -56,8 +55,71 @@ pub async fn get_timesheet_data(
         .await
         .map_err(|e| ServerFnError::new(e))?;
 
-    // 1b. Bitbucket PR integration is disabled due to API deprecation.
     let mut all_items = jira_items;
+    let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
+
+    // 1b. Fetch Bitbucket activity (commits + PR reviewer activity) and add
+    // discovered work-item keys to the visible list.
+    match fetch_timesheet_activity(&session.email, &session.display_name, start, end).await {
+        Ok(activity) => {
+            let mut discovered_keys: Vec<String> =
+                activity.discovered_item_summaries.keys().cloned().collect();
+            discovered_keys.sort();
+
+            if !discovered_keys.is_empty() {
+                let known: std::collections::HashSet<String> =
+                    all_items.iter().map(|w| w.key.clone()).collect();
+                let missing: Vec<String> = discovered_keys
+                    .iter()
+                    .filter(|k| !known.contains(k.as_str()))
+                    .cloned()
+                    .collect();
+
+                if !missing.is_empty() {
+                    if let Ok(found) =
+                        crate::api::jira::fetch_work_items_by_keys(&creds, &missing).await
+                    {
+                        all_items.extend(found);
+                    }
+                }
+
+                let mut known_after_fetch: std::collections::HashSet<String> =
+                    all_items.iter().map(|w| w.key.clone()).collect();
+                for key in discovered_keys {
+                    if known_after_fetch.contains(&key) {
+                        continue;
+                    }
+                    let summary = activity
+                        .discovered_item_summaries
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| key.clone());
+                    all_items.push(WorkItem {
+                        key: key.clone(),
+                        summary,
+                        icon_url: String::new(),
+                        issue_type: "Bitbucket".to_string(),
+                    });
+                    known_after_fetch.insert(key);
+                }
+            }
+
+            for (cell_key, msgs) in activity.commit_messages_by_cell {
+                let entry = bitbucket_activity.entry(cell_key).or_default();
+                entry.commit_messages = msgs;
+            }
+            for cell_key in activity.pr_review_cells {
+                let entry = bitbucket_activity.entry(cell_key).or_default();
+                entry.has_pr_review = true;
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "[get_timesheet_data] fetch_timesheet_activity failed: {}",
+                e
+            );
+        }
+    }
 
     // 2. Fetch worklogs for all issues (per-issue cache handles dedup)
     let mut all_worklogs = Vec::new();
@@ -85,38 +147,13 @@ pub async fn get_timesheet_data(
         ap.cmp(bp).then_with(|| an.cmp(&bn))
     });
 
-    // --- Git commit integration ---
-    #[cfg(feature = "ssr")]
-    let git_commits = {
-        use std::collections::HashSet;
-        let git_folder = session.preferences.git_folder.clone();
-        let work_item_keys: HashSet<_> = all_items.iter().map(|item| item.key.clone()).collect();
-        let mut users: HashSet<String> = HashSet::new();
-        if !session.email.is_empty() {
-            users.insert(session.email.clone());
-        }
-        match fetch_git_commits(&git_folder, &work_item_keys, &users, start, end) {
-            Ok(map) => Some(map),
-            Err(e) => {
-                log::warn!("[get_timesheet_data] fetch_git_commits failed: {}", e);
-                None
-            }
-        }
-    };
-
-    #[cfg(feature = "ssr")]
-    log::info!("git_commits: {git_commits:?}");
-
-    #[cfg(not(feature = "ssr"))]
-    let git_commits = None;
-
     let ts = TimesheetData {
         work_items: all_items,
         worklogs: all_worklogs,
         hours_per_week: session.preferences.hours_per_week,
         hours_per_day: session.preferences.hours_per_day,
         ytd_hours,
-        git_commits,
+        bitbucket_activity,
         site_url: session.site_url.clone(),
         ..Default::default()
     };
@@ -206,8 +243,7 @@ struct PopupInfo {
     entries: Vec<WorklogEntry>,
     hours_per_day: f64,
     hours_per_week: f64,
-    suggested_comment: Option<String>,
-    is_git_log: bool,
+    suggested_comments: Vec<String>,
     /// Whether the popup's date column is "today" (enables timer controls).
     is_today: bool,
     /// Inline CSS position computed at open time; updated by dragging.
@@ -226,8 +262,7 @@ impl Clone for PopupInfo {
             entries: self.entries.clone(),
             hours_per_day: self.hours_per_day,
             hours_per_week: self.hours_per_week,
-            suggested_comment: self.suggested_comment.clone(),
-            is_git_log: self.is_git_log,
+            suggested_comments: self.suggested_comments.clone(),
             is_today: self.is_today,
             position_style: self.position_style.clone(),
             site_url: self.site_url.clone(),
@@ -361,10 +396,6 @@ pub fn TimesheetView() -> impl IntoView {
     // ── Popup flush context ──
     provide_popup_flush_context();
     let flush_mgr = use_popup_flush();
-
-    // --- Settings signal (assume loaded at app start, or fetch here if needed) ---
-    // If you already have a settings signal/context, use that instead.
-    // On the client, we use a default poll interval (5) for git polling.
 
     // Signals for user avatar and name
     let user_avatar = RwSignal::new(String::new());
@@ -621,84 +652,6 @@ pub fn TimesheetView() -> impl IntoView {
 
     // ── Popup state — multiple popups can be open simultaneously ──
     let open_popups: RwSignal<Vec<PopupInfo>> = RwSignal::new(Vec::new());
-
-    // --- Polling for new git commits ---
-    #[cfg(not(feature = "ssr"))]
-    {
-        use wasm_bindgen::JsCast;
-        use wasm_bindgen::closure::Closure;
-
-        // State for showing the settings dialog
-        let show_settings = RwSignal::new(false);
-
-        let last_data = last_data.clone();
-        let open_popups_poll = open_popups;
-        let show_settings = show_settings.clone();
-        let selected_monday = selected_monday.clone();
-        let num_weeks = num_weeks.clone();
-
-        Effect::new(move |_| {
-            let poll_interval = 5u32;
-            let poll_interval_ms = poll_interval * 60 * 1_000;
-
-            let closure = Closure::wrap(Box::new(move || {
-                log::info!("Checking for new commits.");
-                if open_popups_poll.with_untracked(|p| p.is_empty())
-                    && !show_settings.get_untracked()
-                {
-                    let known_keys: Vec<String> = last_data
-                        .get_untracked()
-                        .as_ref()
-                        .map(|ts| ts.work_items.iter().map(|wi| wi.key.clone()).collect())
-                        .unwrap_or_else(Vec::new);
-
-                    let monday = selected_monday.get_untracked();
-                    let nw = num_weeks.get_untracked();
-                    let start = monday - chrono::Duration::weeks((nw as i64) - 1);
-                    let end = monday + chrono::Duration::days(6);
-
-                    #[cfg(feature = "hydrate")]
-                    leptos::task::spawn_local(async move {
-                        if let Ok(new_items) =
-                            check_for_new_git_commits(known_keys.clone(), start, end).await
-                        {
-                            if !new_items.is_empty() {
-                                last_data.update(|opt| {
-                                    if let Some(ts) = opt {
-                                        for (key, summary) in new_items.iter() {
-                                            if !ts.work_items.iter().any(|wi| &wi.key == key) {
-                                                ts.work_items.insert(
-                                                    0,
-                                                    WorkItem {
-                                                        key: key.clone(),
-                                                        summary: summary.clone(),
-                                                        icon_url: String::new(),
-                                                        issue_type: String::from("Git"),
-                                                    },
-                                                );
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    });
-                }
-            }) as Box<dyn Fn()>);
-
-            if let Some(window) = web_sys::window() {
-                if let Err(e) = window
-                    .set_interval_with_callback_and_timeout_and_arguments_0(
-                        closure.as_ref().unchecked_ref(),
-                        poll_interval_ms as i32,
-                    )
-                {
-                    log::warn!("failed to set git polling interval: {:?}", e);
-                }
-            }
-            closure.forget();
-        });
-    }
 
     // State for showing the settings dialog
     let show_settings = RwSignal::new(false);
@@ -1034,8 +987,13 @@ pub fn TimesheetView() -> impl IntoView {
                                     let cell_text = format_hours_short(hours, dec_sep);
                                     let worklogs = ts.cell_worklogs(&key, *d);
 
-                                    let git_commits_for_closure = ts.git_commits.clone();
-                                    let git_commit_msgs = git_commits_for_closure.as_ref().and_then(|map| map.get(&format!("{}:{}", key, d)));
+                                    let bb_activity_for_closure = ts.bitbucket_activity.clone();
+                                    let cell_activity = bb_activity_for_closure
+                                        .get(&format!("{}:{}", key, d))
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let commit_messages = cell_activity.commit_messages.clone();
+                                    let has_pr_review = cell_activity.has_pr_review;
 
                                     let (cell_display, title) = if !worklogs.is_empty() {
                                         // Normal worklog cell
@@ -1062,9 +1020,10 @@ pub fn TimesheetView() -> impl IntoView {
                                             worklogs[0].comment.clone()
                                         };
                                         (cell_text.clone(), title)
-                                    } else if let Some(msgs) = git_commit_msgs {
-                                        // Show ? for git commit, with tooltip
-                                        ("?".to_string(), msgs.join("\n"))
+                                    } else if !commit_messages.is_empty() {
+                                        ("?".to_string(), commit_messages.join("\n"))
+                                    } else if has_pr_review {
+                                        ("pr".to_string(), String::new())
                                     } else {
                                         (String::new(), String::new())
                                     };
@@ -1084,7 +1043,6 @@ pub fn TimesheetView() -> impl IntoView {
                                         "col-day timesheet-cell"
                                     };
 
-                                    let suggested_comment = if title.is_empty() { None } else { Some(title.clone()) };
                                     let cell_is_today = is_today;
                                     let cell_summary = summary.clone();
                                     let site_url_for_cell = site_url.clone();
@@ -1098,12 +1056,26 @@ pub fn TimesheetView() -> impl IntoView {
                                                     if !conn.is_available() {
                                                         return;
                                                     }
-                                                    let is_git_log = entries2.is_empty() && git_commits_for_closure.as_ref().and_then(|map| map.get(&format!("{}:{}", ck2, cell_date))).is_some();
                                                     // Don't open a duplicate popup for the same cell.
                                                     let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == ck2 && p.date == cell_date));
                                                     if already_open {
                                                         return;
                                                     }
+                                                    let suggested_comments = if entries2.is_empty() {
+                                                        let activity = bb_activity_for_closure
+                                                            .get(&format!("{}:{}", ck2, cell_date))
+                                                            .cloned()
+                                                            .unwrap_or_default();
+                                                        if !activity.commit_messages.is_empty() {
+                                                            activity.commit_messages
+                                                        } else if activity.has_pr_review {
+                                                            vec!["review".to_string()]
+                                                        } else {
+                                                            vec![]
+                                                        }
+                                                    } else {
+                                                        vec![]
+                                                    };
                                                     let pos_style = compute_popup_style(
                                                         &ck2,
                                                         &cell_date.to_string(),
@@ -1118,8 +1090,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                         entries: entries2.clone(),
                                                         hours_per_day: hpd,
                                                         hours_per_week: hpw,
-                                                        suggested_comment: suggested_comment.clone(),
-                                                        is_git_log,
+                                                        suggested_comments,
                                                         is_today: cell_is_today,
                                                         position_style: RwSignal::new(pos_style),
                                                         site_url: site_url_for_cell.clone(),
@@ -1180,6 +1151,29 @@ pub fn TimesheetView() -> impl IntoView {
 
 
                                 let we_entries: Vec<_> = we_worklogs.into_iter().cloned().collect();
+                                let weekend_activity_sat = ts
+                                    .bitbucket_activity
+                                    .get(&format!("{}:{}", key, sat))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let weekend_activity_sun = ts
+                                    .bitbucket_activity
+                                    .get(&format!("{}:{}", key, sun))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let mut weekend_commit_messages = weekend_activity_sat.commit_messages;
+                                weekend_commit_messages.extend(weekend_activity_sun.commit_messages);
+                                let weekend_has_pr_review =
+                                    weekend_activity_sat.has_pr_review || weekend_activity_sun.has_pr_review;
+                                let (we_display, we_tooltip) = if !we_entries.is_empty() {
+                                    (we_text.clone(), we_title.clone())
+                                } else if !weekend_commit_messages.is_empty() {
+                                    ("?".to_string(), weekend_commit_messages.join("\n"))
+                                } else if weekend_has_pr_review {
+                                    ("pr".to_string(), String::new())
+                                } else {
+                                    (String::new(), String::new())
+                                };
 
                                 let we_key = key.clone();
 
@@ -1188,10 +1182,8 @@ pub fn TimesheetView() -> impl IntoView {
                                 let we_key2 = we_key.clone();
 
                                 let we_entries2 = we_entries.clone();
-                                let git_commits_for_closure = ts.git_commits.clone();
+                                let bb_activity_for_closure = ts.bitbucket_activity.clone();
 
-
-                                let suggested_comment = if we_title.is_empty() { None } else { Some(we_title.clone()) };
                                 // Only highlight the weekend cell as col-today if today is Sat or Sun AND this weekend cell contains today
                                 let today_date = today.get();
                                 let is_today_weekend = (today_date == sat) || (today_date == sun);
@@ -1204,7 +1196,7 @@ pub fn TimesheetView() -> impl IntoView {
                                 let we_summary = summary.clone();
                                 let site_url_for_we = site_url.clone();
                                 week_cells.push(view! {
-                                    <td class={weekend_cls} title={we_title}>
+                                    <td class={weekend_cls} title={we_tooltip}>
                                         <span
                                             class="cell-value"
                                             data-cell-key={we_key}
@@ -1214,11 +1206,31 @@ pub fn TimesheetView() -> impl IntoView {
                                                 if !conn.is_available() {
                                                     return;
                                                 }
-                                                let is_git_log = we_entries2.is_empty() && git_commits_for_closure.as_ref().and_then(|map| map.get(&format!("{}:{}", we_key2, sat))).is_some();
                                                 let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == we_key2 && p.date == sat));
                                                 if already_open {
                                                     return;
                                                 }
+                                                let suggested_comments = if we_entries2.is_empty() {
+                                                    let sat_activity = bb_activity_for_closure
+                                                        .get(&format!("{}:{}", we_key2, sat))
+                                                        .cloned()
+                                                        .unwrap_or_default();
+                                                    let sun_activity = bb_activity_for_closure
+                                                        .get(&format!("{}:{}", we_key2, sun))
+                                                        .cloned()
+                                                        .unwrap_or_default();
+                                                    let mut commit_messages = sat_activity.commit_messages;
+                                                    commit_messages.extend(sun_activity.commit_messages);
+                                                    if !commit_messages.is_empty() {
+                                                        commit_messages
+                                                    } else if sat_activity.has_pr_review || sun_activity.has_pr_review {
+                                                        vec!["review".to_string()]
+                                                    } else {
+                                                        vec![]
+                                                    }
+                                                } else {
+                                                    vec![]
+                                                };
                                                 let pos_style = compute_popup_style(
                                                     &we_key2,
                                                     &sat.to_string(),
@@ -1233,8 +1245,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                     entries: we_entries2.clone(),
                                                     hours_per_day: hpd,
                                                     hours_per_week: hpw,
-                                                    suggested_comment: suggested_comment.clone(),
-                                                    is_git_log,
+                                                    suggested_comments,
                                                     is_today: we_cell_is_today,
                                                     position_style: RwSignal::new(pos_style),
                                                     site_url: site_url_for_we.clone(),
@@ -1243,7 +1254,7 @@ pub fn TimesheetView() -> impl IntoView {
                                             }
 
                                         >
-                                            {we_text}
+                                            {we_display}
                                         </span>
                                     </td>
                                 }.into_any());
@@ -1449,8 +1460,7 @@ pub fn TimesheetView() -> impl IntoView {
                            entries={info.entries}
                            hours_per_day={info.hours_per_day}
                            hours_per_week={info.hours_per_week}
-                           suggested_comment={info.suggested_comment.clone()}
-                           is_git_log={info.is_git_log}
+                           suggested_comments={info.suggested_comments.clone()}
                            is_today={info.is_today}
                            on_close=on_close_popup
                            on_changed=on_popup_changed

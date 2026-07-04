@@ -1,5 +1,3 @@
-pub mod git;
-
 #[cfg(feature = "ssr")]
 pub mod bitbucket;
 #[cfg(feature = "ssr")]
