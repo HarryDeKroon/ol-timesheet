@@ -30,6 +30,7 @@ pub async fn get_timesheet_data(
 ) -> Result<(TimesheetData, Option<(String, String)>), ServerFnError> {
     use crate::api::jira::timesheet_data_cache_key;
     use std::sync::Arc;
+    let jira_started_at = std::time::Instant::now();
 
     let (_, session) = crate::auth::current_user_session().await?;
     let creds = Arc::new(session.jira_credentials());
@@ -59,6 +60,7 @@ pub async fn get_timesheet_data(
 
     let mut all_items = jira_items;
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
+    let mut jira_discovered_item_count = 0usize;
 
     // 1b. Fetch Bitbucket activity (commits + PR reviewer activity) and add
     // discovered work-item keys to the visible list.
@@ -81,6 +83,7 @@ pub async fn get_timesheet_data(
                     if let Ok(found) =
                         crate::api::jira::fetch_work_items_by_keys(&creds, &missing).await
                     {
+                        jira_discovered_item_count = found.len();
                         all_items.extend(found);
                     }
                 }
@@ -135,6 +138,16 @@ pub async fn get_timesheet_data(
             Err(e) => log::warn!("Failed to fetch worklogs for {}: {}", item.key, e),
         }
     }
+    log::info!(
+        "[get_timesheet_data] jira scan done: range={}..{}, work_items={}, discovered_items={}, worklog_issues={}, worklog_entries={}, elapsed_ms={}",
+        start,
+        end,
+        all_items.len(),
+        jira_discovered_item_count,
+        ytd_hours.len(),
+        all_worklogs.len(),
+        jira_started_at.elapsed().as_millis()
+    );
 
     // Sort work items by key only (natural order).
     all_items.sort_by(|a, b| {

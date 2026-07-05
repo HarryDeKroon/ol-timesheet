@@ -411,7 +411,19 @@ fn pr_matches_user(
                 .unwrap_or(false)
                 || reviewer_matches(&p.user, user_email, display_name))
     });
-    reviewer_match || participant_reviewer_match
+    // Some Bitbucket responses omit explicit reviewers and only expose a
+    // participant role that is not AUTHOR (e.g. PARTICIPANT) for review-assigned users.
+    let participant_non_author_match = pr.participants.iter().any(|p| {
+        !p.role
+            .as_deref()
+            .map(|r| r.eq_ignore_ascii_case("AUTHOR"))
+            .unwrap_or(false)
+            && (current_user
+                .map(|u| reviewer_matches_identity(&p.user, u))
+                .unwrap_or(false)
+                || reviewer_matches(&p.user, user_email, display_name))
+    });
+    reviewer_match || participant_reviewer_match || participant_non_author_match
 }
 
 fn current_user_debug_identity(user: &BitbucketCurrentUser) -> String {
@@ -419,6 +431,52 @@ fn current_user_debug_identity(user: &BitbucketCurrentUser) -> String {
         "account_id={:?}, uuid={:?}, username={:?}, nickname={:?}, display_name={:?}",
         user.account_id, user.uuid, user.username, user.nickname, user.display_name
     )
+}
+
+fn escape_query_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn reviewer_filter_query(
+    current_user: &BitbucketCurrentUser,
+    user_email: &str,
+    display_name: &str,
+) -> Option<String> {
+    let mut terms = Vec::<String>::new();
+    let _ = user_email;
+    let _ = display_name;
+    if let Some(v) = current_user.account_id.as_deref().filter(|v| !v.is_empty()) {
+        let qv = escape_query_value(v);
+        terms.push(format!("reviewers.account_id=\"{}\"", qv));
+    }
+    if let Some(v) = current_user.uuid.as_deref().filter(|v| !v.is_empty()) {
+        let qv = escape_query_value(v);
+        terms.push(format!("reviewers.uuid=\"{}\"", qv));
+    }
+    // Keep this query conservative: Bitbucket Cloud search rejects some reviewer
+    // subfields (e.g. display_name), returning 400 for the whole query.
+
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
+fn pr_identity_key(repo_slug: &str, pr: &BitbucketPullRequest) -> String {
+    if let Some(id) = pr.id {
+        format!("{}:{}", repo_slug, id)
+    } else {
+        format!(
+            "{}:{}:{}",
+            repo_slug,
+            pr.title,
+            pr.updated_on
+                .as_deref()
+                .or(pr.created_on.as_deref())
+                .unwrap_or_default()
+        )
+    }
 }
 
 async fn get_json<T: for<'de> Deserialize<'de>>(auth_value: &str, url: &str) -> Result<T, String> {
@@ -520,6 +578,7 @@ pub async fn fetch_timesheet_activity(
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<BitbucketActivity, String> {
+    let started_at = std::time::Instant::now();
     let config = BitbucketConfig::from_env()?;
     let auth_value = auth_header(user_email, &config.api_token);
     let mut activity = BitbucketActivity::default();
@@ -572,6 +631,7 @@ pub async fn fetch_timesheet_activity(
     );
     let mut commit_page_count = 0usize;
     let mut matched_commit_count = 0usize;
+    let mut commit_repo_error_count = 0usize;
     for repo_slug in &project_repos {
         let repo_base = format!(
             "{}/repositories/{}/{}",
@@ -580,7 +640,19 @@ pub async fn fetch_timesheet_activity(
         log::debug!("[bitbucket] scanning commits for repo={}", repo_slug);
         let mut next_url = Some(format!("{}/commits?pagelen=100", repo_base));
         while let Some(url) = next_url {
-            let page: BitbucketPage<BitbucketCommit> = get_json(&auth_value, &url).await?;
+            let page: BitbucketPage<BitbucketCommit> = match get_json(&auth_value, &url).await {
+                Ok(page) => page,
+                Err(err) => {
+                    commit_repo_error_count += 1;
+                    log::warn!(
+                        "[bitbucket] commits scan failed for repo={} url={} err={}",
+                        repo_slug,
+                        url,
+                        err
+                    );
+                    break;
+                }
+            };
             commit_page_count += 1;
             let page_len = page.values.len();
             next_url = page.next.clone();
@@ -638,6 +710,8 @@ pub async fn fetch_timesheet_activity(
     let mut pr_after_range_count = 0usize;
     let mut pr_no_reviewer_match_count = 0usize;
     let mut pr_missing_key_count = 0usize;
+    let mut pr_repo_error_count = 0usize;
+    let mut seen_pr_identities = HashSet::<String>::new();
     for repo_slug in &project_repos {
         let repo_base = format!(
             "{}/repositories/{}/{}",
@@ -649,7 +723,20 @@ pub async fn fetch_timesheet_activity(
             repo_base
         ));
         while let Some(url) = pr_next_url {
-            let page: BitbucketPage<BitbucketPullRequest> = get_json(&auth_value, &url).await?;
+            let page: BitbucketPage<BitbucketPullRequest> = match get_json(&auth_value, &url).await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    pr_repo_error_count += 1;
+                    log::warn!(
+                        "[bitbucket] pullrequest scan failed for repo={} url={} err={}",
+                        repo_slug,
+                        url,
+                        err
+                    );
+                    break;
+                }
+            };
             pr_page_count += 1;
             let page_len = page.values.len();
             pr_next_url = page.next.clone();
@@ -783,25 +870,10 @@ pub async fn fetch_timesheet_activity(
                         reviewer_data.0,
                         reviewer_data.1
                     );
-                    if pr_no_reviewer_match_count <= 5 {
-                        let current_user_details = current_user
-                            .as_ref()
-                            .map(current_user_debug_identity)
-                            .unwrap_or_else(|| "unavailable".to_string());
-                        log::info!(
-                            "[bitbucket] reviewer mismatch sample #{}: repo={} id={:?} title={:?} current_user={} reviewers=[{}] participants=[{}]",
-                            pr_no_reviewer_match_count,
-                            repo_slug,
-                            pr.id,
-                            pr.title,
-                            current_user_details,
-                            reviewer_data.0,
-                            reviewer_data.1
-                        );
-                    }
                     continue;
                 }
                 if let Some(key) = extract_work_item_key(&pr.title) {
+                    seen_pr_identities.insert(pr_identity_key(repo_slug, &pr));
                     let map_key = format!("{}:{}", key, pr_date);
                     activity.pr_review_cells.insert(map_key);
                     let cleaned = strip_key_prefix(&pr.title, &key);
@@ -837,14 +909,81 @@ pub async fn fetch_timesheet_activity(
                 break;
             }
         }
+
+        // Fallback for environments where reviewer assignment is not
+        // consistently present in list/detail payloads: query PRs by reviewer identity.
+        if let Some(user) = current_user.as_ref() {
+            if let Some(q) = reviewer_filter_query(user, user_email, display_name) {
+                let mut filtered_next = Some(format!(
+                    "{}/pullrequests?pagelen=50&sort=-updated_on&q={}",
+                    repo_base,
+                    urlencoding_jql(&q)
+                ));
+                while let Some(furl) = filtered_next {
+                    let fpage: BitbucketPage<BitbucketPullRequest> =
+                        match get_json(&auth_value, &furl).await {
+                            Ok(page) => page,
+                            Err(err) => {
+                                pr_repo_error_count += 1;
+                                log::warn!(
+                                    "[bitbucket] reviewer-query scan failed for repo={} url={} err={}",
+                                    repo_slug,
+                                    furl,
+                                    err
+                                );
+                                break;
+                            }
+                        };
+                    filtered_next = fpage.next.clone();
+                    for pr in fpage.values {
+                        let identity = pr_identity_key(repo_slug, &pr);
+                        if seen_pr_identities.contains(&identity) {
+                            continue;
+                        }
+                        let when = pr
+                            .updated_on
+                            .as_deref()
+                            .or(pr.created_on.as_deref())
+                            .and_then(parse_iso_date);
+                        let Some(pr_date) = when else {
+                            continue;
+                        };
+                        if pr_date < start || pr_date > end {
+                            continue;
+                        }
+                        if let Some(key) = extract_work_item_key(&pr.title) {
+                            let map_key = format!("{}:{}", key, pr_date);
+                            activity.pr_review_cells.insert(map_key);
+                            let cleaned = strip_key_prefix(&pr.title, &key);
+                            activity
+                                .discovered_item_summaries
+                                .entry(key.clone())
+                                .or_insert(cleaned);
+                            matched_pr_count += 1;
+                            seen_pr_identities.insert(identity);
+                            log::debug!(
+                                "[bitbucket] PR matched by reviewer query: repo={} id={:?} title={:?} date={} key={}",
+                                repo_slug,
+                                pr.id,
+                                pr.title,
+                                pr_date,
+                                key
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     log::info!(
-        "[bitbucket] done: commit_pages={}, matched_commits={}, pr_pages={}, matched_prs={}, pr_missing_date={}, pr_before_range={}, pr_after_range={}, pr_reviewer_mismatch={}, pr_missing_key={}, repos_scanned={}, commit_cells={}, pr_cells={}, discovered_keys={}",
+        "[bitbucket] done: commit_pages={}, matched_commits={}, commit_repo_errors={}, pr_pages={}, matched_prs={}, pr_repo_errors={}, pr_missing_date={}, pr_before_range={}, pr_after_range={}, pr_reviewer_mismatch={}, pr_missing_key={}, repos_scanned={}, commit_cells={}, pr_cells={}, discovered_keys={}, elapsed_ms={}",
         commit_page_count,
         matched_commit_count,
+        commit_repo_error_count,
         pr_page_count,
         matched_pr_count,
+        pr_repo_error_count,
         pr_missing_date_count,
         pr_before_range_count,
         pr_after_range_count,
@@ -853,7 +992,8 @@ pub async fn fetch_timesheet_activity(
         project_repos.len(),
         activity.commit_messages_by_cell.len(),
         activity.pr_review_cells.len(),
-        activity.discovered_item_summaries.len()
+        activity.discovered_item_summaries.len(),
+        started_at.elapsed().as_millis()
     );
 
     Ok(activity)
