@@ -132,6 +132,8 @@ pub fn CellPopup(
     hours_per_week: f64,
     #[prop(default = Vec::new())] suggested_comments: Vec<String>,
     suggested_comment: Option<String>,
+    #[prop(default = Vec::new())] commit_links: Vec<String>,
+    #[prop(default = Vec::new())] pr_links: Vec<String>,
     is_git_log: bool,
     #[prop(default = false)] is_weekend: bool,
     restored_timer_popup: Option<PersistedTimerPopup>,
@@ -229,6 +231,25 @@ pub fn CellPopup(
     // Each new row is a tuple of (hours_signal, comment_signal).
     // There is always at least one (the blank "extra" row).
     let initial_prefills: Vec<String> = suggested_comments;
+    let prefills_for_links = initial_prefills.clone();
+    let mut commit_links_for_rows = commit_links;
+    let mut pr_links_for_rows = pr_links;
+    let suggested_row_links: Vec<Option<(String, bool)>> = prefills_for_links
+        .iter()
+        .map(|comment| {
+            if comment.trim().eq_ignore_ascii_case("review") {
+                if pr_links_for_rows.is_empty() {
+                    None
+                } else {
+                    Some((pr_links_for_rows.remove(0), true))
+                }
+            } else if commit_links_for_rows.is_empty() {
+                None
+            } else {
+                Some((commit_links_for_rows.remove(0), false))
+            }
+        })
+        .collect();
     let mut initial_rows: Vec<(RwSignal<String>, RwSignal<String>)> = initial_prefills
         .into_iter()
         .map(|comment| (RwSignal::new(String::new()), RwSignal::new(comment)))
@@ -1125,13 +1146,14 @@ pub fn CellPopup(
                                     <span class="popup-actions">
                                         {timer_buttons}
                                         <a
-                                            class="popup-worklog-link"
+                                            class="popup-link popup-link--jira"
                                             href={link_href.clone()}
                                             target="_blank"
                                             rel="noopener"
                                             title=move || i18n.get().t(keys::OPEN_IN_JIRA)
                                         >
-                                            "\u{1F517}"
+                                            <span class="popup-link-base">"\u{1F517}"</span>
+                                            <span class="popup-link-badge">"J"</span>
                                         </a>
                                         <button class="popup-delete" on:click=delete_worklog disabled=move || !conn.is_available()>
                                             "\u{1F5D1}"
@@ -1159,6 +1181,7 @@ pub fn CellPopup(
                         let tid_for_disabled = timer_id.clone();
                         let tid_for_progress = timer_id.clone();
                         let timer_buttons = build_timer_buttons(timer_id, hours_sig);
+                        let row_link = suggested_row_links.get(idx).cloned().flatten();
 
                         view! {
                             <div class="popup-entry popup-new">
@@ -1200,7 +1223,37 @@ pub fn CellPopup(
                                 />
                                 <span class="popup-actions">
                                     {timer_buttons}
-                                    <span class="popup-spacer"></span>
+                                    {if let Some((href, is_pr)) = row_link {
+                                        if is_pr {
+                                            view! {
+                                                <a
+                                                    class="popup-link popup-link--pr"
+                                                    href={href}
+                                                    target="_blank"
+                                                    rel="noopener"
+                                                    title=move || i18n.get().t(keys::OPEN_PR_IN_BITBUCKET)
+                                                >
+                                                    <span class="popup-link-base">"\u{1F517}"</span>
+                                                    <span class="popup-link-badge">"P"</span>
+                                                </a>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <a
+                                                    class="popup-link popup-link--commit"
+                                                    href={href}
+                                                    target="_blank"
+                                                    rel="noopener"
+                                                    title=move || i18n.get().t(keys::OPEN_COMMIT_IN_BITBUCKET)
+                                                >
+                                                    <span class="popup-link-base">"\u{1F517}"</span>
+                                                    <span class="popup-link-badge">"C"</span>
+                                                </a>
+                                            }.into_any()
+                                        }
+                                    } else {
+                                        view! { <span class="popup-spacer"></span> }.into_any()
+                                    }}
                                 </span>
                             </div>
                         }

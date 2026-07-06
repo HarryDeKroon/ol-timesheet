@@ -71,6 +71,8 @@ pub mod keys {
     pub const PREVIOUS_WEEK: &str = "previous_week";
     pub const NEXT_WEEK: &str = "next_week";
     pub const OPEN_IN_JIRA: &str = "open_in_jira";
+    pub const OPEN_COMMIT_IN_BITBUCKET: &str = "open_commit_in_bitbucket";
+    pub const OPEN_PR_IN_BITBUCKET: &str = "open_pr_in_bitbucket";
     pub const OPEN_SETTINGS: &str = "open_settings";
     pub const REFRESH_CACHED: &str = "refresh_cached";
     pub const LOGOUT: &str = "logout";
@@ -146,6 +148,8 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::PREVIOUS_WEEK, "Previous week"),
         (keys::NEXT_WEEK, "Next week"),
         (keys::OPEN_IN_JIRA, "Open in Jira"),
+        (keys::OPEN_COMMIT_IN_BITBUCKET, "Open commit in Bitbucket"),
+        (keys::OPEN_PR_IN_BITBUCKET, "Open pull request in Bitbucket"),
         (keys::OPEN_SETTINGS, "Open settings"),
         (keys::REFRESH_CACHED, "Refresh cached work items"),
         (keys::LOGOUT, "Log out"),
@@ -235,6 +239,14 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::PREVIOUS_WEEK, "Semaine précédente"),
         (keys::NEXT_WEEK, "Semaine suivante"),
         (keys::OPEN_IN_JIRA, "Ouvrir dans Jira"),
+        (
+            keys::OPEN_COMMIT_IN_BITBUCKET,
+            "Ouvrir le commit dans Bitbucket",
+        ),
+        (
+            keys::OPEN_PR_IN_BITBUCKET,
+            "Ouvrir la demande de tirage dans Bitbucket",
+        ),
         (keys::OPEN_SETTINGS, "Ouvrir les paramètres"),
         (keys::REFRESH_CACHED, "Rafraîchir les éléments en cache"),
         (keys::LOGOUT, "Se déconnecter"),
@@ -309,6 +321,14 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::PREVIOUS_WEEK, "Vorige week"),
         (keys::NEXT_WEEK, "Volgende week"),
         (keys::OPEN_IN_JIRA, "Openen in Jira"),
+        (
+            keys::OPEN_COMMIT_IN_BITBUCKET,
+            "Commit openen in Bitbucket",
+        ),
+        (
+            keys::OPEN_PR_IN_BITBUCKET,
+            "Pull request openen in Bitbucket",
+        ),
         (keys::OPEN_SETTINGS, "Instellingen openen"),
         (keys::REFRESH_CACHED, "Werkitems in cache vernieuwen"),
         (keys::LOGOUT, "Uitloggen"),

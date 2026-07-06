@@ -23,6 +23,131 @@ use crate::flags::{FLAG_FR, FLAG_NL, FLAG_UK};
 #[cfg(feature = "ssr")]
 use std::collections::HashMap;
 
+#[cfg(feature = "ssr")]
+fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    let first = week_monday(start);
+    let mut mondays = Vec::new();
+    let mut cursor = first;
+    while cursor <= end {
+        mondays.push(cursor);
+        cursor += Duration::weeks(1);
+    }
+    mondays
+}
+
+#[cfg(feature = "ssr")]
+fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetData {
+    let sunday = monday + Duration::days(6);
+    let date_in_week = |d: NaiveDate| d >= monday && d <= sunday;
+
+    let worklogs = source
+        .worklogs
+        .iter()
+        .filter(|w| date_in_week(w.date))
+        .cloned()
+        .collect::<Vec<_>>();
+    let keys_with_logs = worklogs
+        .iter()
+        .map(|w| w.issue_key.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let keys_with_activity = source
+        .bitbucket_activity
+        .keys()
+        .filter_map(|k| k.rsplit_once(':'))
+        .filter_map(|(issue_key, date)| {
+            NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .ok()
+                .filter(|d| date_in_week(*d))
+                .map(|_| issue_key.to_string())
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let visible_keys = keys_with_logs
+        .union(&keys_with_activity)
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+
+    let work_items = source
+        .work_items
+        .iter()
+        .filter(|i| visible_keys.contains(&i.key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ytd_hours = source
+        .ytd_hours
+        .iter()
+        .filter(|(k, _)| visible_keys.contains(*k))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect::<HashMap<_, _>>();
+    let bitbucket_activity = source
+        .bitbucket_activity
+        .iter()
+        .filter_map(|(k, v)| {
+            k.rsplit_once(':').and_then(|(_, date)| {
+                NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                    .ok()
+                    .filter(|d| date_in_week(*d))
+                    .map(|_| (k.clone(), v.clone()))
+            })
+        })
+        .collect::<HashMap<_, _>>();
+
+    TimesheetData {
+        work_items,
+        worklogs,
+        hours_per_week: source.hours_per_week,
+        hours_per_day: source.hours_per_day,
+        ytd_hours,
+        bitbucket_activity,
+        site_url: source.site_url.clone(),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
+    let mut by_key = HashMap::<String, WorkItem>::new();
+    let mut worklogs = Vec::<WorklogEntry>::new();
+    let mut ytd_hours = HashMap::<String, f64>::new();
+    let mut bitbucket_activity = HashMap::<String, CellActivity>::new();
+    let mut hours_per_week = 40.0;
+    let mut hours_per_day = 8.0;
+    let mut site_url = String::new();
+
+    for chunk in chunks {
+        hours_per_week = chunk.hours_per_week;
+        hours_per_day = chunk.hours_per_day;
+        if site_url.is_empty() {
+            site_url = chunk.site_url.clone();
+        }
+        for item in chunk.work_items {
+            by_key.insert(item.key.clone(), item);
+        }
+        for wl in chunk.worklogs {
+            worklogs.push(wl);
+        }
+        for (k, v) in chunk.ytd_hours {
+            ytd_hours.insert(k, v);
+        }
+        for (k, v) in chunk.bitbucket_activity {
+            bitbucket_activity.entry(k).or_insert(v);
+        }
+    }
+
+    let mut work_items = by_key.into_values().collect::<Vec<_>>();
+    work_items.sort_by(|a, b| a.key.cmp(&b.key));
+
+    TimesheetData {
+        work_items,
+        worklogs,
+        hours_per_week,
+        hours_per_day,
+        ytd_hours,
+        bitbucket_activity,
+        site_url,
+        ..Default::default()
+    }
+}
+
 #[server(GetTimesheetData, "/api")]
 pub async fn get_timesheet_data(
     start: NaiveDate,
@@ -34,8 +159,38 @@ pub async fn get_timesheet_data(
 
     let (_, session) = crate::auth::current_user_session().await?;
     let creds = Arc::new(session.jira_credentials());
+    let user_profile = Some((session.avatar_url.clone(), session.display_name.clone()));
+    let requested_mondays = requested_week_mondays(start, end);
 
     let cache_key = timesheet_data_cache_key(&creds.account_id, start, end);
+
+    // Week-cache fast path.
+    let mut week_chunks = Vec::<TimesheetData>::new();
+    for monday in &requested_mondays {
+        let wkey = crate::api::cache::week_cache_key(&creds.account_id, *monday);
+        let Some(raw) = crate::api::cache::get(&wkey) else {
+            week_chunks.clear();
+            break;
+        };
+        if let Ok(ts) = serde_json::from_str::<TimesheetData>(&raw) {
+            week_chunks.push(ts);
+        } else {
+            week_chunks.clear();
+            break;
+        }
+    }
+    if week_chunks.len() == requested_mondays.len() && !week_chunks.is_empty() {
+        let merged = merge_weekly_timesheets(week_chunks);
+        let selected_monday = end - chrono::Duration::days(6);
+        let num_weeks = (((end - start).num_days() + 1) / 7).max(1) as usize;
+        tokio::spawn(crate::api::jira::prefetch_adjacent_weeks(
+            creds.clone(),
+            session.display_name.clone(),
+            selected_monday,
+            num_weeks,
+        ));
+        return Ok((merged, user_profile));
+    }
 
     // Check assembled-data cache first — this makes revisiting a week instant.
     if let Some(cached_json) = crate::api::cache::get(&cache_key) {
@@ -46,17 +201,20 @@ pub async fn get_timesheet_data(
             let num_weeks = (((end - start).num_days() + 1) / 7).max(1) as usize;
             tokio::spawn(crate::api::jira::prefetch_adjacent_weeks(
                 creds.clone(),
+                session.display_name.clone(),
                 selected_monday,
                 num_weeks,
             ));
-            return Ok((ts, None));
+            return Ok((ts, user_profile));
         }
     }
 
-    // 1. Fetch issues from Jira (with worklogs in date range)
-    let jira_items = crate::api::jira::fetch_work_items(&creds, start, end)
-        .await
-        .map_err(|e| ServerFnError::new(e))?;
+    // 1. Fetch Jira and Bitbucket in parallel.
+    let (jira_items_res, bitbucket_res) = tokio::join!(
+        crate::api::jira::fetch_work_items(&creds, start, end),
+        fetch_timesheet_activity(&session.email, &session.display_name, start, end),
+    );
+    let jira_items = jira_items_res.map_err(ServerFnError::new)?;
 
     let mut all_items = jira_items;
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
@@ -64,7 +222,7 @@ pub async fn get_timesheet_data(
 
     // 1b. Fetch Bitbucket activity (commits + PR reviewer activity) and add
     // discovered work-item keys to the visible list.
-    match fetch_timesheet_activity(&session.email, &session.display_name, start, end).await {
+    match bitbucket_res {
         Ok(activity) => {
             let mut discovered_keys: Vec<String> =
                 activity.discovered_item_summaries.keys().cloned().collect();
@@ -113,9 +271,25 @@ pub async fn get_timesheet_data(
                 let entry = bitbucket_activity.entry(cell_key).or_default();
                 entry.commit_messages = msgs;
             }
+            for (cell_key, links) in activity.commit_links_by_cell {
+                let entry = bitbucket_activity.entry(cell_key).or_default();
+                let mut merged = entry.commit_links.clone();
+                merged.extend(links);
+                merged.sort();
+                merged.dedup();
+                entry.commit_links = merged;
+            }
             for cell_key in activity.pr_review_cells {
                 let entry = bitbucket_activity.entry(cell_key).or_default();
                 entry.has_pr_review = true;
+            }
+            for (cell_key, links) in activity.pr_links_by_cell {
+                let entry = bitbucket_activity.entry(cell_key).or_default();
+                let mut merged = entry.pr_links.clone();
+                merged.extend(links);
+                merged.sort();
+                merged.dedup();
+                entry.pr_links = merged;
             }
         }
         Err(e) => {
@@ -173,12 +347,17 @@ pub async fn get_timesheet_data(
         ..Default::default()
     };
 
-    // User profile is already in the session.
-    let user_profile = Some((session.avatar_url.clone(), session.display_name.clone()));
-
     // Cache the assembled result so the same week is instant next time.
     if let Ok(json) = serde_json::to_string(&ts) {
         crate::api::cache::put(cache_key.clone(), json);
+    }
+    for monday in requested_mondays {
+        let week_key = crate::api::cache::week_cache_key(&creds.account_id, monday);
+        let week_ts = timesheet_for_week(&ts, monday);
+        if let Ok(raw) = serde_json::to_string(&week_ts) {
+            crate::api::cache::put(week_key, raw);
+            crate::api::cache::update_cached_week(&creds.account_id, monday, chrono::Utc::now());
+        }
     }
 
     // Prefetch adjacent weeks in the background so the next navigation
@@ -187,6 +366,7 @@ pub async fn get_timesheet_data(
     let num_weeks = (((end - start).num_days() + 1) / 7).max(1) as usize;
     tokio::spawn(crate::api::jira::prefetch_adjacent_weeks(
         creds,
+        session.display_name.clone(),
         selected_monday,
         num_weeks,
     ));
@@ -260,6 +440,8 @@ struct PopupInfo {
     hours_per_week: f64,
     suggested_comments: Vec<String>,
     suggested_comment: Option<String>,
+    commit_links: Vec<String>,
+    pr_links: Vec<String>,
     is_git_log: bool,
     is_weekend: bool,
     /// Whether the popup's date column is "today" (enables timer controls).
@@ -284,6 +466,8 @@ impl Clone for PopupInfo {
             hours_per_week: self.hours_per_week,
             suggested_comments: self.suggested_comments.clone(),
             suggested_comment: self.suggested_comment.clone(),
+            commit_links: self.commit_links.clone(),
+            pr_links: self.pr_links.clone(),
             is_git_log: self.is_git_log,
             is_weekend: self.is_weekend,
             site_url: self.site_url.clone(),
@@ -762,6 +946,8 @@ pub fn TimesheetView() -> impl IntoView {
                         .map(|s| vec![s])
                         .unwrap_or_default(),
                     suggested_comment: draft.suggested_comment.clone(),
+                    commit_links: Vec::new(),
+                    pr_links: Vec::new(),
                     is_git_log: draft.is_git_log,
                     is_weekend: draft.is_weekend,
                     is_today,
@@ -1208,6 +1394,10 @@ pub fn TimesheetView() -> impl IntoView {
                                                     } else {
                                                         None
                                                     };
+                                                    let activity_links = bb_activity_for_closure
+                                                        .get(&format!("{}:{}", ck2, cell_date))
+                                                        .cloned()
+                                                        .unwrap_or_default();
                                                     let pos_style = compute_popup_style(
                                                         &ck2,
                                                         &cell_date.to_string(),
@@ -1224,6 +1414,8 @@ pub fn TimesheetView() -> impl IntoView {
                                                         hours_per_week: hpw,
                                                         suggested_comments,
                                                         suggested_comment: suggested_comment.clone(),
+                                                        commit_links: activity_links.commit_links,
+                                                        pr_links: activity_links.pr_links,
                                                         is_git_log,
                                                         is_weekend: false,
                                                         is_today: cell_is_today,
@@ -1374,6 +1566,22 @@ pub fn TimesheetView() -> impl IntoView {
                                                 } else {
                                                     None
                                                 };
+                                                let sat_links = bb_activity_for_closure
+                                                    .get(&format!("{}:{}", we_key2, sat))
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let sun_links = bb_activity_for_closure
+                                                    .get(&format!("{}:{}", we_key2, sun))
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let mut weekend_commit_links = sat_links.commit_links;
+                                                weekend_commit_links.extend(sun_links.commit_links);
+                                                weekend_commit_links.sort();
+                                                weekend_commit_links.dedup();
+                                                let mut weekend_pr_links = sat_links.pr_links;
+                                                weekend_pr_links.extend(sun_links.pr_links);
+                                                weekend_pr_links.sort();
+                                                weekend_pr_links.dedup();
                                                 let pos_style = compute_popup_style(
                                                     &we_key2,
                                                     &sat.to_string(),
@@ -1390,6 +1598,8 @@ pub fn TimesheetView() -> impl IntoView {
                                                     hours_per_week: hpw,
                                                     suggested_comments,
                                                     suggested_comment: suggested_comment.clone(),
+                                                    commit_links: weekend_commit_links,
+                                                    pr_links: weekend_pr_links,
                                                     is_git_log,
                                                     is_weekend: true,
                                                     is_today: we_cell_is_today,
@@ -1610,6 +1820,8 @@ pub fn TimesheetView() -> impl IntoView {
                            hours_per_week={info.hours_per_week}
                            suggested_comments={info.suggested_comments.clone()}
                            suggested_comment={info.suggested_comment.clone()}
+                           commit_links={info.commit_links.clone()}
+                           pr_links={info.pr_links.clone()}
                            is_git_log={info.is_git_log}
                            is_weekend={info.is_weekend}
                            restored_timer_popup={info.restored_timer_popup.clone()}

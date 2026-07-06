@@ -43,6 +43,35 @@ cfg_if::cfg_if! {
             ws.on_upgrade(handle_heartbeat_socket).into_response()
         }
 
+        async fn timesheet_ws_handler(
+            ws: axum::extract::ws::WebSocketUpgrade,
+            headers: axum::http::HeaderMap,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            if !timesheet::auth::is_authenticated(&headers) {
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+            ws.on_upgrade(handle_heartbeat_socket).into_response()
+        }
+
+        async fn admin_cache_handler(
+            headers: axum::http::HeaderMap,
+        ) -> impl axum::response::IntoResponse {
+            if !timesheet::auth::is_authenticated(&headers) {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": "Not authenticated" })),
+                );
+            }
+            match timesheet::api::cache::snapshot_json() {
+                Ok(snapshot) => (axum::http::StatusCode::OK, axum::Json(snapshot)),
+                Err(e) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({ "error": e })),
+                ),
+            }
+        }
+
         /// Handle the WebSocket connection for heartbeat.
         ///
         /// Sends a ping every 15 seconds to keep the connection alive and
@@ -102,6 +131,7 @@ cfg_if::cfg_if! {
         async fn main() {
             use axum::Router;
             use axum::routing::get;
+            use chrono::Datelike;
             use leptos_axum::{LeptosRoutes, generate_route_list};
 
             dotenvy::dotenv().ok();
@@ -129,6 +159,58 @@ cfg_if::cfg_if! {
                     .unwrap_or_else(|_| "http://localhost:8081/auth/callback".to_string()),
             });
 
+            let startup_back = std::env::var("CACHE_WARM_STARTUP_WEEKS_BACK")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(2);
+            let startup_forward = std::env::var("CACHE_WARM_STARTUP_WEEKS_FORWARD")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1);
+            let active_users = timesheet::auth::active_jira_credentials().await;
+            if !active_users.is_empty() {
+                let today = chrono::Local::now().date_naive();
+                let anchor_monday =
+                    today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+                log::info!(
+                    "[startup] warming cache window for {} active session(s), monday={}, back={}, forward={}",
+                    active_users.len(),
+                    anchor_monday,
+                    startup_back,
+                    startup_forward
+                );
+                for user in active_users {
+                    tokio::spawn(timesheet::api::jira::prefetch_startup_window(
+                        std::sync::Arc::new(user.creds),
+                        user.display_name,
+                        anchor_monday,
+                        startup_back,
+                        startup_forward,
+                    ));
+                }
+            } else {
+                log::info!("[startup] no active sessions for startup cache warm");
+            }
+
+            let cleanup_interval_minutes = std::env::var("CACHE_CLEANUP_INTERVAL_MINUTES")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(113);
+            let cache_retention_days = std::env::var("CACHE_RETENTION_DAYS")
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(62);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                    cleanup_interval_minutes.saturating_mul(60),
+                ));
+                loop {
+                    interval.tick().await;
+                    timesheet::api::cache::evict_expired();
+                    timesheet::api::cache::prune_old_week_entries(cache_retention_days);
+                }
+            });
+
             let conf = match leptos::config::get_configuration(None) {
                 Ok(conf) => conf,
                 Err(e) => {
@@ -143,6 +225,8 @@ cfg_if::cfg_if! {
             // Build the router with AppState to carry LeptosOptions.
             let app: Router = Router::new()
                 .route("/ws/heartbeat", get(heartbeat_ws_handler))
+                .route("/ws/timesheet", get(timesheet_ws_handler))
+                .route("/admin/cache", get(admin_cache_handler))
                 .route("/auth/login", get(timesheet::auth::login_handler))
                 .route("/auth/callback", get(timesheet::auth::callback_handler))
                 .route("/auth/logout", get(timesheet::auth::logout_handler))
