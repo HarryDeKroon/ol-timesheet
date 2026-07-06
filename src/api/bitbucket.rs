@@ -1,6 +1,6 @@
 #![cfg(feature = "ssr")]
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate};
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -13,7 +13,9 @@ static ISSUE_KEY_RE: LazyLock<Option<Regex>> =
 #[derive(Clone, Debug, Default)]
 pub struct BitbucketActivity {
     pub commit_messages_by_cell: HashMap<String, Vec<String>>,
+    pub commit_links_by_cell: HashMap<String, Vec<String>>,
     pub pr_review_cells: HashSet<String>,
+    pub pr_links_by_cell: HashMap<String, Vec<String>>,
     pub discovered_item_summaries: HashMap<String, String>,
 }
 
@@ -32,14 +34,18 @@ impl BitbucketConfig {
             .trim_end_matches('/')
             .to_string();
 
-        let default_project_url = std::env::var("BITBUCKET_PROJECT_URL").unwrap_or_else(|_| {
-            "https://bitbucket.org/uplandsoftware/workspace/projects/OLP".to_string()
-        });
+        let server_url = std::env::var("BITBUCKET_SERVER_URL").ok();
         let mut project_url_values = std::env::var("BITBUCKET_PROJECT_URLS")
             .ok()
             .map(|v| split_env_list(&v))
             .unwrap_or_default();
-        project_url_values.push(default_project_url);
+        if let Ok(single_project_url) = std::env::var("BITBUCKET_PROJECT_URL") {
+            project_url_values.push(single_project_url);
+        }
+        if project_url_values.is_empty() && server_url.is_none() {
+            project_url_values
+                .push("https://bitbucket.org/uplandsoftware/workspace/projects/OLP".to_string());
+        }
 
         let parsed_projects = project_url_values
             .iter()
@@ -57,9 +63,14 @@ impl BitbucketConfig {
         let workspace = std::env::var("BITBUCKET_WORKSPACE")
             .ok()
             .or_else(|| parsed_projects.first().map(|(ws, _)| ws.clone()))
+            .or_else(|| {
+                server_url
+                    .as_deref()
+                    .and_then(parse_workspace_url)
+                    .map(|s| s.to_string())
+            })
             .ok_or_else(|| {
-                "BITBUCKET_WORKSPACE is not set and no valid BITBUCKET_PROJECT_URL(S) found"
-                    .to_string()
+                "BITBUCKET_WORKSPACE is not set and no valid BITBUCKET_SERVER_URL or BITBUCKET_PROJECT_URL(S) found".to_string()
             })?;
         let api_token = std::env::var("BITBUCKET_API_TOKEN")
             .map_err(|_| "BITBUCKET_API_TOKEN is not set".to_string())?;
@@ -84,9 +95,6 @@ impl BitbucketConfig {
 
         let mut seen = HashSet::<String>::new();
         project_keys.retain(|key| seen.insert(key.clone()));
-        if project_keys.is_empty() {
-            return Err("No Bitbucket project keys configured".to_string());
-        }
 
         Ok(Self {
             api_base,
@@ -94,6 +102,25 @@ impl BitbucketConfig {
             project_keys,
             api_token,
         })
+    }
+}
+
+fn parse_workspace_url(url: &str) -> Option<&str> {
+    let trimmed = url.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let without_host = without_scheme.strip_prefix("bitbucket.org/")?;
+    let workspace = without_host
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if workspace.is_empty() {
+        None
+    } else {
+        Some(workspace)
     }
 }
 
@@ -184,9 +211,13 @@ struct BitbucketPage<T> {
 
 #[derive(Deserialize)]
 struct BitbucketCommit {
+    #[serde(default)]
+    hash: Option<String>,
     message: String,
     date: String,
     author: Option<BitbucketAuthor>,
+    #[serde(default)]
+    links: Option<BitbucketLinks>,
 }
 
 #[derive(Deserialize)]
@@ -210,6 +241,20 @@ struct BitbucketPullRequest {
     reviewers: Vec<BitbucketUser>,
     #[serde(default)]
     participants: Vec<BitbucketParticipant>,
+    #[serde(default)]
+    links: Option<BitbucketLinks>,
+}
+
+#[derive(Deserialize, Default)]
+struct BitbucketLinks {
+    #[serde(default)]
+    html: Option<BitbucketHref>,
+}
+
+#[derive(Deserialize, Default)]
+struct BitbucketHref {
+    #[serde(default)]
+    href: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -256,7 +301,9 @@ fn auth_header(user_email: &str, api_token: &str) -> String {
 
 fn parse_iso_date(value: &str) -> Option<NaiveDate> {
     DateTime::parse_from_rfc3339(value)
-        .map(|dt| dt.with_timezone(&Utc).date_naive())
+        // Keep date in source timestamp offset. Converting to UTC can shift
+        // a late-evening local commit into next day and place it in wrong cell.
+        .map(|dt| dt.date_naive())
         .ok()
 }
 
@@ -479,6 +526,33 @@ fn pr_identity_key(repo_slug: &str, pr: &BitbucketPullRequest) -> String {
     }
 }
 
+fn commit_link(repo_base: &str, commit: &BitbucketCommit) -> Option<String> {
+    if let Some(href) = commit
+        .links
+        .as_ref()
+        .and_then(|l| l.html.as_ref())
+        .and_then(|h| h.href.clone())
+    {
+        return Some(href);
+    }
+    commit
+        .hash
+        .as_ref()
+        .map(|hash| format!("{}/commits/{}", repo_base, hash))
+}
+
+fn pr_link(repo_base: &str, pr: &BitbucketPullRequest) -> Option<String> {
+    if let Some(href) = pr
+        .links
+        .as_ref()
+        .and_then(|l| l.html.as_ref())
+        .and_then(|h| h.href.clone())
+    {
+        return Some(href);
+    }
+    pr.id.map(|id| format!("{}/pull-requests/{}", repo_base, id))
+}
+
 async fn get_json<T: for<'de> Deserialize<'de>>(auth_value: &str, url: &str) -> Result<T, String> {
     log::debug!("[bitbucket] GET {}", url);
     let resp = HTTP
@@ -506,7 +580,7 @@ async fn fetch_repositories_for_project(
     auth_value: &str,
     project_key: &str,
     start: NaiveDate,
-    end: NaiveDate,
+    _end: NaiveDate,
 ) -> Result<Vec<String>, String> {
     let mut slugs = Vec::<String>::new();
     let mut next_url = Some(format!(
@@ -537,10 +611,6 @@ async fn fetch_repositories_for_project(
                 reached_older_than_start = true;
                 continue;
             }
-
-            if updated > end {
-                continue;
-            }
             slugs.push(repo.slug);
         }
 
@@ -554,11 +624,52 @@ async fn fetch_repositories_for_project(
     }
 
     log::info!(
-        "[bitbucket] selected {} repos modified in range {}..{} for project {}",
+        "[bitbucket] selected {} repos updated since {} for project {}",
         slugs.len(),
         start,
-        end,
         project_key
+    );
+    Ok(slugs)
+}
+
+async fn fetch_repositories_for_workspace(
+    config: &BitbucketConfig,
+    auth_value: &str,
+    start: NaiveDate,
+    _end: NaiveDate,
+) -> Result<Vec<String>, String> {
+    let mut slugs = Vec::<String>::new();
+    let mut next_url = Some(format!(
+        "{}/repositories/{}?pagelen=100&sort=-updated_on",
+        config.api_base, config.workspace
+    ));
+    let mut page_count = 0usize;
+
+    while let Some(url) = next_url {
+        let page: BitbucketPage<BitbucketProjectRepo> = get_json(auth_value, &url).await?;
+        page_count += 1;
+        next_url = page.next.clone();
+        let mut reached_older_than_start = false;
+        for repo in page.values {
+            let Some(updated) = repo.updated_on.as_deref().and_then(parse_iso_date) else {
+                continue;
+            };
+            if updated < start {
+                reached_older_than_start = true;
+                continue;
+            }
+            slugs.push(repo.slug);
+        }
+        if reached_older_than_start {
+            break;
+        }
+    }
+    log::info!(
+        "[bitbucket] selected {} repos updated since {} for workspace {} (pages={})",
+        slugs.len(),
+        start,
+        config.workspace,
+        page_count
     );
     Ok(slugs)
 }
@@ -615,12 +726,22 @@ pub async fn fetch_timesheet_activity(
     // Commits: newest first. Stop once we go past the start date.
     let mut project_repos = Vec::<String>::new();
     let mut seen_repos = HashSet::<String>::new();
-    for project_key in &config.project_keys {
-        let repos =
-            fetch_repositories_for_project(&config, &auth_value, project_key, start, end).await?;
+    if config.project_keys.is_empty() {
+        let repos = fetch_repositories_for_workspace(&config, &auth_value, start, end).await?;
         for repo in repos {
             if seen_repos.insert(repo.clone()) {
                 project_repos.push(repo);
+            }
+        }
+    } else {
+        for project_key in &config.project_keys {
+            let repos =
+                fetch_repositories_for_project(&config, &auth_value, project_key, start, end)
+                    .await?;
+            for repo in repos {
+                if seen_repos.insert(repo.clone()) {
+                    project_repos.push(repo);
+                }
             }
         }
     }
@@ -678,6 +799,13 @@ pub async fn fetch_timesheet_activity(
                 if let Some(key) = extract_work_item_key(&commit.message) {
                     let cleaned = strip_key_prefix(&commit.message, &key);
                     let map_key = format!("{}:{}", key, commit_date);
+                    if let Some(link) = commit_link(&repo_base, &commit) {
+                        activity
+                            .commit_links_by_cell
+                            .entry(map_key.clone())
+                            .or_default()
+                            .push(link);
+                    }
                     activity
                         .commit_messages_by_cell
                         .entry(map_key)
@@ -876,6 +1004,13 @@ pub async fn fetch_timesheet_activity(
                     seen_pr_identities.insert(pr_identity_key(repo_slug, &pr));
                     let map_key = format!("{}:{}", key, pr_date);
                     activity.pr_review_cells.insert(map_key);
+                    if let Some(link) = pr_link(&repo_base, &pr) {
+                        activity
+                            .pr_links_by_cell
+                            .entry(format!("{}:{}", key, pr_date))
+                            .or_default()
+                            .push(link);
+                    }
                     let cleaned = strip_key_prefix(&pr.title, &key);
                     activity
                         .discovered_item_summaries
@@ -954,6 +1089,13 @@ pub async fn fetch_timesheet_activity(
                         if let Some(key) = extract_work_item_key(&pr.title) {
                             let map_key = format!("{}:{}", key, pr_date);
                             activity.pr_review_cells.insert(map_key);
+                            if let Some(link) = pr_link(&repo_base, &pr) {
+                                activity
+                                    .pr_links_by_cell
+                                    .entry(format!("{}:{}", key, pr_date))
+                                    .or_default()
+                                    .push(link);
+                            }
                             let cleaned = strip_key_prefix(&pr.title, &key);
                             activity
                                 .discovered_item_summaries

@@ -800,18 +800,61 @@ a {
 	min-width: 0;
 }
 
-.popup-worklog-link {
+.popup-link {
 	display: inline-flex;
 	align-items: center;
+	justify-content: center;
+	position: relative;
 	text-decoration: none;
 	font-size: 14px;
 	padding: 2px;
 	flex-shrink: 0;
 	color: #0078d4;
+	width: 1.2rem;
+	height: 1.2rem;
 }
 
-.popup-worklog-link:hover {
+.popup-link:hover {
 	color: #005a9e;
+}
+
+.popup-link-base {
+	line-height: 1;
+}
+
+.popup-link-badge {
+	position: absolute;
+	right: -0.18rem;
+	bottom: -0.18rem;
+	min-width: 0.6rem;
+	height: 0.6rem;
+	padding: 0 0.08rem;
+	border-radius: 999px;
+	border: 1px solid #fff;
+	background: #6b7280;
+	color: #fff;
+	font-size: 0.45rem;
+	font-weight: 700;
+	line-height: 0.55rem;
+	text-align: center;
+}
+
+.popup-link--jira .popup-link-badge {
+	background: #0052cc;
+}
+
+.popup-link--commit .popup-link-badge {
+	background: #0f766e;
+}
+
+.popup-link--pr .popup-link-badge {
+	background: #7c3aed;
+}
+
+.popup-spacer {
+	display: inline-block;
+	width: 1.2rem;
+	height: 1.2rem;
 }
 
 .adf-preview p {

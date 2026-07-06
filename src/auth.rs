@@ -529,6 +529,65 @@ pub fn update_session_prefs(session_id: &str, prefs: Settings) {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct StartupWarmUser {
+    pub creds: crate::api::jira::JiraCredentials,
+    pub display_name: String,
+}
+
+/// Snapshot currently-active Jira credentials from in-memory sessions.
+/// Refreshes OAuth access tokens when needed before returning credentials.
+/// Used by startup background warm jobs.
+pub async fn active_jira_credentials() -> Vec<StartupWarmUser> {
+    let now_unix = chrono::Utc::now().timestamp();
+    let snapshots = match SESSIONS.lock() {
+        Ok(sessions) => sessions
+            .iter()
+            .filter(|(_, entry)| now_unix < entry.expires_unix)
+            .map(|(sid, entry)| (sid.clone(), entry.user.clone()))
+            .collect::<Vec<_>>(),
+        Err(_) => return Vec::new(),
+    };
+
+    let mut updates = Vec::<(String, UserSession)>::new();
+    let mut by_account = HashMap::<String, StartupWarmUser>::new();
+    for (session_id, mut user) in snapshots {
+        if now_unix + 300 >= user.expires_at {
+            match do_refresh_token(&user.refresh_token).await {
+                Ok((new_access, new_refresh, new_expiry)) => {
+                    user.access_token = new_access;
+                    user.refresh_token = new_refresh;
+                    user.expires_at = new_expiry;
+                    updates.push((session_id.clone(), user.clone()));
+                }
+                Err(e) => {
+                    log::warn!("[auth] Startup warm skipped session (token refresh failed): {}", e);
+                    continue;
+                }
+            }
+        }
+        let creds = user.jira_credentials();
+        by_account
+            .entry(creds.account_id.clone())
+            .or_insert(StartupWarmUser {
+                creds,
+                display_name: user.display_name.clone(),
+            });
+    }
+
+    if !updates.is_empty() {
+        if let Ok(mut sessions) = SESSIONS.lock() {
+            for (sid, updated) in updates {
+                if let Some(entry) = sessions.get_mut(&sid) {
+                    entry.user = updated;
+                    entry.dirty = true;
+                }
+            }
+        }
+    }
+    by_account.into_values().collect()
+}
+
 // ─── Axum route handlers ──────────────────────────────────────────────────────
 
 /// GET /auth/login — build PKCE challenge, store pending state, redirect to Atlassian.

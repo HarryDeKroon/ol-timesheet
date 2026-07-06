@@ -1,7 +1,8 @@
 #![cfg(feature = "ssr")]
 
 use crate::api::cache;
-use crate::model::{WorkItem, WorklogEntry};
+use crate::api::bitbucket::fetch_timesheet_activity;
+use crate::model::{CellActivity, WorkItem, WorklogEntry};
 use chrono::{Datelike, NaiveDate};
 use serde::Deserialize;
 use std::sync::{Arc, LazyLock};
@@ -618,6 +619,88 @@ pub async fn fetch_work_items(
     Ok(items)
 }
 
+fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    let first = start - chrono::Duration::days(start.weekday().num_days_from_monday() as i64);
+    let mut mondays = Vec::new();
+    let mut cursor = first;
+    while cursor <= end {
+        mondays.push(cursor);
+        cursor += chrono::Duration::weeks(1);
+    }
+    mondays
+}
+
+fn slice_timesheet_week(
+    source: &crate::model::TimesheetData,
+    monday: NaiveDate,
+) -> crate::model::TimesheetData {
+    use std::collections::{HashMap, HashSet};
+    let sunday = monday + chrono::Duration::days(6);
+    let in_week = |d: NaiveDate| d >= monday && d <= sunday;
+
+    let worklogs = source
+        .worklogs
+        .iter()
+        .filter(|w| in_week(w.date))
+        .cloned()
+        .collect::<Vec<_>>();
+    let keys_with_logs = worklogs
+        .iter()
+        .map(|w| w.issue_key.clone())
+        .collect::<HashSet<_>>();
+    let keys_with_activity = source
+        .bitbucket_activity
+        .keys()
+        .filter_map(|k| k.rsplit_once(':'))
+        .filter_map(|(issue_key, date)| {
+            NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .ok()
+                .filter(|d| in_week(*d))
+                .map(|_| issue_key.to_string())
+        })
+        .collect::<HashSet<_>>();
+    let visible_keys = keys_with_logs
+        .union(&keys_with_activity)
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    let work_items = source
+        .work_items
+        .iter()
+        .filter(|i| visible_keys.contains(&i.key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ytd_hours = source
+        .ytd_hours
+        .iter()
+        .filter(|(k, _)| visible_keys.contains(*k))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect::<HashMap<_, _>>();
+    let bitbucket_activity = source
+        .bitbucket_activity
+        .iter()
+        .filter_map(|(k, v)| {
+            k.rsplit_once(':').and_then(|(_, date)| {
+                NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                    .ok()
+                    .filter(|d| in_week(*d))
+                    .map(|_| (k.clone(), v.clone()))
+            })
+        })
+        .collect::<HashMap<_, _>>();
+
+    crate::model::TimesheetData {
+        work_items,
+        worklogs,
+        hours_per_week: source.hours_per_week,
+        hours_per_day: source.hours_per_day,
+        ytd_hours,
+        bitbucket_activity,
+        site_url: source.site_url.clone(),
+        ..Default::default()
+    }
+}
+
 /// Fetch a specific set of Jira issues by key.
 pub async fn fetch_work_items_by_keys(
     creds: &JiraCredentials,
@@ -1165,7 +1248,12 @@ pub async fn delete_worklog(
 /// `false` if it was already cached or if an error occurred.
 ///
 /// This is the shared building block for all prefetch functions.
-async fn prefetch_range(creds: Arc<JiraCredentials>, start: NaiveDate, end: NaiveDate) -> bool {
+async fn prefetch_range(
+    creds: Arc<JiraCredentials>,
+    display_name: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> bool {
     use std::collections::HashMap;
 
     let cache_key = timesheet_data_cache_key(&creds.account_id, start, end);
@@ -1187,10 +1275,77 @@ async fn prefetch_range(creds: Arc<JiraCredentials>, start: NaiveDate, end: Naiv
         }
     };
 
+    let mut all_items = items;
+    let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
+
+    match fetch_timesheet_activity(&creds.email, display_name, start, end).await {
+        Ok(activity) => {
+            let known: std::collections::HashSet<String> =
+                all_items.iter().map(|w| w.key.clone()).collect();
+            let missing: Vec<String> = activity
+                .discovered_item_summaries
+                .keys()
+                .filter(|k| !known.contains(k.as_str()))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                if let Ok(found) = fetch_work_items_by_keys(&creds, &missing).await {
+                    all_items.extend(found);
+                }
+            }
+            let mut known_after_fetch: std::collections::HashSet<String> =
+                all_items.iter().map(|w| w.key.clone()).collect();
+            for key in activity.discovered_item_summaries.keys() {
+                if known_after_fetch.contains(key) {
+                    continue;
+                }
+                let summary = activity
+                    .discovered_item_summaries
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| key.clone());
+                all_items.push(WorkItem {
+                    key: key.clone(),
+                    summary,
+                    icon_url: String::new(),
+                    issue_type: "Bitbucket".to_string(),
+                });
+                known_after_fetch.insert(key.clone());
+            }
+            for (cell_key, msgs) in activity.commit_messages_by_cell {
+                let entry = bitbucket_activity.entry(cell_key).or_default();
+                entry.commit_messages = msgs;
+            }
+            for (cell_key, links) in activity.commit_links_by_cell {
+                let entry = bitbucket_activity.entry(cell_key).or_default();
+                let mut merged = entry.commit_links.clone();
+                merged.extend(links);
+                merged.sort();
+                merged.dedup();
+                entry.commit_links = merged;
+            }
+            for cell_key in activity.pr_review_cells {
+                let entry = bitbucket_activity.entry(cell_key).or_default();
+                entry.has_pr_review = true;
+            }
+            for (cell_key, links) in activity.pr_links_by_cell {
+                let entry = bitbucket_activity.entry(cell_key).or_default();
+                let mut merged = entry.pr_links.clone();
+                merged.extend(links);
+                merged.sort();
+                merged.dedup();
+                entry.pr_links = merged;
+            }
+        }
+        Err(e) => {
+            log::warn!("[prefetch] fetch_timesheet_activity failed: {}", e);
+        }
+    }
+
     // 2. Fetch worklogs per issue (populates jira_worklogs:{key} cache)
     let mut all_worklogs = Vec::new();
     let mut ytd_hours: HashMap<String, f64> = HashMap::new();
-    for item in &items {
+    for item in &all_items {
         match fetch_worklogs(&creds, &item.key, start, end).await {
             Ok((wls, total)) => {
                 all_worklogs.extend(wls);
@@ -1201,7 +1356,6 @@ async fn prefetch_range(creds: Arc<JiraCredentials>, start: NaiveDate, end: Naiv
     }
 
     // 3. Assemble and cache the TimesheetData — sort by key only
-    let mut all_items = items;
     all_items.sort_by(|a, b| {
         fn parse_jira_key(key: &str) -> (&str, u64) {
             match key.rsplit_once('-') {
@@ -1221,7 +1375,7 @@ async fn prefetch_range(creds: Arc<JiraCredentials>, start: NaiveDate, end: Naiv
         hours_per_week: prefs.hours_per_week,
         hours_per_day: prefs.hours_per_day,
         ytd_hours,
-        bitbucket_activity: HashMap::new(),
+        bitbucket_activity,
         ..Default::default()
     };
 
@@ -1229,49 +1383,85 @@ async fn prefetch_range(creds: Arc<JiraCredentials>, start: NaiveDate, end: Naiv
         cache::put(cache_key, json);
         log::info!("[prefetch] Cache warmed for {} .. {}", start, end);
     }
+    for monday in requested_week_mondays(start, end) {
+        let week_key = cache::week_cache_key(&creds.account_id, monday);
+        let week_ts = slice_timesheet_week(&ts, monday);
+        if let Ok(raw) = serde_json::to_string(&week_ts) {
+            cache::put(week_key, raw);
+            cache::update_cached_week(&creds.account_id, monday, chrono::Utc::now());
+        }
+    }
 
     true
 }
 
 /// Convenience wrapper: prefetch a single week by its Monday date.
 #[allow(dead_code)]
-async fn prefetch_week(creds: Arc<JiraCredentials>, monday: NaiveDate) -> bool {
-    prefetch_range(creds, monday, monday + chrono::Duration::days(6)).await
+async fn prefetch_week(creds: Arc<JiraCredentials>, display_name: &str, monday: NaiveDate) -> bool {
+    prefetch_range(
+        creds,
+        display_name,
+        monday,
+        monday + chrono::Duration::days(6),
+    )
+    .await
 }
 
 /// Prefetch the date ranges that would be requested when the user navigates
-/// one week forward or backward from `selected_monday`, given a viewport that
-/// shows `num_weeks` weeks at a time.
-///
-/// The multi-week view computes `start = selected_monday - (num_weeks - 1)
-/// weeks` and `end = selected_monday + 6 days`, so the prefetched ranges must
-/// use the same formula with shifted `selected_monday` values so the cache
-/// keys will match.
+/// one week forward or backward from requested period.
 ///
 /// Designed to be called from a background `tokio::spawn` so it never blocks
 /// the response to the client.
 pub async fn prefetch_adjacent_weeks(
     creds: Arc<JiraCredentials>,
+    display_name: String,
     selected_monday: NaiveDate,
     num_weeks: usize,
 ) {
     let today = chrono::Local::now().date_naive();
     let nw = num_weeks.max(1) as i64;
+    let period_start = selected_monday - chrono::Duration::weeks(nw - 1);
+    let period_end = selected_monday + chrono::Duration::days(6);
 
-    // Previous: user navigates one week back.
-    let prev_monday = selected_monday - chrono::Duration::weeks(1);
-    let prev_start = prev_monday - chrono::Duration::weeks(nw - 1);
-    let prev_end = prev_monday + chrono::Duration::days(6);
-    prefetch_range(creds.clone(), prev_start, prev_end).await;
+    // Warm single week before requested period.
+    let prev_start = period_start - chrono::Duration::weeks(1);
+    let prev_end = period_start - chrono::Duration::days(1);
+    prefetch_range(creds.clone(), &display_name, prev_start, prev_end).await;
 
-    // Next: user navigates one week forward, but only when the next
-    // selected Monday is not after today (i.e. the week has already
-    // started or is the current week).
-    let next_monday = selected_monday + chrono::Duration::weeks(1);
-    if next_monday <= today {
-        let next_start = next_monday - chrono::Duration::weeks(nw - 1);
-        let next_end = next_monday + chrono::Duration::days(6);
-        prefetch_range(creds, next_start, next_end).await;
+    // Warm single week after requested period when not future-only.
+    let next_start = period_end + chrono::Duration::days(1);
+    if next_start <= today + chrono::Duration::weeks(1) {
+        let next_end = next_start + chrono::Duration::days(6);
+        prefetch_range(creds, &display_name, next_start, next_end).await;
+    }
+}
+
+/// Warm startup window around `anchor_monday`:
+/// current week, N weeks back, and M weeks forward.
+pub async fn prefetch_startup_window(
+    creds: Arc<JiraCredentials>,
+    display_name: String,
+    anchor_monday: NaiveDate,
+    weeks_back: usize,
+    weeks_forward: usize,
+) {
+    let back = weeks_back as i64;
+    let forward = weeks_forward as i64;
+    let mut tasks = Vec::new();
+    for offset in (-back)..=forward {
+        let monday = anchor_monday + chrono::Duration::weeks(offset);
+        let start = monday;
+        let end = monday + chrono::Duration::days(6);
+        let creds = creds.clone();
+        let display_name = display_name.clone();
+        tasks.push(tokio::spawn(async move {
+            prefetch_range(creds, &display_name, start, end).await;
+        }));
+    }
+    for task in tasks {
+        if let Err(e) = task.await {
+            log::warn!("[prefetch] startup warm task failed: {}", e);
+        }
     }
 }
 
