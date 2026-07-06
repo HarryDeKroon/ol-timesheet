@@ -931,6 +931,18 @@ pub fn TimesheetView() -> impl IntoView {
                 } else {
                     today_date == draft.date
                 };
+                let mut row_pr_links = ts
+                    .bitbucket_activity
+                    .iter()
+                    .filter_map(|(cell_key, activity)| {
+                        cell_key
+                            .strip_prefix(&format!("{}:", draft.issue_key))
+                            .map(|_| activity.pr_links.clone())
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                row_pr_links.sort();
+                row_pr_links.dedup();
 
                 popups.push(PopupInfo {
                     popup_id: NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -947,7 +959,7 @@ pub fn TimesheetView() -> impl IntoView {
                         .unwrap_or_default(),
                     suggested_comment: draft.suggested_comment.clone(),
                     commit_links: Vec::new(),
-                    pr_links: Vec::new(),
+                    pr_links: row_pr_links,
                     is_git_log: draft.is_git_log,
                     is_weekend: draft.is_weekend,
                     is_today,
@@ -1285,6 +1297,18 @@ pub fn TimesheetView() -> impl IntoView {
                             let summary = item.summary.clone();
                             let _summary_for_title = summary.clone();
                             let key_display = key.clone();
+                            let mut row_pr_links = ts
+                                .bitbucket_activity
+                                .iter()
+                                .filter_map(|(cell_key, activity)| {
+                                    cell_key
+                                        .strip_prefix(&format!("{}:", key))
+                                        .map(|_| activity.pr_links.clone())
+                                })
+                                .flatten()
+                                .collect::<Vec<_>>();
+                            row_pr_links.sort();
+                            row_pr_links.dedup();
 
                             // Cells for every visible week group
                             let mut week_cells: Vec<AnyView> = Vec::new();
@@ -1359,6 +1383,7 @@ pub fn TimesheetView() -> impl IntoView {
                                     let cell_summary = summary.clone();
                                     let site_url_for_cell = site_url.clone();
                                     let owner_for_cell_popup = component_owner.clone();
+                                    let row_pr_links_for_cell = row_pr_links.clone();
                                     week_cells.push(view! {
                                         <td class={cls} title={title}>
                                             <span
@@ -1415,7 +1440,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                         suggested_comments,
                                                         suggested_comment: suggested_comment.clone(),
                                                         commit_links: activity_links.commit_links,
-                                                        pr_links: activity_links.pr_links,
+                                                        pr_links: row_pr_links_for_cell.clone(),
                                                         is_git_log,
                                                         is_weekend: false,
                                                         is_today: cell_is_today,
@@ -1525,6 +1550,7 @@ pub fn TimesheetView() -> impl IntoView {
                                 let we_summary = summary.clone();
                                 let site_url_for_we = site_url.clone();
                                 let owner_for_weekend_popup = component_owner.clone();
+                                let row_pr_links_for_weekend = row_pr_links.clone();
                                 week_cells.push(view! {
                                     <td class={weekend_cls} title={we_tooltip}>
                                         <span
@@ -1578,10 +1604,6 @@ pub fn TimesheetView() -> impl IntoView {
                                                 weekend_commit_links.extend(sun_links.commit_links);
                                                 weekend_commit_links.sort();
                                                 weekend_commit_links.dedup();
-                                                let mut weekend_pr_links = sat_links.pr_links;
-                                                weekend_pr_links.extend(sun_links.pr_links);
-                                                weekend_pr_links.sort();
-                                                weekend_pr_links.dedup();
                                                 let pos_style = compute_popup_style(
                                                     &we_key2,
                                                     &sat.to_string(),
@@ -1599,7 +1621,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                     suggested_comments,
                                                     suggested_comment: suggested_comment.clone(),
                                                     commit_links: weekend_commit_links,
-                                                    pr_links: weekend_pr_links,
+                                                    pr_links: row_pr_links_for_weekend.clone(),
                                                     is_git_log,
                                                     is_weekend: true,
                                                     is_today: we_cell_is_today,
