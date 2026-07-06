@@ -647,10 +647,23 @@ main {
 
 .popup-buttons {
 	display: flex;
-	justify-content: flex-end;
+	justify-content: space-between;
+	align-items: center;
 	gap: 0.5rem;
 	flex-shrink: 0;
 	padding-top: 0.5rem;
+}
+
+.popup-buttons-left {
+	display: inline-flex;
+	align-items: center;
+	min-width: 1.2rem;
+}
+
+.popup-buttons-right {
+	display: inline-flex;
+	gap: 0.5rem;
+	align-items: center;
 }
 
 /* ─── Timer Controls ─────────────────────────────────────────────────── */

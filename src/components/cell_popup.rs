@@ -233,20 +233,19 @@ pub fn CellPopup(
     let initial_prefills: Vec<String> = suggested_comments;
     let prefills_for_links = initial_prefills.clone();
     let mut commit_links_for_rows = commit_links;
-    let mut pr_links_for_rows = pr_links;
-    let suggested_row_links: Vec<Option<(String, bool)>> = prefills_for_links
+    let mut pr_links_unique = pr_links;
+    pr_links_unique.sort();
+    pr_links_unique.dedup();
+    let popup_pr_link = pr_links_unique.into_iter().next();
+    let suggested_row_links: Vec<Option<String>> = prefills_for_links
         .iter()
         .map(|comment| {
             if comment.trim().eq_ignore_ascii_case("review") {
-                if pr_links_for_rows.is_empty() {
-                    None
-                } else {
-                    Some((pr_links_for_rows.remove(0), true))
-                }
+                None
             } else if commit_links_for_rows.is_empty() {
                 None
             } else {
-                Some((commit_links_for_rows.remove(0), false))
+                Some(commit_links_for_rows.remove(0))
             }
         })
         .collect();
@@ -1223,34 +1222,19 @@ pub fn CellPopup(
                                 />
                                 <span class="popup-actions">
                                     {timer_buttons}
-                                    {if let Some((href, is_pr)) = row_link {
-                                        if is_pr {
-                                            view! {
-                                                <a
-                                                    class="popup-link popup-link--pr"
-                                                    href={href}
-                                                    target="_blank"
-                                                    rel="noopener"
-                                                    title=move || i18n.get().t(keys::OPEN_PR_IN_BITBUCKET)
-                                                >
-                                                    <span class="popup-link-base">"\u{1F517}"</span>
-                                                    <span class="popup-link-badge">"P"</span>
-                                                </a>
-                                            }.into_any()
-                                        } else {
-                                            view! {
-                                                <a
-                                                    class="popup-link popup-link--commit"
-                                                    href={href}
-                                                    target="_blank"
-                                                    rel="noopener"
-                                                    title=move || i18n.get().t(keys::OPEN_COMMIT_IN_BITBUCKET)
-                                                >
-                                                    <span class="popup-link-base">"\u{1F517}"</span>
-                                                    <span class="popup-link-badge">"C"</span>
-                                                </a>
-                                            }.into_any()
-                                        }
+                                    {if let Some(href) = row_link {
+                                        view! {
+                                            <a
+                                                class="popup-link popup-link--commit"
+                                                href={href}
+                                                target="_blank"
+                                                rel="noopener"
+                                                title=move || i18n.get().t(keys::OPEN_COMMIT_IN_BITBUCKET)
+                                            >
+                                                <span class="popup-link-base">"\u{1F517}"</span>
+                                                <span class="popup-link-badge">"C"</span>
+                                            </a>
+                                        }.into_any()
                                     } else {
                                         view! { <span class="popup-spacer"></span> }.into_any()
                                     }}
@@ -1262,16 +1246,34 @@ pub fn CellPopup(
             </div>
 
             <div class="popup-buttons">
-                <button
-                    class="btn-ok"
-                    on:click=move |_| on_save(None)
-                    disabled=move || !save_enabled.get() || !conn.is_available()
-                >
-                    {move || i18n.get().t(keys::SAVE)}
-                </button>
-                <button class="btn-cancel" on:click=move |_| on_close_with_timers_for_btn()>
-                    {move || i18n.get().t(keys::CLOSE)}
-                </button>
+                <span class="popup-buttons-left">
+                    {popup_pr_link.clone().map(|href| {
+                        view! {
+                            <a
+                                class="popup-link popup-link--pr"
+                                href={href}
+                                target="_blank"
+                                rel="noopener"
+                                title=move || i18n.get().t(keys::OPEN_PR_IN_BITBUCKET)
+                            >
+                                <span class="popup-link-base">"\u{1F517}"</span>
+                                <span class="popup-link-badge">"P"</span>
+                            </a>
+                        }
+                    })}
+                </span>
+                <span class="popup-buttons-right">
+                    <button
+                        class="btn-ok"
+                        on:click=move |_| on_save(None)
+                        disabled=move || !save_enabled.get() || !conn.is_available()
+                    >
+                        {move || i18n.get().t(keys::SAVE)}
+                    </button>
+                    <button class="btn-cancel" on:click=move |_| on_close_with_timers_for_btn()>
+                        {move || i18n.get().t(keys::CLOSE)}
+                    </button>
+                </span>
             </div>
         </div>
         </div>
