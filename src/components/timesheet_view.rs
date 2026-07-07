@@ -1,5 +1,6 @@
 use crate::components::cell_popup::CellPopup;
 use crate::components::popup_flush::{provide_popup_flush_context, use_popup_flush};
+use crate::components::report_overlay::ReportOverlay;
 use crate::components::settings_dialog::SettingsDialog;
 use crate::components::timer::{
     PersistedTimerPopup, load_persisted_timer_popups, provide_timer_context,
@@ -36,6 +37,37 @@ fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
 }
 
 #[cfg(feature = "ssr")]
+fn merge_bitbucket_activity_into(
+    target: &mut crate::api::bitbucket::BitbucketActivity,
+    incoming: crate::api::bitbucket::BitbucketActivity,
+) {
+    for (cell_key, mut messages) in incoming.commit_messages_by_cell {
+        let entry = target.commit_messages_by_cell.entry(cell_key).or_default();
+        entry.append(&mut messages);
+        entry.sort();
+        entry.dedup();
+    }
+    for (cell_key, mut links) in incoming.commit_links_by_cell {
+        let entry = target.commit_links_by_cell.entry(cell_key).or_default();
+        entry.append(&mut links);
+        entry.sort();
+        entry.dedup();
+    }
+    for cell_key in incoming.pr_review_cells {
+        target.pr_review_cells.insert(cell_key);
+    }
+    for (cell_key, mut links) in incoming.pr_links_by_cell {
+        let entry = target.pr_links_by_cell.entry(cell_key).or_default();
+        entry.append(&mut links);
+        entry.sort();
+        entry.dedup();
+    }
+    for (key, summary) in incoming.discovered_item_summaries {
+        target.discovered_item_summaries.entry(key).or_insert(summary);
+    }
+}
+
+#[cfg(feature = "ssr")]
 fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetData {
     let sunday = monday + Duration::days(6);
     let date_in_week = |d: NaiveDate| d >= monday && d <= sunday;
@@ -46,38 +78,10 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
         .filter(|w| date_in_week(w.date))
         .cloned()
         .collect::<Vec<_>>();
-    let keys_with_logs = worklogs
-        .iter()
-        .map(|w| w.issue_key.clone())
-        .collect::<std::collections::HashSet<_>>();
-    let keys_with_activity = source
-        .bitbucket_activity
-        .keys()
-        .filter_map(|k| k.rsplit_once(':'))
-        .filter_map(|(issue_key, date)| {
-            NaiveDate::parse_from_str(date, "%Y-%m-%d")
-                .ok()
-                .filter(|d| date_in_week(*d))
-                .map(|_| issue_key.to_string())
-        })
-        .collect::<std::collections::HashSet<_>>();
-    let visible_keys = keys_with_logs
-        .union(&keys_with_activity)
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-
-    let work_items = source
-        .work_items
-        .iter()
-        .filter(|i| visible_keys.contains(&i.key))
-        .cloned()
-        .collect::<Vec<_>>();
-    let ytd_hours = source
-        .ytd_hours
-        .iter()
-        .filter(|(k, _)| visible_keys.contains(*k))
-        .map(|(k, v)| (k.clone(), *v))
-        .collect::<HashMap<_, _>>();
+    // Keep the full issue list so assigned active issues without in-range
+    // worklogs remain visible in cached weekly slices.
+    let work_items = source.work_items.clone();
+    let ytd_hours = source.ytd_hours.clone();
     let bitbucket_activity = source
         .bitbucket_activity
         .iter()
@@ -209,11 +213,24 @@ pub async fn get_timesheet_data(
         }
     }
 
-    // 1. Fetch Jira and Bitbucket in parallel.
-    let (jira_items_res, bitbucket_res) = tokio::join!(
-        crate::api::jira::fetch_work_items(&creds, start, end),
-        fetch_timesheet_activity(&session.email, &session.display_name, start, end),
-    );
+    // 1. Fetch Jira + Bitbucket activity.
+    // Bitbucket is fetched week-by-week to avoid broad multi-week scans on uncached loads.
+    let bitbucket_fetch = async {
+        let mut merged = crate::api::bitbucket::BitbucketActivity::default();
+        for monday in &requested_mondays {
+            let week_start = *monday;
+            let week_end = *monday + Duration::days(6);
+            match fetch_timesheet_activity(&session.email, &session.display_name, week_start, week_end)
+                .await
+            {
+                Ok(activity) => merge_bitbucket_activity_into(&mut merged, activity),
+                Err(err) => return Err(err),
+            }
+        }
+        Ok::<crate::api::bitbucket::BitbucketActivity, String>(merged)
+    };
+    let (jira_items_res, bitbucket_res) =
+        tokio::join!(crate::api::jira::fetch_work_items(&creds, start, end), bitbucket_fetch);
     let jira_items = jira_items_res.map_err(ServerFnError::new)?;
 
     let mut all_items = jira_items;
@@ -273,10 +290,10 @@ pub async fn get_timesheet_data(
             }
             for (cell_key, links) in activity.commit_links_by_cell {
                 let entry = bitbucket_activity.entry(cell_key).or_default();
+                let mut seen = std::collections::HashSet::new();
                 let mut merged = entry.commit_links.clone();
                 merged.extend(links);
-                merged.sort();
-                merged.dedup();
+                merged.retain(|link| seen.insert(link.clone()));
                 entry.commit_links = merged;
             }
             for cell_key in activity.pr_review_cells {
@@ -440,6 +457,7 @@ struct PopupInfo {
     hours_per_week: f64,
     suggested_comments: Vec<String>,
     suggested_comment: Option<String>,
+    commit_messages: Vec<String>,
     commit_links: Vec<String>,
     pr_links: Vec<String>,
     is_git_log: bool,
@@ -466,6 +484,7 @@ impl Clone for PopupInfo {
             hours_per_week: self.hours_per_week,
             suggested_comments: self.suggested_comments.clone(),
             suggested_comment: self.suggested_comment.clone(),
+            commit_messages: self.commit_messages.clone(),
             commit_links: self.commit_links.clone(),
             pr_links: self.pr_links.clone(),
             is_git_log: self.is_git_log,
@@ -958,6 +977,7 @@ pub fn TimesheetView() -> impl IntoView {
                         .map(|s| vec![s])
                         .unwrap_or_default(),
                     suggested_comment: draft.suggested_comment.clone(),
+                    commit_messages: Vec::new(),
                     commit_links: Vec::new(),
                     pr_links: row_pr_links,
                     is_git_log: draft.is_git_log,
@@ -979,6 +999,7 @@ pub fn TimesheetView() -> impl IntoView {
 
     // State for showing the settings dialog
     let show_settings = RwSignal::new(false);
+    let show_report = RwSignal::new(false);
 
     // Detect date changes on window focus (for overnight transitions)
     #[cfg(feature = "hydrate")]
@@ -1139,6 +1160,12 @@ pub fn TimesheetView() -> impl IntoView {
     };
     let on_close_settings = Callback::new(move |_: ()| {
         show_settings.set(false);
+    });
+    let on_open_report = move |_| {
+        show_report.set(true);
+    };
+    let on_close_report = Callback::new(move |_: ()| {
+        show_report.set(false);
     });
 
     // ── beforeunload listener: flush open popups on page leave ──
@@ -1331,6 +1358,14 @@ pub fn TimesheetView() -> impl IntoView {
                                     let commit_messages = cell_activity.commit_messages.clone();
                                     let has_pr_review = cell_activity.has_pr_review;
 
+                                    let has_commit_associations = !cell_activity.commit_messages.is_empty()
+                                        || !cell_activity.commit_links.is_empty();
+                                    let show_corner_commit_overlay =
+                                        !worklogs.is_empty() && has_commit_associations;
+                                    let show_center_commit_overlay =
+                                        worklogs.is_empty() && has_commit_associations;
+                                    let show_center_pr_overlay =
+                                        worklogs.is_empty() && !has_commit_associations && has_pr_review;
                                     let (cell_display, title) = if !worklogs.is_empty() {
                                         // Normal worklog cell
                                         let title = if worklogs.len() > 1 {
@@ -1357,9 +1392,9 @@ pub fn TimesheetView() -> impl IntoView {
                                         };
                                         (cell_text.clone(), title)
                                     } else if !commit_messages.is_empty() {
-                                        ("?".to_string(), commit_messages.join("\n"))
+                                        (String::new(), commit_messages.join("\n"))
                                     } else if has_pr_review {
-                                        ("pr".to_string(), String::new())
+                                        (String::new(), String::new())
                                     } else {
                                         (String::new(), String::new())
                                     };
@@ -1387,7 +1422,13 @@ pub fn TimesheetView() -> impl IntoView {
                                     week_cells.push(view! {
                                         <td class={cls} title={title}>
                                             <span
-                                                class="cell-value"
+                                                class={if show_corner_commit_overlay {
+                                                    "cell-value cell-value-with-commit-overlay-corner"
+                                                } else if show_center_commit_overlay {
+                                                    "cell-value cell-value-with-commit-overlay-center"
+                                                } else {
+                                                    "cell-value"
+                                                }}
                                                 data-cell-key={cell_key}
                                                 data-cell-date={cell_date_str}
                                                 on:click=move |_| {
@@ -1439,6 +1480,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                         hours_per_week: hpw,
                                                         suggested_comments,
                                                         suggested_comment: suggested_comment.clone(),
+                                                        commit_messages: activity_links.commit_messages.clone(),
                                                         commit_links: activity_links.commit_links,
                                                         pr_links: row_pr_links_for_cell.clone(),
                                                         is_git_log,
@@ -1452,7 +1494,33 @@ pub fn TimesheetView() -> impl IntoView {
                                                     open_popups.update(|ps| ps.push(popup));
                                                 }
                                             >
-                                                {cell_display}
+                                                {if show_corner_commit_overlay {
+                                                    view! {
+                                                        <>
+                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner">{"c"}</span>
+                                                            <span class="cell-value-text">{cell_display.clone()}</span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else if show_center_commit_overlay {
+                                                    view! {
+                                                        <>
+                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--center">{"c"}</span>
+                                                            <span class="cell-value-text"></span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else if show_center_pr_overlay {
+                                                    view! {
+                                                        <>
+                                                            <span class="cell-commit-overlay-mark cell-pr-overlay-mark--center">{"p"}</span>
+                                                            <span class="cell-value-text"></span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else {
+                                                    view! { <>{cell_display}</> }.into_any()
+                                                }}
                                             </span>
                                         </td>
                                     }.into_any());
@@ -1519,12 +1587,22 @@ pub fn TimesheetView() -> impl IntoView {
                                 weekend_commit_messages.extend(weekend_activity_sun.commit_messages);
                                 let weekend_has_pr_review =
                                     weekend_activity_sat.has_pr_review || weekend_activity_sun.has_pr_review;
+                                let weekend_has_commit_associations = !weekend_commit_messages.is_empty()
+                                    || !weekend_activity_sat.commit_links.is_empty()
+                                    || !weekend_activity_sun.commit_links.is_empty();
+                                let show_corner_commit_overlay_weekend =
+                                    !we_entries.is_empty() && weekend_has_commit_associations;
+                                let show_center_commit_overlay_weekend =
+                                    we_entries.is_empty() && weekend_has_commit_associations;
+                                let show_center_pr_overlay_weekend = we_entries.is_empty()
+                                    && !weekend_has_commit_associations
+                                    && weekend_has_pr_review;
                                 let (we_display, we_tooltip) = if !we_entries.is_empty() {
                                     (we_text.clone(), we_title.clone())
                                 } else if !weekend_commit_messages.is_empty() {
-                                    ("?".to_string(), weekend_commit_messages.join("\n"))
+                                    (String::new(), weekend_commit_messages.join("\n"))
                                 } else if weekend_has_pr_review {
-                                    ("pr".to_string(), String::new())
+                                    (String::new(), String::new())
                                 } else {
                                     (String::new(), String::new())
                                 };
@@ -1554,7 +1632,13 @@ pub fn TimesheetView() -> impl IntoView {
                                 week_cells.push(view! {
                                     <td class={weekend_cls} title={we_tooltip}>
                                         <span
-                                            class="cell-value"
+                                            class={if show_corner_commit_overlay_weekend {
+                                                "cell-value cell-value-with-commit-overlay-corner"
+                                            } else if show_center_commit_overlay_weekend || show_center_pr_overlay_weekend {
+                                                "cell-value cell-value-with-commit-overlay-center"
+                                            } else {
+                                                "cell-value"
+                                            }}
                                             data-cell-key={we_key}
                                             data-cell-date={we_sat_str}
 
@@ -1600,10 +1684,13 @@ pub fn TimesheetView() -> impl IntoView {
                                                     .get(&format!("{}:{}", we_key2, sun))
                                                     .cloned()
                                                     .unwrap_or_default();
+                                                let mut weekend_commit_messages = sat_links.commit_messages.clone();
+                                                weekend_commit_messages.extend(sun_links.commit_messages.clone());
                                                 let mut weekend_commit_links = sat_links.commit_links;
                                                 weekend_commit_links.extend(sun_links.commit_links);
-                                                weekend_commit_links.sort();
-                                                weekend_commit_links.dedup();
+                                                let mut seen_weekend_links = std::collections::HashSet::new();
+                                                weekend_commit_links
+                                                    .retain(|link| seen_weekend_links.insert(link.clone()));
                                                 let pos_style = compute_popup_style(
                                                     &we_key2,
                                                     &sat.to_string(),
@@ -1620,6 +1707,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                     hours_per_week: hpw,
                                                     suggested_comments,
                                                     suggested_comment: suggested_comment.clone(),
+                                                    commit_messages: weekend_commit_messages,
                                                     commit_links: weekend_commit_links,
                                                     pr_links: row_pr_links_for_weekend.clone(),
                                                     is_git_log,
@@ -1634,7 +1722,33 @@ pub fn TimesheetView() -> impl IntoView {
                                             }
 
                                         >
-                                            {we_display}
+                                            {if show_corner_commit_overlay_weekend {
+                                                view! {
+                                                    <>
+                                                        <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner">{"c"}</span>
+                                                        <span class="cell-value-text">{we_display.clone()}</span>
+                                                    </>
+                                                }
+                                                    .into_any()
+                                            } else if show_center_commit_overlay_weekend {
+                                                view! {
+                                                    <>
+                                                        <span class="cell-commit-overlay-mark cell-commit-overlay-mark--center">{"c"}</span>
+                                                        <span class="cell-value-text"></span>
+                                                    </>
+                                                }
+                                                    .into_any()
+                                            } else if show_center_pr_overlay_weekend {
+                                                view! {
+                                                    <>
+                                                        <span class="cell-commit-overlay-mark cell-pr-overlay-mark--center">{"p"}</span>
+                                                        <span class="cell-value-text"></span>
+                                                    </>
+                                                }
+                                                    .into_any()
+                                            } else {
+                                                view! { <>{we_display}</> }.into_any()
+                                            }}
                                         </span>
                                     </td>
                                 }.into_any());
@@ -1745,6 +1859,13 @@ pub fn TimesheetView() -> impl IntoView {
                 <WeekNavigator selected_monday=selected_monday />
                 <div class="nav-btn-group-right">
                     <button
+                        class="nav-btn nav-report"
+                        on:click=on_open_report
+                        title=move || i18n.get().t(keys::USER_REPORT)
+                    >
+                        <span class="icon-report">{"📊"}</span>
+                    </button>
+                    <button
                         class="nav-btn nav-refresh"
                         on:click=on_refresh
                         disabled=move || is_refreshing.get()
@@ -1842,6 +1963,7 @@ pub fn TimesheetView() -> impl IntoView {
                            hours_per_week={info.hours_per_week}
                            suggested_comments={info.suggested_comments.clone()}
                            suggested_comment={info.suggested_comment.clone()}
+                           commit_messages={info.commit_messages.clone()}
                            commit_links={info.commit_links.clone()}
                            pr_links={info.pr_links.clone()}
                            is_git_log={info.is_git_log}
@@ -1858,6 +1980,13 @@ pub fn TimesheetView() -> impl IntoView {
             // Settings dialog modal
             {move || show_settings.get().then(|| view! {
                 <SettingsDialog on_ok=on_close_settings on_cancel=on_close_settings />
+            })}
+            {move || show_report.get().then(|| view! {
+                <ReportOverlay
+                    hours_per_day={last_data.get().map(|d| d.hours_per_day).unwrap_or(8.0)}
+                    hours_per_week={last_data.get().map(|d| d.hours_per_week).unwrap_or(40.0)}
+                    on_close=on_close_report
+                />
             })}
         </div>
     }
