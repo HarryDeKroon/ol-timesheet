@@ -561,7 +561,10 @@ pub async fn active_jira_credentials() -> Vec<StartupWarmUser> {
                     updates.push((session_id.clone(), user.clone()));
                 }
                 Err(e) => {
-                    log::warn!("[auth] Startup warm skipped session (token refresh failed): {}", e);
+                    log::warn!(
+                        "[auth] Startup warm skipped session (token refresh failed): {}",
+                        e
+                    );
                     continue;
                 }
             }

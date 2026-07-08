@@ -100,11 +100,7 @@ fn parse_workspace_url(url: &str) -> Option<&str> {
         .or_else(|| trimmed.strip_prefix("http://"))
         .unwrap_or(trimmed);
     let without_host = without_scheme.strip_prefix("bitbucket.org/")?;
-    let workspace = without_host
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .trim();
+    let workspace = without_host.split('/').next().unwrap_or_default().trim();
     if workspace.is_empty() {
         None
     } else {
@@ -628,7 +624,8 @@ fn pr_link(repo_base: &str, pr: &BitbucketPullRequest) -> Option<String> {
     {
         return Some(href);
     }
-    pr.id.map(|id| format!("{}/pull-requests/{}", repo_base, id))
+    pr.id
+        .map(|id| format!("{}/pull-requests/{}", repo_base, id))
 }
 
 fn parse_retry_after_ms(resp: &reqwest::Response) -> Option<u64> {
@@ -901,9 +898,7 @@ pub async fn fetch_timesheet_activity(
     end: NaiveDate,
 ) -> Result<BitbucketActivity, String> {
     let Some((requested_start, requested_end)) = clamp_to_recent_weeks(start, end) else {
-        log::info!(
-            "[bitbucket] skipping fetch: requested range outside recent-week window"
-        );
+        log::info!("[bitbucket] skipping fetch: requested range outside recent-week window");
         return Ok(BitbucketActivity::default());
     };
     let (scan_start, scan_end) = recent_weeks_window();
@@ -953,27 +948,25 @@ pub async fn fetch_timesheet_activity(
         scan_end,
         user_email
     );
-    let current_user: Option<BitbucketCurrentUser> = match get_json::<BitbucketCurrentUser>(
-        &auth_value,
-        &format!("{}/user", config.api_base),
-    )
-    .await
-    {
-        Ok(u) => {
-            log::debug!(
-                "[bitbucket] current user {}",
-                current_user_debug_identity(&u)
-            );
-            Some(u)
-        }
-        Err(e) => {
-            log::warn!(
-                "[bitbucket] failed to resolve current user via /user: {}",
-                e
-            );
-            None
-        }
-    };
+    let current_user: Option<BitbucketCurrentUser> =
+        match get_json::<BitbucketCurrentUser>(&auth_value, &format!("{}/user", config.api_base))
+            .await
+        {
+            Ok(u) => {
+                log::debug!(
+                    "[bitbucket] current user {}",
+                    current_user_debug_identity(&u)
+                );
+                Some(u)
+            }
+            Err(e) => {
+                log::warn!(
+                    "[bitbucket] failed to resolve current user via /user: {}",
+                    e
+                );
+                None
+            }
+        };
 
     // Commits: newest first. Stop once we go past the start date.
     let mut project_repos = Vec::<String>::new();
@@ -988,15 +981,14 @@ pub async fn fetch_timesheet_activity(
         }
     } else {
         for project_key in &discovered_project_keys {
-            let repos =
-                fetch_repositories_for_project(
-                    &config,
-                    &auth_value,
-                    project_key,
-                    scan_start,
-                    scan_end,
-                )
-                    .await?;
+            let repos = fetch_repositories_for_project(
+                &config,
+                &auth_value,
+                project_key,
+                scan_start,
+                scan_end,
+            )
+            .await?;
             for repo in repos {
                 if seen_repos.insert(repo.clone()) {
                     project_repos.push(repo);
@@ -1339,28 +1331,32 @@ pub async fn fetch_timesheet_activity(
                     urlencoding_jql(&q)
                 ));
                 while let Some(furl) = filtered_next {
-                    let fpage: BitbucketPage<BitbucketPullRequest> =
-                        match get_json(&auth_value, &furl).await {
-                            Ok(page) => page,
-                            Err(err) => {
-                                pr_repo_error_count += 1;
-                                if is_rate_limited_error(&err) {
-                                    rate_limit_hit = true;
-                                    log::warn!(
-                                        "[bitbucket] reviewer-query scan rate-limited for repo={}, stopping remaining Bitbucket scans for this run",
-                                        repo_slug
-                                    );
-                                } else {
-                                    log::warn!(
-                                        "[bitbucket] reviewer-query scan failed for repo={} url={} err={}",
-                                        repo_slug,
-                                        furl,
-                                        err
-                                    );
-                                }
-                                break;
+                    let fpage: BitbucketPage<BitbucketPullRequest> = match get_json(
+                        &auth_value,
+                        &furl,
+                    )
+                    .await
+                    {
+                        Ok(page) => page,
+                        Err(err) => {
+                            pr_repo_error_count += 1;
+                            if is_rate_limited_error(&err) {
+                                rate_limit_hit = true;
+                                log::warn!(
+                                    "[bitbucket] reviewer-query scan rate-limited for repo={}, stopping remaining Bitbucket scans for this run",
+                                    repo_slug
+                                );
+                            } else {
+                                log::warn!(
+                                    "[bitbucket] reviewer-query scan failed for repo={} url={} err={}",
+                                    repo_slug,
+                                    furl,
+                                    err
+                                );
                             }
-                        };
+                            break;
+                        }
+                    };
                     filtered_next = fpage.next.clone();
                     for pr in fpage.values {
                         let identity = pr_identity_key(repo_slug, &pr);

@@ -272,7 +272,11 @@ fn text_contrast_class(fill_class: &str) -> &'static str {
 }
 
 #[component]
-pub fn ReportOverlay(hours_per_day: f64, hours_per_week: f64, on_close: Callback<()>) -> impl IntoView {
+pub fn ReportOverlay(
+    hours_per_day: f64,
+    hours_per_week: f64,
+    on_close: Callback<()>,
+) -> impl IntoView {
     let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| RwSignal::new(I18n::default()));
     let today = Local::now().date_naive();
     let period = RwSignal::new(ReportPeriod::Week);

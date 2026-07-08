@@ -81,7 +81,8 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
             if let Ok(s) = result {
                 hours_per_week.set(s.hours_per_week.to_string());
                 hours_per_day.set(s.hours_per_day.to_string());
-                non_billable_project_prefixes.set(join_list_input(&s.non_billable_project_prefixes));
+                non_billable_project_prefixes
+                    .set(join_list_input(&s.non_billable_project_prefixes));
                 meeting_keys.set(join_list_input(&s.meeting_keys));
                 local_holiday_keys.set(join_list_input(&s.local_holiday_keys));
                 planned_time_off_keys.set(join_list_input(&s.planned_time_off_keys));

@@ -1,7 +1,7 @@
 #![cfg(feature = "ssr")]
 
-use crate::api::cache;
 use crate::api::bitbucket::fetch_timesheet_activity;
+use crate::api::cache;
 use crate::model::{CellActivity, WorkItem, WorklogEntry};
 use chrono::{Datelike, NaiveDate};
 use serde::Deserialize;

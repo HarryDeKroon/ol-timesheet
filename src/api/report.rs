@@ -44,7 +44,10 @@ fn merge_report_data(target: &mut ReportData, delta: ReportData) {
     for (project, days) in delta.billable {
         let entry = target.billable.entry(project).or_default();
         for (day_key, minutes) in days {
-            entry.entry(day_key).and_modify(|m| *m += minutes).or_insert(minutes);
+            entry
+                .entry(day_key)
+                .and_modify(|m| *m += minutes)
+                .or_insert(minutes);
         }
     }
     for (day_key, values) in delta.non_billable {

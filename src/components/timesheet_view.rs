@@ -37,37 +37,6 @@ fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
 }
 
 #[cfg(feature = "ssr")]
-fn merge_bitbucket_activity_into(
-    target: &mut crate::api::bitbucket::BitbucketActivity,
-    incoming: crate::api::bitbucket::BitbucketActivity,
-) {
-    for (cell_key, mut messages) in incoming.commit_messages_by_cell {
-        let entry = target.commit_messages_by_cell.entry(cell_key).or_default();
-        entry.append(&mut messages);
-        entry.sort();
-        entry.dedup();
-    }
-    for (cell_key, mut links) in incoming.commit_links_by_cell {
-        let entry = target.commit_links_by_cell.entry(cell_key).or_default();
-        entry.append(&mut links);
-        entry.sort();
-        entry.dedup();
-    }
-    for cell_key in incoming.pr_review_cells {
-        target.pr_review_cells.insert(cell_key);
-    }
-    for (cell_key, mut links) in incoming.pr_links_by_cell {
-        let entry = target.pr_links_by_cell.entry(cell_key).or_default();
-        entry.append(&mut links);
-        entry.sort();
-        entry.dedup();
-    }
-    for (key, summary) in incoming.discovered_item_summaries {
-        target.discovered_item_summaries.entry(key).or_insert(summary);
-    }
-}
-
-#[cfg(feature = "ssr")]
 fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetData {
     let sunday = monday + Duration::days(6);
     let date_in_week = |d: NaiveDate| d >= monday && d <= sunday;
@@ -213,25 +182,49 @@ pub async fn get_timesheet_data(
         }
     }
 
-    // 1. Fetch Jira + Bitbucket activity.
-    // Bitbucket is fetched week-by-week to avoid broad multi-week scans on uncached loads.
-    let bitbucket_fetch = async {
-        let mut merged = crate::api::bitbucket::BitbucketActivity::default();
-        for monday in &requested_mondays {
+    // 1. Fetch Jira + Bitbucket activity in parallel and merge in this task.
+    // Bitbucket API only supports "since", so scan once from the oldest requested
+    // Monday for the whole requested window. Jira supports weekly ranges.
+    let oldest_monday = requested_mondays.first().copied().unwrap_or(start);
+    let bitbucket_user_email = session.email.clone();
+    let bitbucket_display_name = session.display_name.clone();
+    let bitbucket_handle = tokio::spawn(async move {
+        fetch_timesheet_activity(
+            &bitbucket_user_email,
+            &bitbucket_display_name,
+            oldest_monday,
+            end,
+        )
+        .await
+    });
+
+    let jira_handles = requested_mondays
+        .iter()
+        .map(|monday| {
+            let creds = creds.clone();
             let week_start = *monday;
             let week_end = *monday + Duration::days(6);
-            match fetch_timesheet_activity(&session.email, &session.display_name, week_start, week_end)
-                .await
-            {
-                Ok(activity) => merge_bitbucket_activity_into(&mut merged, activity),
-                Err(err) => return Err(err),
-            }
+            tokio::spawn(async move {
+                crate::api::jira::fetch_work_items(&creds, week_start, week_end).await
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut jira_items_by_key = HashMap::<String, WorkItem>::new();
+    for handle in jira_handles {
+        let week_items = handle
+            .await
+            .map_err(|e| ServerFnError::new(format!("Jira fetch task failed: {}", e)))?
+            .map_err(ServerFnError::new)?;
+        for item in week_items {
+            jira_items_by_key.entry(item.key.clone()).or_insert(item);
         }
-        Ok::<crate::api::bitbucket::BitbucketActivity, String>(merged)
-    };
-    let (jira_items_res, bitbucket_res) =
-        tokio::join!(crate::api::jira::fetch_work_items(&creds, start, end), bitbucket_fetch);
-    let jira_items = jira_items_res.map_err(ServerFnError::new)?;
+    }
+    let jira_items = jira_items_by_key.into_values().collect::<Vec<_>>();
+
+    let bitbucket_res = bitbucket_handle
+        .await
+        .map_err(|e| ServerFnError::new(format!("Bitbucket fetch task failed: {}", e)))?;
 
     let mut all_items = jira_items;
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
@@ -984,13 +977,15 @@ pub fn TimesheetView() -> impl IntoView {
                     is_weekend: draft.is_weekend,
                     is_today,
                     site_url: ts.site_url.clone(),
-                    position_style: component_owner_for_restore.with(|| RwSignal::new(
-                        draft
-                            .position_style
-                            .clone()
-                            .filter(|style| !style.trim().is_empty())
-                            .unwrap_or_else(|| restored_popup_style(index)),
-                    )),
+                    position_style: component_owner_for_restore.with(|| {
+                        RwSignal::new(
+                            draft
+                                .position_style
+                                .clone()
+                                .filter(|style| !style.trim().is_empty())
+                                .unwrap_or_else(|| restored_popup_style(index)),
+                        )
+                    }),
                     restored_timer_popup: Some(draft),
                 });
             }
