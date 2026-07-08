@@ -605,8 +605,8 @@ pub async fn fetch_work_items(
     log::trace!("[fetch_work_items] worklogDate >= {start} AND worklogDate <= {end}");
 
     // Fetch both result sets and merge/deduplicate by issue key
-    let worklog_items = fetch_work_items_by_jql(creds, &worklog_jql).await?;
-    let assigned_items = fetch_work_items_by_jql(creds, &assigned_jql).await?;
+    let worklog_items = fetch_work_items_by_jql(creds, &worklog_jql, true).await?;
+    let assigned_items = fetch_work_items_by_jql(creds, &assigned_jql, true).await?;
 
     let mut seen = std::collections::HashSet::new();
     let mut items: Vec<WorkItem> = Vec::new();
@@ -617,6 +617,18 @@ pub async fn fetch_work_items(
     }
 
     Ok(items)
+}
+
+pub async fn fetch_worklog_items_in_range_fresh(
+    creds: &JiraCredentials,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<WorkItem>, String> {
+    let worklog_jql = format!(
+        "worklogAuthor = \"{}\" AND worklogDate >= \"{}\" AND worklogDate <= \"{}\"",
+        creds.email, start, end
+    );
+    fetch_work_items_by_jql(creds, &worklog_jql, false).await
 }
 
 fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
@@ -727,7 +739,7 @@ pub async fn fetch_work_items_by_keys(
         .collect::<Vec<_>>()
         .join(", ");
     let jql = format!("key in ({})", keys_clause);
-    let fetched = fetch_work_items_by_jql(creds, &jql).await?;
+    let fetched = fetch_work_items_by_jql(creds, &jql, true).await?;
     let by_key: std::collections::HashMap<String, WorkItem> =
         fetched.into_iter().map(|w| (w.key.clone(), w)).collect();
 
@@ -742,12 +754,15 @@ pub async fn fetch_work_items_by_keys(
 async fn fetch_work_items_by_jql(
     creds: &JiraCredentials,
     jql: &str,
+    use_cache: bool,
 ) -> Result<Vec<WorkItem>, String> {
     // Check cache
     let cache_key = format!("{}:jira_search:{}", creds.account_id, jql);
-    if let Some(cached) = cache::get(&cache_key) {
-        if let Ok(items) = serde_json::from_str::<Vec<WorkItem>>(&cached) {
-            return Ok(items);
+    if use_cache {
+        if let Some(cached) = cache::get(&cache_key) {
+            if let Ok(items) = serde_json::from_str::<Vec<WorkItem>>(&cached) {
+                return Ok(items);
+            }
         }
     }
 
@@ -985,21 +1000,42 @@ pub async fn fetch_worklogs(
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<(Vec<WorklogEntry>, f64), String> {
+    fetch_worklogs_inner(creds, issue_key, start, end, true).await
+}
+
+pub async fn fetch_worklogs_fresh(
+    creds: &JiraCredentials,
+    issue_key: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<(Vec<WorklogEntry>, f64), String> {
+    fetch_worklogs_inner(creds, issue_key, start, end, false).await
+}
+
+async fn fetch_worklogs_inner(
+    creds: &JiraCredentials,
+    issue_key: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+    use_cache: bool,
+) -> Result<(Vec<WorklogEntry>, f64), String> {
     let ck = worklog_cache_key(&creds.account_id, issue_key);
 
     // Try cache first – returns all user worklogs regardless of date range.
-    if let Some(cached_json) = cache::get(&ck) {
-        if let Ok(cached) = serde_json::from_str::<CachedWorklogs>(&cached_json) {
-            let current_year = chrono::Local::now().date_naive().year();
-            // If the cached YTD total was computed for a different year,
-            // treat it as a cache miss so we re-fetch from Jira.
-            if cached.ytd_year == current_year {
-                let filtered: Vec<WorklogEntry> = cached
-                    .entries
-                    .into_iter()
-                    .filter(|w| w.date >= start && w.date <= end)
-                    .collect();
-                return Ok((filtered, cached.ytd_total));
+    if use_cache {
+        if let Some(cached_json) = cache::get(&ck) {
+            if let Ok(cached) = serde_json::from_str::<CachedWorklogs>(&cached_json) {
+                let current_year = chrono::Local::now().date_naive().year();
+                // If the cached YTD total was computed for a different year,
+                // treat it as a cache miss so we re-fetch from Jira.
+                if cached.ytd_year == current_year {
+                    let filtered: Vec<WorklogEntry> = cached
+                        .entries
+                        .into_iter()
+                        .filter(|w| w.date >= start && w.date <= end)
+                        .collect();
+                    return Ok((filtered, cached.ytd_total));
+                }
             }
         }
     }

@@ -35,15 +35,16 @@ pub fn get(key: &str) -> Option<String> {
 pub fn put(key: String, data: String) {
     if let Ok(mut cache) = CACHE.lock() {
         let ttl_secs = DEFAULT_TTL.as_secs();
-        cache.insert(
-            key,
-            CacheEntry {
-                data,
-                expires_at: Instant::now() + DEFAULT_TTL,
-                created_at_utc: Utc::now(),
-                ttl_secs,
-            },
-        );
+        cache.insert(key, cache_entry(data, ttl_secs));
+    }
+}
+
+fn cache_entry(data: String, ttl_secs: u64) -> CacheEntry {
+    CacheEntry {
+        data,
+        expires_at: Instant::now() + Duration::from_secs(ttl_secs.max(1)),
+        created_at_utc: Utc::now(),
+        ttl_secs: ttl_secs.max(1),
     }
 }
 
@@ -227,4 +228,28 @@ pub fn snapshot_json() -> Result<Value, String> {
         "entry_count": entries.len(),
         "entries": entries,
     }))
+}
+
+pub fn update_user_entries<F>(account_id: &str, mut updater: F)
+where
+    F: FnMut(&str, &str) -> Option<String>,
+{
+    let prefix = format!("{}:", account_id);
+    if let Ok(mut cache) = CACHE.lock() {
+        let keys = cache
+            .iter()
+            .filter(|(key, entry)| key.starts_with(&prefix) && entry.expires_at > Instant::now())
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            let Some(existing) = cache.get(&key) else {
+                continue;
+            };
+            let ttl_secs = existing.ttl_secs;
+            let current = existing.data.clone();
+            if let Some(updated) = updater(&key, &current) {
+                cache.insert(key, cache_entry(updated, ttl_secs));
+            }
+        }
+    }
 }

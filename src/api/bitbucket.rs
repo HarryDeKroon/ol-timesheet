@@ -900,6 +900,25 @@ pub async fn fetch_timesheet_activity(
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<BitbucketActivity, String> {
+    fetch_timesheet_activity_inner(user_email, display_name, start, end, true).await
+}
+
+pub async fn fetch_timesheet_activity_fresh(
+    user_email: &str,
+    display_name: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<BitbucketActivity, String> {
+    fetch_timesheet_activity_inner(user_email, display_name, start, end, false).await
+}
+
+async fn fetch_timesheet_activity_inner(
+    user_email: &str,
+    display_name: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+    use_cache: bool,
+) -> Result<BitbucketActivity, String> {
     let Some((requested_start, requested_end)) = clamp_to_recent_weeks(start, end) else {
         log::info!("[bitbucket] skipping fetch: requested range outside recent-week window");
         return Ok(BitbucketActivity::default());
@@ -914,52 +933,63 @@ pub async fn fetch_timesheet_activity(
         config.workspace.to_lowercase(),
         user_email.trim().to_lowercase()
     );
-    if let Ok(cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.window_start == scan_start && entry.window_end == scan_end {
-                log::info!(
-                    "[bitbucket] cache hit for workspace={} user={} requested={}..{} scan={}..{}",
-                    config.workspace,
-                    user_email,
-                    requested_start,
-                    requested_end,
-                    scan_start,
-                    scan_end
-                );
-                return Ok(filter_activity_by_range(
-                    &entry.activity,
-                    requested_start,
-                    requested_end,
-                ));
+    if use_cache {
+        if let Ok(cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.window_start == scan_start && entry.window_end == scan_end {
+                    log::info!(
+                        "[bitbucket] cache hit for workspace={} user={} requested={}..{} scan={}..{}",
+                        config.workspace,
+                        user_email,
+                        requested_start,
+                        requested_end,
+                        scan_start,
+                        scan_end
+                    );
+                    return Ok(filter_activity_by_range(
+                        &entry.activity,
+                        requested_start,
+                        requested_end,
+                    ));
+                }
             }
         }
     }
-    let inflight_key = format!("{}|{}|{}", cache_key, scan_start, scan_end);
-    let inflight_lock = {
+    let inflight_lock = if use_cache {
+        let inflight_key = format!("{}|{}|{}", cache_key, scan_start, scan_end);
         let mut inflight = BITBUCKET_ACTIVITY_INFLIGHT.lock().await;
-        inflight
-            .entry(inflight_key)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        Some(
+            inflight
+                .entry(inflight_key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone(),
+        )
+    } else {
+        None
     };
-    let _inflight_guard = inflight_lock.lock().await;
-    if let Ok(cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.window_start == scan_start && entry.window_end == scan_end {
-                log::info!(
-                    "[bitbucket] cache hit for workspace={} user={} requested={}..{} scan={}..{}",
-                    config.workspace,
-                    user_email,
-                    requested_start,
-                    requested_end,
-                    scan_start,
-                    scan_end
-                );
-                return Ok(filter_activity_by_range(
-                    &entry.activity,
-                    requested_start,
-                    requested_end,
-                ));
+    let _inflight_guard = match inflight_lock.as_ref() {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    if use_cache {
+        if let Ok(cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.window_start == scan_start && entry.window_end == scan_end {
+                    log::info!(
+                        "[bitbucket] cache hit for workspace={} user={} requested={}..{} scan={}..{}",
+                        config.workspace,
+                        user_email,
+                        requested_start,
+                        requested_end,
+                        scan_start,
+                        scan_end
+                    );
+                    return Ok(filter_activity_by_range(
+                        &entry.activity,
+                        requested_start,
+                        requested_end,
+                    ));
+                }
             }
         }
     }

@@ -101,6 +101,7 @@ pub mod keys {
     pub const REPORT_YTD_SCOPE: &str = "report_ytd_scope";
     pub const REPORT_YEAR_SCOPE: &str = "report_year_scope";
     pub const REPORT_PTO_TOTAL: &str = "report_pto_total";
+    pub const LIVE_REFRESH_APPLIED: &str = "live_refresh_applied";
 }
 
 type TranslationMap = HashMap<&'static str, HashMap<&'static str, &'static str>>;
@@ -204,6 +205,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YTD_SCOPE, "YTD"),
         (keys::REPORT_YEAR_SCOPE, "Year"),
         (keys::REPORT_PTO_TOTAL, "PTO"),
+        (keys::LIVE_REFRESH_APPLIED, "Timesheet updated"),
     ]
     .into_iter()
     .collect();
@@ -330,6 +332,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YTD_SCOPE, "YTD"),
         (keys::REPORT_YEAR_SCOPE, "Année"),
         (keys::REPORT_PTO_TOTAL, "CP"),
+        (keys::LIVE_REFRESH_APPLIED, "Feuille de temps mise à jour"),
     ]
     .into_iter()
     .collect();
@@ -441,6 +444,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YTD_SCOPE, "YTD"),
         (keys::REPORT_YEAR_SCOPE, "Jaar"),
         (keys::REPORT_PTO_TOTAL, "Verlof"),
+        (keys::LIVE_REFRESH_APPLIED, "Urenstaat bijgewerkt"),
     ]
     .into_iter()
     .collect();

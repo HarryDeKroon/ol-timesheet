@@ -235,3 +235,68 @@ pub struct ReportData {
     #[serde(default, rename = "non-billable")]
     pub non_billable: HashMap<String, NonBillableMinutes>,
 }
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct YtdHoursUpdate {
+    pub issue_key: String,
+    pub hours: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct BitbucketActivityUpdate {
+    pub cell_key: String,
+    pub activity: CellActivity,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct TimesheetRefreshDiff {
+    #[serde(default)]
+    pub work_items_upserted: Vec<WorkItem>,
+    #[serde(default)]
+    pub work_item_keys_removed: Vec<String>,
+    #[serde(default)]
+    pub ytd_hours_upserted: Vec<YtdHoursUpdate>,
+    #[serde(default)]
+    pub ytd_hours_removed: Vec<String>,
+    #[serde(default)]
+    pub worklogs_upserted: Vec<WorklogEntry>,
+    #[serde(default)]
+    pub worklog_ids_removed: Vec<String>,
+    #[serde(default)]
+    pub bitbucket_activity_upserted: Vec<BitbucketActivityUpdate>,
+    #[serde(default)]
+    pub bitbucket_cell_keys_removed: Vec<String>,
+}
+
+impl TimesheetRefreshDiff {
+    pub fn is_empty(&self) -> bool {
+        self.work_items_upserted.is_empty()
+            && self.work_item_keys_removed.is_empty()
+            && self.ytd_hours_upserted.is_empty()
+            && self.ytd_hours_removed.is_empty()
+            && self.worklogs_upserted.is_empty()
+            && self.worklog_ids_removed.is_empty()
+            && self.bitbucket_activity_upserted.is_empty()
+            && self.bitbucket_cell_keys_removed.is_empty()
+    }
+
+    pub fn change_count(&self) -> usize {
+        self.work_items_upserted.len()
+            + self.work_item_keys_removed.len()
+            + self.ytd_hours_upserted.len()
+            + self.ytd_hours_removed.len()
+            + self.worklogs_upserted.len()
+            + self.worklog_ids_removed.len()
+            + self.bitbucket_activity_upserted.len()
+            + self.bitbucket_cell_keys_removed.len()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TimesheetWsMessage {
+    RefreshDiff {
+        diff: TimesheetRefreshDiff,
+        applied_at: String,
+    },
+}

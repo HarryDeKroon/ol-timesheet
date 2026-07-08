@@ -9,6 +9,10 @@ use crate::components::week_navigator::{WeekNavigator, week_monday};
 use crate::connection::use_connection;
 use crate::formatting::{format_hours_long, format_hours_short};
 use crate::i18n::{I18n, keys};
+#[cfg(feature = "hydrate")]
+use crate::model::TimesheetRefreshDiff;
+#[cfg(feature = "hydrate")]
+use crate::model::TimesheetWsMessage;
 use crate::model::{ConnectionStatus, TimesheetData, WorkItem, WorklogEntry};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use leptos::prelude::*;
@@ -118,6 +122,225 @@ fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
         bitbucket_activity,
         site_url,
         ..Default::default()
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn timesheet_has_activity_for_issue(ts: &TimesheetData, issue_key: &str) -> bool {
+    ts.worklogs.iter().any(|entry| entry.issue_key == issue_key)
+        || ts
+            .bitbucket_activity
+            .keys()
+            .filter_map(|cell_key| cell_key.split_once(':').map(|(key, _)| key))
+            .any(|key| key == issue_key)
+}
+
+#[cfg(feature = "hydrate")]
+fn apply_refresh_diff_to_timesheet(ts: &mut TimesheetData, diff: &TimesheetRefreshDiff) {
+    let mut new_items = Vec::<WorkItem>::new();
+    for item in &diff.work_items_upserted {
+        if let Some(existing) = ts
+            .work_items
+            .iter_mut()
+            .find(|existing| existing.key == item.key)
+        {
+            *existing = item.clone();
+        } else {
+            new_items.push(item.clone());
+        }
+    }
+    for item in new_items.into_iter().rev() {
+        ts.work_items.insert(0, item);
+    }
+
+    for update in &diff.ytd_hours_upserted {
+        ts.ytd_hours.insert(update.issue_key.clone(), update.hours);
+    }
+    for issue_key in &diff.ytd_hours_removed {
+        ts.ytd_hours.remove(issue_key);
+    }
+
+    if !diff.worklog_ids_removed.is_empty() {
+        let removed = diff
+            .worklog_ids_removed
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        ts.worklogs.retain(|entry| !removed.contains(&entry.id));
+    }
+    if !diff.worklogs_upserted.is_empty() {
+        let upsert_ids = diff
+            .worklogs_upserted
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        ts.worklogs
+            .retain(|entry| !upsert_ids.contains(entry.id.as_str()));
+        ts.worklogs.extend(diff.worklogs_upserted.iter().cloned());
+    }
+
+    for cell_key in &diff.bitbucket_cell_keys_removed {
+        ts.bitbucket_activity.remove(cell_key);
+    }
+    for update in &diff.bitbucket_activity_upserted {
+        ts.bitbucket_activity
+            .insert(update.cell_key.clone(), update.activity.clone());
+    }
+
+    for issue_key in &diff.work_item_keys_removed {
+        if !timesheet_has_activity_for_issue(ts, issue_key) {
+            ts.work_items.retain(|item| item.key != *issue_key);
+            ts.ytd_hours.remove(issue_key);
+        }
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn today_is_visible(selected_monday: NaiveDate, num_weeks: usize, today: NaiveDate) -> bool {
+    let start = selected_monday - Duration::weeks((num_weeks.max(1) as i64) - 1);
+    let end = selected_monday + Duration::days(6);
+    today >= start && today <= end
+}
+
+#[cfg(feature = "hydrate")]
+fn start_timesheet_refresh_socket(
+    last_data: RwSignal<Option<TimesheetData>>,
+    selected_monday: RwSignal<NaiveDate>,
+    num_weeks: RwSignal<usize>,
+    today: RwSignal<NaiveDate>,
+    i18n: RwSignal<I18n>,
+    refresh_toast: RwSignal<Option<String>>,
+) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
+
+    fn schedule_toast_clear(refresh_toast: RwSignal<Option<String>>) {
+        let clear = Closure::wrap(Box::new(move || {
+            refresh_toast.set(None);
+        }) as Box<dyn FnMut()>);
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                clear.as_ref().unchecked_ref(),
+                4000,
+            );
+            clear.forget();
+        }
+    }
+
+    fn schedule_reconnect(
+        last_data: RwSignal<Option<TimesheetData>>,
+        selected_monday: RwSignal<NaiveDate>,
+        num_weeks: RwSignal<usize>,
+        today: RwSignal<NaiveDate>,
+        i18n: RwSignal<I18n>,
+        refresh_toast: RwSignal<Option<String>>,
+    ) {
+        let reconnect = Closure::wrap(Box::new(move || {
+            start_timesheet_refresh_socket(
+                last_data,
+                selected_monday,
+                num_weeks,
+                today,
+                i18n,
+                refresh_toast,
+            );
+        }) as Box<dyn FnMut()>);
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                reconnect.as_ref().unchecked_ref(),
+                5000,
+            );
+            reconnect.forget();
+        }
+    }
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let protocol = location.protocol().unwrap_or_else(|_| "http:".into());
+    let ws_protocol = if protocol == "https:" { "wss:" } else { "ws:" };
+    let host = location.host().unwrap_or_else(|_| "localhost:8081".into());
+    let url = format!("{}//{}/ws/timesheet", ws_protocol, host);
+    let Ok(ws) = WebSocket::new(&url) else {
+        schedule_reconnect(
+            last_data,
+            selected_monday,
+            num_weeks,
+            today,
+            i18n,
+            refresh_toast,
+        );
+        return;
+    };
+
+    {
+        let onmessage = Closure::<dyn Fn(MessageEvent)>::new(move |event: MessageEvent| {
+            let Some(text) = event.data().as_string() else {
+                return;
+            };
+            let Ok(message) = serde_json::from_str::<TimesheetWsMessage>(&text) else {
+                return;
+            };
+            match message {
+                TimesheetWsMessage::RefreshDiff { diff, .. } => {
+                    if diff.is_empty() {
+                        return;
+                    }
+                    if !today_is_visible(
+                        selected_monday.get_untracked(),
+                        num_weeks.get_untracked(),
+                        today.get_untracked(),
+                    ) {
+                        return;
+                    }
+                    let mut applied = false;
+                    last_data.update(|opt| {
+                        if let Some(ts) = opt.as_mut() {
+                            apply_refresh_diff_to_timesheet(ts, &diff);
+                            applied = true;
+                        }
+                    });
+                    if applied {
+                        refresh_toast.set(Some(i18n.get_untracked().t(keys::LIVE_REFRESH_APPLIED)));
+                        schedule_toast_clear(refresh_toast);
+                    }
+                }
+            }
+        });
+        ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+        onmessage.forget();
+    }
+
+    {
+        let onclose = Closure::<dyn Fn(CloseEvent)>::new(move |_: CloseEvent| {
+            schedule_reconnect(
+                last_data,
+                selected_monday,
+                num_weeks,
+                today,
+                i18n,
+                refresh_toast,
+            );
+        });
+        ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+        onclose.forget();
+    }
+
+    {
+        let onerror = Closure::<dyn Fn(Event)>::new(move |_: Event| {
+            log::warn!("Timesheet WebSocket error");
+        });
+        ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+        onerror.forget();
+    }
+
+    {
+        let onopen = Closure::<dyn Fn(Event)>::new(move |_: Event| {
+            log::info!("Timesheet WebSocket opened");
+        });
+        ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+        onopen.forget();
     }
 }
 
@@ -843,6 +1066,17 @@ pub fn TimesheetView() -> impl IntoView {
     let last_data = RwSignal::new(Option::<TimesheetData>::None);
     let is_loading = RwSignal::new(true);
     let error_msg = RwSignal::new(Option::<String>::None);
+    let refresh_toast = RwSignal::new(Option::<String>::None);
+
+    #[cfg(feature = "hydrate")]
+    start_timesheet_refresh_socket(
+        last_data,
+        selected_monday,
+        num_weeks,
+        today,
+        i18n,
+        refresh_toast,
+    );
 
     // ── Work-item search state ──
     let search_query = RwSignal::new(String::new());
@@ -1427,9 +1661,6 @@ pub fn TimesheetView() -> impl IntoView {
                                                 data-cell-key={cell_key}
                                                 data-cell-date={cell_date_str}
                                                 on:click=move |_| {
-                                                    if !conn.is_available() {
-                                                        return;
-                                                    }
                                                     // Don't open a duplicate popup for the same cell.
                                                     let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == ck2 && p.date == cell_date));
                                                     if already_open {
@@ -1638,9 +1869,6 @@ pub fn TimesheetView() -> impl IntoView {
                                             data-cell-date={we_sat_str}
 
                                             on:click=move |_| {
-                                                if !conn.is_available() {
-                                                    return;
-                                                }
                                                 let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == we_key2 && p.date == sat));
                                                 if already_open {
                                                     return;
@@ -1898,6 +2126,10 @@ pub fn TimesheetView() -> impl IntoView {
                 </div>
             </div>
 
+
+            {move || refresh_toast.get().map(|msg| view! {
+                <div class="refresh-toast" role="status" aria-live="polite">{msg}</div>
+            })}
 
             // ── Search dropdown rendered outside the table so it is never
             // clipped by overflow:hidden / sticky headers / stacking contexts.

@@ -471,6 +471,31 @@ pub fn is_authenticated(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Clone, Debug)]
+pub struct AuthenticatedSessionSnapshot {
+    pub session_id: String,
+    pub user: UserSession,
+}
+
+/// Resolve the authenticated in-memory session for non-Leptos handlers such as
+/// WebSocket upgrades. Does not refresh OAuth tokens or extend the sliding TTL.
+pub fn authenticated_session_from_headers(
+    headers: &HeaderMap,
+) -> Option<AuthenticatedSessionSnapshot> {
+    let raw_token = extract_raw_cookie(headers)?;
+    let session_id = verify_session_token(&raw_token)?;
+    let now_unix = chrono::Utc::now().timestamp();
+    let sessions = SESSIONS.lock().ok()?;
+    let entry = sessions.get(&session_id)?;
+    if now_unix >= entry.expires_unix {
+        return None;
+    }
+    Some(AuthenticatedSessionSnapshot {
+        session_id,
+        user: entry.user.clone(),
+    })
+}
+
 /// Validate a replay-protection nonce for a state-changing request.
 ///
 /// The `nonce` must be in the format `{unix_timestamp_secs}:{random_hex}`.

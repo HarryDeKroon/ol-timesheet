@@ -50,10 +50,13 @@ cfg_if::cfg_if! {
             headers: axum::http::HeaderMap,
         ) -> axum::response::Response {
             use axum::response::IntoResponse;
-            if !timesheet::auth::is_authenticated(&headers) {
+            let Some(snapshot) = timesheet::auth::authenticated_session_from_headers(&headers) else {
                 return axum::http::StatusCode::UNAUTHORIZED.into_response();
-            }
-            ws.on_upgrade(handle_heartbeat_socket).into_response()
+            };
+            ws.on_upgrade(move |socket| async move {
+                timesheet::api::periodic_refresh::handle_timesheet_socket(socket, snapshot).await;
+            })
+            .into_response()
         }
 
         async fn admin_cache_handler(
@@ -250,6 +253,7 @@ cfg_if::cfg_if! {
                     timesheet::api::cache::prune_old_week_entries(cache_retention_days);
                 }
             });
+            tokio::spawn(timesheet::api::periodic_refresh::run_periodic_refresh_loop());
 
             let conf = match leptos::config::get_configuration(None) {
                 Ok(conf) => conf,
