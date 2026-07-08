@@ -199,3 +199,29 @@ pub enum ConnectionStatus {
     Waiting,
     Offline,
 }
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct NonBillableMinutes {
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub holidays: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub meetings: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub other: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub pto: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub study: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReportData {
+    #[serde(default)]
+    pub billable: HashMap<String, HashMap<String, u64>>,
+    #[serde(default, rename = "non-billable")]
+    pub non_billable: HashMap<String, NonBillableMinutes>,
+}
