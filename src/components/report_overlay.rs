@@ -826,9 +826,17 @@ pub fn ReportOverlay(hours_per_day: f64, hours_per_week: f64, on_close: Callback
                             let pto = format_aligned_hours(pto_total, i18n.get().decimal_separator);
                             let grand = format_aligned_hours(annual_work_total, i18n.get().decimal_separator);
                             let work_total_label = if context_year.get() == today.year() {
-                                "YTD work total"
+                                format!(
+                                    "{} {}",
+                                    i18n.get().t(keys::REPORT_YTD_SCOPE),
+                                    i18n.get().t(keys::REPORT_GRAND_TOTAL)
+                                )
                             } else {
-                                "Year work total"
+                                format!(
+                                    "{} {}",
+                                    i18n.get().t(keys::REPORT_YEAR_SCOPE),
+                                    i18n.get().t(keys::REPORT_GRAND_TOTAL)
+                                )
                             };
                             view! {
                                 <div class="report-pie-section">
