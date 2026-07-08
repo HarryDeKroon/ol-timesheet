@@ -880,7 +880,7 @@ pub fn ReportOverlay(hours_per_day: f64, hours_per_week: f64, on_close: Callback
                                         </div>
                                         <div class="report-total-item">
                                             <span class="report-filter-swatch report-filter-swatch-placeholder"></span>
-                                            <span class="report-total-label">{"Grand total"}</span>
+                                            <span class="report-total-label">{move || i18n.get().t(keys::REPORT_GRAND_TOTAL)}</span>
                                             <span class="report-total-number" title={format_hours_wdh(annual_work_total as f64 / 60.0, hours_per_day, hours_per_week)}>
                                                 <span class="report-total-int">{grand.int_part}</span>
                                                 <span class="report-total-sep">{grand.sep_part}</span>
