@@ -1,6 +1,6 @@
 # User report
 
-al is to add a reporting module to the timesheet, which will give the user an insight of their monthly progress as compared to contract hours, as well as the ratio between billable and overhead hours spent
+Goal is to add a reporting module to the timesheet, which will give the user an insight of their monthly progress as compared to contract hours, as well as the ratio between billable and overhead hours spent
 
 ## Configuration changes
 
