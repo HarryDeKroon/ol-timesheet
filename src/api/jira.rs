@@ -634,7 +634,7 @@ fn slice_timesheet_week(
     source: &crate::model::TimesheetData,
     monday: NaiveDate,
 ) -> crate::model::TimesheetData {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     let sunday = monday + chrono::Duration::days(6);
     let in_week = |d: NaiveDate| d >= monday && d <= sunday;
 
@@ -644,38 +644,10 @@ fn slice_timesheet_week(
         .filter(|w| in_week(w.date))
         .cloned()
         .collect::<Vec<_>>();
-    let keys_with_logs = worklogs
-        .iter()
-        .map(|w| w.issue_key.clone())
-        .collect::<HashSet<_>>();
-    let keys_with_activity = source
-        .bitbucket_activity
-        .keys()
-        .filter_map(|k| k.rsplit_once(':'))
-        .filter_map(|(issue_key, date)| {
-            NaiveDate::parse_from_str(date, "%Y-%m-%d")
-                .ok()
-                .filter(|d| in_week(*d))
-                .map(|_| issue_key.to_string())
-        })
-        .collect::<HashSet<_>>();
-    let visible_keys = keys_with_logs
-        .union(&keys_with_activity)
-        .cloned()
-        .collect::<HashSet<_>>();
-
-    let work_items = source
-        .work_items
-        .iter()
-        .filter(|i| visible_keys.contains(&i.key))
-        .cloned()
-        .collect::<Vec<_>>();
-    let ytd_hours = source
-        .ytd_hours
-        .iter()
-        .filter(|(k, _)| visible_keys.contains(*k))
-        .map(|(k, v)| (k.clone(), *v))
-        .collect::<HashMap<_, _>>();
+    // Keep all fetched work items so assigned active issues with no in-range
+    // worklogs are preserved in per-week cache entries.
+    let work_items = source.work_items.clone();
+    let ytd_hours = source.ytd_hours.clone();
     let bitbucket_activity = source
         .bitbucket_activity
         .iter()
@@ -1447,21 +1419,11 @@ pub async fn prefetch_startup_window(
 ) {
     let back = weeks_back as i64;
     let forward = weeks_forward as i64;
-    let mut tasks = Vec::new();
     for offset in (-back)..=forward {
         let monday = anchor_monday + chrono::Duration::weeks(offset);
         let start = monday;
         let end = monday + chrono::Duration::days(6);
-        let creds = creds.clone();
-        let display_name = display_name.clone();
-        tasks.push(tokio::spawn(async move {
-            prefetch_range(creds, &display_name, start, end).await;
-        }));
-    }
-    for task in tasks {
-        if let Err(e) = task.await {
-            log::warn!("[prefetch] startup warm task failed: {}", e);
-        }
+        prefetch_range(creds.clone(), &display_name, start, end).await;
     }
 }
 

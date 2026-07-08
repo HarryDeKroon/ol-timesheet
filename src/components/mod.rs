@@ -2,6 +2,7 @@ pub mod cell_popup;
 pub mod folder_field;
 pub mod password_field;
 pub mod popup_flush;
+pub mod report_overlay;
 pub mod settings_dialog;
 pub mod settings_group;
 pub mod timer;

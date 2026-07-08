@@ -31,6 +31,7 @@ pub mod keys {
     pub const HOURS: &str = "hours";
     pub const DELETE: &str = "delete";
     pub const ADD_NEW: &str = "add_new";
+    pub const OTHER: &str = "other";
     pub const NO_ENTRIES: &str = "no_entries";
     pub const UPLAND_JIRA: &str = "upland_jira";
     pub const BITBUCKET: &str = "bitbucket";
@@ -75,9 +76,31 @@ pub mod keys {
     pub const OPEN_PR_IN_BITBUCKET: &str = "open_pr_in_bitbucket";
     pub const OPEN_SETTINGS: &str = "open_settings";
     pub const REFRESH_CACHED: &str = "refresh_cached";
+    pub const USER_REPORT: &str = "user_report";
     pub const LOGOUT: &str = "logout";
     pub const OL_JIRA_DISABLED: &str = "ol_jira_disabled";
     pub const ISSUE_ICON_ALT: &str = "issue_icon_alt";
+    pub const REPORTING: &str = "reporting";
+    pub const NON_BILLABLE_PROJECTS: &str = "non_billable_projects";
+    pub const MEETINGS: &str = "meetings";
+    pub const LOCAL_HOLIDAYS: &str = "local_holidays";
+    pub const PLANNED_TIME_OFF: &str = "planned_time_off";
+    pub const STUDY: &str = "study";
+    pub const LIST_INPUT_HINT: &str = "list_input_hint";
+    pub const REPORT_PERIOD: &str = "report_period";
+    pub const REPORT_PERIOD_WEEK: &str = "report_period_week";
+    pub const REPORT_PERIOD_MONTH: &str = "report_period_month";
+    pub const BILLABLE: &str = "billable";
+    pub const NON_BILLABLE: &str = "non_billable";
+    pub const PLANNED_TIME_OFF_HOURS: &str = "planned_time_off_hours";
+    pub const REPORT_NO_DATA: &str = "report_no_data";
+    pub const REPORT_PREVIOUS: &str = "report_previous";
+    pub const REPORT_NEXT: &str = "report_next";
+    pub const REPORT_LOADING: &str = "report_loading";
+    pub const REPORT_GRAND_TOTAL: &str = "report_grand_total";
+    pub const REPORT_YTD_SCOPE: &str = "report_ytd_scope";
+    pub const REPORT_YEAR_SCOPE: &str = "report_year_scope";
+    pub const REPORT_PTO_TOTAL: &str = "report_pto_total";
 }
 
 type TranslationMap = HashMap<&'static str, HashMap<&'static str, &'static str>>;
@@ -109,6 +132,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::HOURS, "Hours"),
         (keys::DELETE, "Delete"),
         (keys::ADD_NEW, "Add new"),
+        (keys::OTHER, "Other"),
         (keys::NO_ENTRIES, "No entries found"),
         (keys::UPLAND_JIRA, "Upland Jira"),
         (keys::BITBUCKET, "Bitbucket"),
@@ -152,9 +176,34 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_PR_IN_BITBUCKET, "Open pull request in Bitbucket"),
         (keys::OPEN_SETTINGS, "Open settings"),
         (keys::REFRESH_CACHED, "Refresh cached work items"),
+        (keys::USER_REPORT, "User report"),
         (keys::LOGOUT, "Log out"),
         (keys::OL_JIRA_DISABLED, "OL Jira integration is disabled because over three years have passed since the last update."),
         (keys::ISSUE_ICON_ALT, "Issue icon"),
+        (keys::REPORTING, "Reporting"),
+        (keys::NON_BILLABLE_PROJECTS, "Non-billable project(s)"),
+        (keys::MEETINGS, "Meetings"),
+        (keys::LOCAL_HOLIDAYS, "Local holidays"),
+        (keys::PLANNED_TIME_OFF, "Planned time off"),
+        (keys::STUDY, "Study"),
+        (
+            keys::LIST_INPUT_HINT,
+            "Comma, semicolon, or newline separated values",
+        ),
+        (keys::REPORT_PERIOD, "Period"),
+        (keys::REPORT_PERIOD_WEEK, "Month"),
+        (keys::REPORT_PERIOD_MONTH, "Year"),
+        (keys::BILLABLE, "Billable"),
+        (keys::NON_BILLABLE, "Non-billable"),
+        (keys::PLANNED_TIME_OFF_HOURS, "Planned time off (hours)"),
+        (keys::REPORT_NO_DATA, "No data for selected period"),
+        (keys::REPORT_PREVIOUS, "Previous period"),
+        (keys::REPORT_NEXT, "Next period"),
+        (keys::REPORT_LOADING, "Loading report…"),
+        (keys::REPORT_GRAND_TOTAL, "Total"),
+        (keys::REPORT_YTD_SCOPE, "YTD"),
+        (keys::REPORT_YEAR_SCOPE, "Year"),
+        (keys::REPORT_PTO_TOTAL, "PTO"),
     ]
     .into_iter()
     .collect();
@@ -191,6 +240,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::HOURS, "Heures"),
         (keys::DELETE, "Supprimer"),
         (keys::ADD_NEW, "Ajouter"),
+        (keys::OTHER, "Autre"),
         (keys::NO_ENTRIES, "Aucune entr\u{00E9}e trouv\u{00E9}e"),
         (keys::UPLAND_JIRA, "Upland Jira"),
         (keys::BITBUCKET, "Bitbucket"),
@@ -249,9 +299,37 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         ),
         (keys::OPEN_SETTINGS, "Ouvrir les paramètres"),
         (keys::REFRESH_CACHED, "Rafraîchir les éléments en cache"),
+        (keys::USER_REPORT, "Rapport utilisateur"),
         (keys::LOGOUT, "Se déconnecter"),
         (keys::OL_JIRA_DISABLED, "L\u{2019}intégration OL Jira est désactivée car plus de trois ans se sont écoulés depuis la dernière mise à jour."),
         (keys::ISSUE_ICON_ALT, "Icône du ticket"),
+        (keys::REPORTING, "Rapport"),
+        (keys::NON_BILLABLE_PROJECTS, "Projet(s) non facturable(s)"),
+        (keys::MEETINGS, "Réunions"),
+        (keys::LOCAL_HOLIDAYS, "Jours fériés locaux"),
+        (keys::PLANNED_TIME_OFF, "Congé planifié"),
+        (keys::STUDY, "Étude"),
+        (
+            keys::LIST_INPUT_HINT,
+            "Valeurs séparées par virgule, point-virgule ou retour ligne",
+        ),
+        (keys::REPORT_PERIOD, "Période"),
+        (keys::REPORT_PERIOD_WEEK, "Mois"),
+        (keys::REPORT_PERIOD_MONTH, "Année"),
+        (keys::BILLABLE, "Facturable"),
+        (keys::NON_BILLABLE, "Non facturable"),
+        (keys::PLANNED_TIME_OFF_HOURS, "Congé planifié (heures)"),
+        (keys::REPORT_NO_DATA, "Aucune donnée pour la période sélectionnée"),
+        (keys::REPORT_PREVIOUS, "Période précédente"),
+        (keys::REPORT_NEXT, "Période suivante"),
+        (keys::REPORT_LOADING, "Chargement du rapport…"),
+        (
+            keys::REPORT_GRAND_TOTAL,
+            "Total",
+        ),
+        (keys::REPORT_YTD_SCOPE, "YTD"),
+        (keys::REPORT_YEAR_SCOPE, "Année"),
+        (keys::REPORT_PTO_TOTAL, "CP"),
     ]
     .into_iter()
     .collect();
@@ -282,6 +360,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::HOURS, "Uren"),
         (keys::DELETE, "Verwijderen"),
         (keys::ADD_NEW, "Nieuw toevoegen"),
+        (keys::OTHER, "Overig"),
         (keys::NO_ENTRIES, "Geen items gevonden"),
         (keys::UPLAND_JIRA, "Upland Jira"),
         (keys::BITBUCKET, "Bitbucket"),
@@ -331,9 +410,37 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         ),
         (keys::OPEN_SETTINGS, "Instellingen openen"),
         (keys::REFRESH_CACHED, "Werkitems in cache vernieuwen"),
+        (keys::USER_REPORT, "Gebruikersrapport"),
         (keys::LOGOUT, "Uitloggen"),
         (keys::OL_JIRA_DISABLED, "OL Jira-integratie is uitgeschakeld omdat er meer dan drie jaar zijn verstreken sinds de laatste update."),
         (keys::ISSUE_ICON_ALT, "Ticketpictogram"),
+        (keys::REPORTING, "Rapportage"),
+        (keys::NON_BILLABLE_PROJECTS, "Niet-factureerbare project(en)"),
+        (keys::MEETINGS, "Vergaderingen"),
+        (keys::LOCAL_HOLIDAYS, "Lokale feestdagen"),
+        (keys::PLANNED_TIME_OFF, "Gepland verlof"),
+        (keys::STUDY, "Studie"),
+        (
+            keys::LIST_INPUT_HINT,
+            "Waarden gescheiden door komma, puntkomma of nieuwe regel",
+        ),
+        (keys::REPORT_PERIOD, "Periode"),
+        (keys::REPORT_PERIOD_WEEK, "Maand"),
+        (keys::REPORT_PERIOD_MONTH, "Jaar"),
+        (keys::BILLABLE, "Factureerbaar"),
+        (keys::NON_BILLABLE, "Niet-factureerbaar"),
+        (keys::PLANNED_TIME_OFF_HOURS, "Gepland verlof (uren)"),
+        (keys::REPORT_NO_DATA, "Geen gegevens voor geselecteerde periode"),
+        (keys::REPORT_PREVIOUS, "Vorige periode"),
+        (keys::REPORT_NEXT, "Volgende periode"),
+        (keys::REPORT_LOADING, "Rapport laden…"),
+        (
+            keys::REPORT_GRAND_TOTAL,
+            "Totaal",
+        ),
+        (keys::REPORT_YTD_SCOPE, "YTD"),
+        (keys::REPORT_YEAR_SCOPE, "Jaar"),
+        (keys::REPORT_PTO_TOTAL, "Verlof"),
     ]
     .into_iter()
     .collect();

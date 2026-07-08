@@ -1,14 +1,30 @@
 #![cfg(feature = "ssr")]
 
-use chrono::{DateTime, NaiveDate};
+use chrono::{DateTime, Datelike, NaiveDate};
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 static ISSUE_KEY_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r"^([A-Za-z][A-Za-z0-9]+-\d+)\b").ok());
+const RATE_LIMIT_RETRIES: u32 = 3;
+const RATE_LIMIT_DEFAULT_BACKOFF_MS: u64 = 1_000;
+const RATE_LIMIT_MAX_BACKOFF_MS: u64 = 30_000;
+static BITBUCKET_COOLDOWN_UNTIL: LazyLock<Mutex<Option<std::time::Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
+static BITBUCKET_WORKSPACE_PROJECTS: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static BITBUCKET_ACTIVITY_CACHE: LazyLock<Mutex<HashMap<String, BitbucketActivityCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone, Debug)]
+struct BitbucketActivityCacheEntry {
+    window_start: NaiveDate,
+    window_end: NaiveDate,
+    activity: BitbucketActivity,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct BitbucketActivity {
@@ -23,7 +39,6 @@ pub struct BitbucketActivity {
 struct BitbucketConfig {
     api_base: String,
     workspace: String,
-    project_keys: Vec<String>,
     api_token: String,
 }
 
@@ -42,11 +57,6 @@ impl BitbucketConfig {
         if let Ok(single_project_url) = std::env::var("BITBUCKET_PROJECT_URL") {
             project_url_values.push(single_project_url);
         }
-        if project_url_values.is_empty() && server_url.is_none() {
-            project_url_values
-                .push("https://bitbucket.org/uplandsoftware/workspace/projects/OLP".to_string());
-        }
-
         let parsed_projects = project_url_values
             .iter()
             .filter(|value| !value.trim().is_empty())
@@ -75,31 +85,9 @@ impl BitbucketConfig {
         let api_token = std::env::var("BITBUCKET_API_TOKEN")
             .map_err(|_| "BITBUCKET_API_TOKEN is not set".to_string())?;
 
-        let mut project_keys = Vec::<String>::new();
-        for (project_workspace, project_key) in parsed_projects {
-            if !project_workspace.eq_ignore_ascii_case(&workspace) {
-                log::warn!(
-                    "[bitbucket] project URL workspace '{}' differs from configured workspace '{}'; using configured workspace",
-                    project_workspace,
-                    workspace
-                );
-            }
-            project_keys.push(sanitize_project_key(&project_key, &api_token)?);
-        }
-
-        if let Ok(project_key_raw) = std::env::var("BITBUCKET_PROJECT_KEY") {
-            for key in split_env_list(&project_key_raw) {
-                project_keys.push(sanitize_project_key(&key, &api_token)?);
-            }
-        }
-
-        let mut seen = HashSet::<String>::new();
-        project_keys.retain(|key| seen.insert(key.clone()));
-
         Ok(Self {
             api_base,
             workspace,
-            project_keys,
             api_token,
         })
     }
@@ -194,6 +182,11 @@ fn sanitize_project_key(raw: &str, api_token: &str) -> Result<String, String> {
         "Invalid Bitbucket project key '{}'. Expected a short key like 'OLP'.",
         trimmed
     ))
+}
+
+#[derive(Deserialize)]
+struct BitbucketProject {
+    key: String,
 }
 
 #[derive(Deserialize)]
@@ -305,6 +298,91 @@ fn parse_iso_date(value: &str) -> Option<NaiveDate> {
         // a late-evening local commit into next day and place it in wrong cell.
         .map(|dt| dt.date_naive())
         .ok()
+}
+
+fn recent_weeks_window() -> (NaiveDate, NaiveDate) {
+    let today = chrono::Local::now().date_naive();
+    let current_week_monday =
+        today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+    let window_start = current_week_monday - chrono::Duration::weeks(2);
+    let window_end = current_week_monday + chrono::Duration::days(6);
+    (window_start, window_end)
+}
+
+fn clamp_to_recent_weeks(start: NaiveDate, end: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
+    let (window_start, window_end) = recent_weeks_window();
+    let effective_start = std::cmp::max(start, window_start);
+    let effective_end = std::cmp::min(end, window_end);
+    (effective_start <= effective_end).then_some((effective_start, effective_end))
+}
+
+fn key_in_range(cell_key: &str, start: NaiveDate, end: NaiveDate) -> bool {
+    cell_key
+        .rsplit_once(':')
+        .and_then(|(_, date)| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .is_some_and(|d| d >= start && d <= end)
+}
+
+fn issue_key_from_cell(cell_key: &str) -> Option<String> {
+    cell_key.split_once(':').map(|(key, _)| key.to_string())
+}
+
+fn filter_activity_by_range(
+    source: &BitbucketActivity,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> BitbucketActivity {
+    let mut filtered = BitbucketActivity::default();
+    let mut referenced_keys = HashSet::<String>::new();
+
+    for (cell_key, values) in &source.commit_messages_by_cell {
+        if key_in_range(cell_key, start, end) {
+            filtered
+                .commit_messages_by_cell
+                .insert(cell_key.clone(), values.clone());
+            if let Some(key) = issue_key_from_cell(cell_key) {
+                referenced_keys.insert(key);
+            }
+        }
+    }
+    for (cell_key, values) in &source.commit_links_by_cell {
+        if key_in_range(cell_key, start, end) {
+            filtered
+                .commit_links_by_cell
+                .insert(cell_key.clone(), values.clone());
+            if let Some(key) = issue_key_from_cell(cell_key) {
+                referenced_keys.insert(key);
+            }
+        }
+    }
+    for cell_key in &source.pr_review_cells {
+        if key_in_range(cell_key, start, end) {
+            filtered.pr_review_cells.insert(cell_key.clone());
+            if let Some(key) = issue_key_from_cell(cell_key) {
+                referenced_keys.insert(key);
+            }
+        }
+    }
+    for (cell_key, values) in &source.pr_links_by_cell {
+        if key_in_range(cell_key, start, end) {
+            filtered
+                .pr_links_by_cell
+                .insert(cell_key.clone(), values.clone());
+            if let Some(key) = issue_key_from_cell(cell_key) {
+                referenced_keys.insert(key);
+            }
+        }
+    }
+
+    for (key, summary) in &source.discovered_item_summaries {
+        if referenced_keys.contains(key) {
+            filtered
+                .discovered_item_summaries
+                .insert(key.clone(), summary.clone());
+        }
+    }
+
+    filtered
 }
 
 fn extract_work_item_key(text: &str) -> Option<String> {
@@ -553,26 +631,124 @@ fn pr_link(repo_base: &str, pr: &BitbucketPullRequest) -> Option<String> {
     pr.id.map(|id| format!("{}/pull-requests/{}", repo_base, id))
 }
 
-async fn get_json<T: for<'de> Deserialize<'de>>(auth_value: &str, url: &str) -> Result<T, String> {
-    log::debug!("[bitbucket] GET {}", url);
-    let resp = HTTP
-        .get(url)
-        .header("Authorization", auth_value)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("Bitbucket request failed: {}", e))?;
+fn parse_retry_after_ms(resp: &reqwest::Response) -> Option<u64> {
+    let raw = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
+    let seconds = raw.trim().parse::<u64>().ok()?;
+    Some(seconds.saturating_mul(1_000))
+}
 
-    if !resp.status().is_success() {
+fn header_u64(resp: &reqwest::Response, names: &[&str]) -> Option<u64> {
+    for name in names {
+        if let Some(value) = resp.headers().get(*name) {
+            if let Ok(text) = value.to_str() {
+                if let Ok(parsed) = text.trim().parse::<u64>() {
+                    return Some(parsed);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_rate_limit_reset_ms(resp: &reqwest::Response) -> Option<u64> {
+    let reset = header_u64(
+        resp,
+        &["x-ratelimit-reset", "ratelimit-reset", "x-rate-limit-reset"],
+    )?;
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if reset <= now_epoch {
+        return Some(0);
+    }
+    Some(reset.saturating_sub(now_epoch).saturating_mul(1_000))
+}
+
+fn rate_limit_header_backoff_ms(resp: &reqwest::Response) -> Option<u64> {
+    let remaining = header_u64(resp, &["x-ratelimit-remaining", "ratelimit-remaining"]);
+    if remaining == Some(0) {
+        return parse_rate_limit_reset_ms(resp);
+    }
+    None
+}
+
+fn set_global_cooldown(ms: u64) {
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    if let Ok(mut guard) = BITBUCKET_COOLDOWN_UNTIL.lock() {
+        *guard = match *guard {
+            Some(existing) if existing > until => Some(existing),
+            _ => Some(until),
+        };
+    }
+}
+
+async fn wait_for_global_cooldown() {
+    let wait_for = if let Ok(guard) = BITBUCKET_COOLDOWN_UNTIL.lock() {
+        (*guard).and_then(|until| until.checked_duration_since(std::time::Instant::now()))
+    } else {
+        None
+    };
+    if let Some(duration) = wait_for {
+        tokio::time::sleep(duration).await;
+    }
+}
+
+fn is_rate_limited_error(err: &str) -> bool {
+    err.contains("429 Too Many Requests")
+}
+
+async fn get_json<T: for<'de> Deserialize<'de>>(auth_value: &str, url: &str) -> Result<T, String> {
+    let mut attempt = 0u32;
+    loop {
+        wait_for_global_cooldown().await;
+        attempt = attempt.saturating_add(1);
+        log::debug!("[bitbucket] GET {}", url);
+        let resp = HTTP
+            .get(url)
+            .header("Authorization", auth_value)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("Bitbucket request failed: {}", e))?;
+
+        if resp.status().is_success() {
+            return resp
+                .json::<T>()
+                .await
+                .map_err(|e| format!("Bitbucket JSON parse failed: {}", e));
+        }
+
         let status = resp.status();
+        let retry_after_ms = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            parse_retry_after_ms(&resp)
+        } else {
+            None
+        };
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt <= RATE_LIMIT_RETRIES {
+            let retry_after_ms = retry_after_ms.unwrap_or_else(|| {
+                (RATE_LIMIT_DEFAULT_BACKOFF_MS.saturating_mul(1u64 << (attempt - 1)))
+                    .min(RATE_LIMIT_MAX_BACKOFF_MS)
+            });
+            let header_backoff_ms = rate_limit_header_backoff_ms(&resp).unwrap_or(0);
+            let wait_ms = retry_after_ms.max(header_backoff_ms);
+            set_global_cooldown(wait_ms);
+            log::warn!(
+                "[bitbucket] rate limited (429), retrying in {} ms (attempt {}/{})",
+                wait_ms,
+                attempt,
+                RATE_LIMIT_RETRIES
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            continue;
+        }
         let body = resp.text().await.unwrap_or_default();
-        log::warn!("[bitbucket] request failed: {} {}", status, url);
         return Err(format!("Bitbucket API error {}: {}", status, body));
     }
-
-    resp.json::<T>()
-        .await
-        .map_err(|e| format!("Bitbucket JSON parse failed: {}", e))
 }
 
 async fn fetch_repositories_for_project(
@@ -674,6 +850,41 @@ async fn fetch_repositories_for_workspace(
     Ok(slugs)
 }
 
+async fn discover_workspace_project_keys(
+    config: &BitbucketConfig,
+    auth_value: &str,
+) -> Result<Vec<String>, String> {
+    if let Ok(cache) = BITBUCKET_WORKSPACE_PROJECTS.lock() {
+        if let Some(keys) = cache.get(&config.workspace) {
+            return Ok(keys.clone());
+        }
+    }
+
+    let mut keys = Vec::<String>::new();
+    let mut next_url = Some(format!(
+        "{}/workspaces/{}/projects?pagelen=100",
+        config.api_base, config.workspace
+    ));
+    while let Some(url) = next_url {
+        let page: BitbucketPage<BitbucketProject> = get_json(auth_value, &url).await?;
+        next_url = page.next.clone();
+        for project in page.values {
+            if let Ok(validated) = sanitize_project_key(&project.key, &config.api_token) {
+                keys.push(validated);
+            }
+        }
+    }
+
+    keys.sort();
+    keys.dedup();
+
+    if let Ok(mut cache) = BITBUCKET_WORKSPACE_PROJECTS.lock() {
+        cache.insert(config.workspace.clone(), keys.clone());
+    }
+
+    Ok(keys)
+}
+
 fn urlencoding_jql(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -689,16 +900,57 @@ pub async fn fetch_timesheet_activity(
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<BitbucketActivity, String> {
+    let Some((requested_start, requested_end)) = clamp_to_recent_weeks(start, end) else {
+        log::info!(
+            "[bitbucket] skipping fetch: requested range outside recent-week window"
+        );
+        return Ok(BitbucketActivity::default());
+    };
+    let (scan_start, scan_end) = recent_weeks_window();
+
     let started_at = std::time::Instant::now();
     let config = BitbucketConfig::from_env()?;
     let auth_value = auth_header(user_email, &config.api_token);
+    let cache_key = format!(
+        "{}|{}",
+        config.workspace.to_lowercase(),
+        user_email.trim().to_lowercase()
+    );
+    if let Ok(cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.window_start == scan_start && entry.window_end == scan_end {
+                log::info!(
+                    "[bitbucket] cache hit for workspace={} user={} requested={}..{} scan={}..{}",
+                    config.workspace,
+                    user_email,
+                    requested_start,
+                    requested_end,
+                    scan_start,
+                    scan_end
+                );
+                return Ok(filter_activity_by_range(
+                    &entry.activity,
+                    requested_start,
+                    requested_end,
+                ));
+            }
+        }
+    }
+    let discovered_project_keys = discover_workspace_project_keys(&config, &auth_value)
+        .await
+        .unwrap_or_else(|err| {
+            log::warn!("[bitbucket] failed to discover workspace projects: {}", err);
+            Vec::new()
+        });
     let mut activity = BitbucketActivity::default();
     log::info!(
-        "[bitbucket] fetching activity for workspace={} projects={} range={}..{} user_email={}",
+        "[bitbucket] fetching activity for workspace={} projects={} requested={}..{} scan={}..{} user_email={}",
         config.workspace,
-        config.project_keys.join(","),
-        start,
-        end,
+        discovered_project_keys.join(","),
+        requested_start,
+        requested_end,
+        scan_start,
+        scan_end,
         user_email
     );
     let current_user: Option<BitbucketCurrentUser> = match get_json::<BitbucketCurrentUser>(
@@ -726,17 +978,24 @@ pub async fn fetch_timesheet_activity(
     // Commits: newest first. Stop once we go past the start date.
     let mut project_repos = Vec::<String>::new();
     let mut seen_repos = HashSet::<String>::new();
-    if config.project_keys.is_empty() {
-        let repos = fetch_repositories_for_workspace(&config, &auth_value, start, end).await?;
+    if discovered_project_keys.is_empty() {
+        let repos =
+            fetch_repositories_for_workspace(&config, &auth_value, scan_start, scan_end).await?;
         for repo in repos {
             if seen_repos.insert(repo.clone()) {
                 project_repos.push(repo);
             }
         }
     } else {
-        for project_key in &config.project_keys {
+        for project_key in &discovered_project_keys {
             let repos =
-                fetch_repositories_for_project(&config, &auth_value, project_key, start, end)
+                fetch_repositories_for_project(
+                    &config,
+                    &auth_value,
+                    project_key,
+                    scan_start,
+                    scan_end,
+                )
                     .await?;
             for repo in repos {
                 if seen_repos.insert(repo.clone()) {
@@ -748,12 +1007,16 @@ pub async fn fetch_timesheet_activity(
     log::info!(
         "[bitbucket] selected {} unique repos across {} project(s)",
         project_repos.len(),
-        config.project_keys.len()
+        discovered_project_keys.len()
     );
     let mut commit_page_count = 0usize;
     let mut matched_commit_count = 0usize;
     let mut commit_repo_error_count = 0usize;
+    let mut rate_limit_hit = false;
     for repo_slug in &project_repos {
+        if rate_limit_hit {
+            break;
+        }
         let repo_base = format!(
             "{}/repositories/{}/{}",
             config.api_base, config.workspace, repo_slug
@@ -765,12 +1028,20 @@ pub async fn fetch_timesheet_activity(
                 Ok(page) => page,
                 Err(err) => {
                     commit_repo_error_count += 1;
-                    log::warn!(
-                        "[bitbucket] commits scan failed for repo={} url={} err={}",
-                        repo_slug,
-                        url,
-                        err
-                    );
+                    if is_rate_limited_error(&err) {
+                        rate_limit_hit = true;
+                        log::warn!(
+                            "[bitbucket] commits scan rate-limited for repo={}, stopping remaining Bitbucket scans for this run",
+                            repo_slug
+                        );
+                    } else {
+                        log::warn!(
+                            "[bitbucket] commits scan failed for repo={} url={} err={}",
+                            repo_slug,
+                            url,
+                            err
+                        );
+                    }
                     break;
                 }
             };
@@ -789,11 +1060,13 @@ pub async fn fetch_timesheet_activity(
                 let Some(commit_date) = parse_iso_date(&commit.date) else {
                     continue;
                 };
-                if commit_date < start {
+                if commit_date < scan_start {
                     reached_older_than_start = true;
                     continue;
                 }
-                if commit_date > end || !author_matches(&commit.author, user_email, display_name) {
+                if commit_date > scan_end
+                    || !author_matches(&commit.author, user_email, display_name)
+                {
                     continue;
                 }
                 if let Some(key) = extract_work_item_key(&commit.message) {
@@ -823,7 +1096,7 @@ pub async fn fetch_timesheet_activity(
                 log::debug!(
                     "[bitbucket] commit pagination stopped for repo={} after reaching data older than {}",
                     repo_slug,
-                    start
+                    scan_start
                 );
                 break;
             }
@@ -841,6 +1114,9 @@ pub async fn fetch_timesheet_activity(
     let mut pr_repo_error_count = 0usize;
     let mut seen_pr_identities = HashSet::<String>::new();
     for repo_slug in &project_repos {
+        if rate_limit_hit {
+            break;
+        }
         let repo_base = format!(
             "{}/repositories/{}/{}",
             config.api_base, config.workspace, repo_slug
@@ -856,12 +1132,20 @@ pub async fn fetch_timesheet_activity(
                 Ok(page) => page,
                 Err(err) => {
                     pr_repo_error_count += 1;
-                    log::warn!(
-                        "[bitbucket] pullrequest scan failed for repo={} url={} err={}",
-                        repo_slug,
-                        url,
-                        err
-                    );
+                    if is_rate_limited_error(&err) {
+                        rate_limit_hit = true;
+                        log::warn!(
+                            "[bitbucket] pullrequest scan rate-limited for repo={}, stopping remaining Bitbucket scans for this run",
+                            repo_slug
+                        );
+                    } else {
+                        log::warn!(
+                            "[bitbucket] pullrequest scan failed for repo={} url={} err={}",
+                            repo_slug,
+                            url,
+                            err
+                        );
+                    }
                     break;
                 }
             };
@@ -894,7 +1178,7 @@ pub async fn fetch_timesheet_activity(
                     continue;
                 };
 
-                if pr_date < start {
+                if pr_date < scan_start {
                     reached_older_than_start = true;
                     pr_before_range_count += 1;
                     log::debug!(
@@ -905,7 +1189,7 @@ pub async fn fetch_timesheet_activity(
                     );
                     continue;
                 }
-                if pr_date > end {
+                if pr_date > scan_end {
                     pr_after_range_count += 1;
                     log::debug!(
                         "[bitbucket] PR skipped (after range): repo={} title={:?} date={}",
@@ -1039,7 +1323,7 @@ pub async fn fetch_timesheet_activity(
                 log::debug!(
                     "[bitbucket] pullrequest pagination stopped for repo={} after reaching data older than {}",
                     repo_slug,
-                    start
+                    scan_start
                 );
                 break;
             }
@@ -1060,12 +1344,20 @@ pub async fn fetch_timesheet_activity(
                             Ok(page) => page,
                             Err(err) => {
                                 pr_repo_error_count += 1;
-                                log::warn!(
-                                    "[bitbucket] reviewer-query scan failed for repo={} url={} err={}",
-                                    repo_slug,
-                                    furl,
-                                    err
-                                );
+                                if is_rate_limited_error(&err) {
+                                    rate_limit_hit = true;
+                                    log::warn!(
+                                        "[bitbucket] reviewer-query scan rate-limited for repo={}, stopping remaining Bitbucket scans for this run",
+                                        repo_slug
+                                    );
+                                } else {
+                                    log::warn!(
+                                        "[bitbucket] reviewer-query scan failed for repo={} url={} err={}",
+                                        repo_slug,
+                                        furl,
+                                        err
+                                    );
+                                }
                                 break;
                             }
                         };
@@ -1083,7 +1375,7 @@ pub async fn fetch_timesheet_activity(
                         let Some(pr_date) = when else {
                             continue;
                         };
-                        if pr_date < start || pr_date > end {
+                        if pr_date < scan_start || pr_date > scan_end {
                             continue;
                         }
                         if let Some(key) = extract_work_item_key(&pr.title) {
@@ -1138,5 +1430,20 @@ pub async fn fetch_timesheet_activity(
         started_at.elapsed().as_millis()
     );
 
-    Ok(activity)
+    if let Ok(mut cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
+        cache.insert(
+            cache_key,
+            BitbucketActivityCacheEntry {
+                window_start: scan_start,
+                window_end: scan_end,
+                activity: activity.clone(),
+            },
+        );
+    }
+
+    Ok(filter_activity_by_range(
+        &activity,
+        requested_start,
+        requested_end,
+    ))
 }
