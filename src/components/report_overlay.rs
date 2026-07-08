@@ -840,7 +840,7 @@ pub fn ReportOverlay(hours_per_day: f64, hours_per_week: f64, on_close: Callback
                             };
                             view! {
                                 <div class="report-pie-section">
-                                    <svg class="report-pie-chart" viewBox="0 0 260 260" role="img" aria-label="Report pie chart">
+                                    <svg class="report-pie-chart" viewBox="0 0 260 260" role="img" aria-label=move || i18n.get().t(keys::USER_REPORT)>
                                         {nodes}
                                     </svg>
                                     <div class="report-totals-grid report-pie-totals-grid">
