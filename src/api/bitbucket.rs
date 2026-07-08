@@ -4,7 +4,7 @@ use chrono::{DateTime, Datelike, NaiveDate};
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 static ISSUE_KEY_RE: LazyLock<Option<Regex>> =
@@ -18,6 +18,9 @@ static BITBUCKET_WORKSPACE_PROJECTS: LazyLock<Mutex<HashMap<String, Vec<String>>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static BITBUCKET_ACTIVITY_CACHE: LazyLock<Mutex<HashMap<String, BitbucketActivityCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static BITBUCKET_ACTIVITY_INFLIGHT: LazyLock<
+    tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 #[derive(Clone, Debug)]
 struct BitbucketActivityCacheEntry {
@@ -911,6 +914,35 @@ pub async fn fetch_timesheet_activity(
         config.workspace.to_lowercase(),
         user_email.trim().to_lowercase()
     );
+    if let Ok(cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.window_start == scan_start && entry.window_end == scan_end {
+                log::info!(
+                    "[bitbucket] cache hit for workspace={} user={} requested={}..{} scan={}..{}",
+                    config.workspace,
+                    user_email,
+                    requested_start,
+                    requested_end,
+                    scan_start,
+                    scan_end
+                );
+                return Ok(filter_activity_by_range(
+                    &entry.activity,
+                    requested_start,
+                    requested_end,
+                ));
+            }
+        }
+    }
+    let inflight_key = format!("{}|{}|{}", cache_key, scan_start, scan_end);
+    let inflight_lock = {
+        let mut inflight = BITBUCKET_ACTIVITY_INFLIGHT.lock().await;
+        inflight
+            .entry(inflight_key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _inflight_guard = inflight_lock.lock().await;
     if let Ok(cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
         if let Some(entry) = cache.get(&cache_key) {
             if entry.window_start == scan_start && entry.window_end == scan_end {

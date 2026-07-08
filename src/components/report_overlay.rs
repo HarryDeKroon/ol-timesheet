@@ -97,7 +97,15 @@ fn week_end_sunday(date: NaiveDate) -> NaiveDate {
     date + Duration::days(days_to_sunday)
 }
 
-fn month_buckets(month: NaiveDate) -> Vec<BarBucket> {
+fn bucket_label(i18n: &I18n, start: NaiveDate, end: NaiveDate) -> String {
+    format!(
+        "{}-{}",
+        i18n.format_day_month(&start),
+        i18n.format_day_month(&end)
+    )
+}
+
+fn month_buckets(month: NaiveDate, i18n: &I18n) -> Vec<BarBucket> {
     let start = month_start(month);
     let end = month_end(month);
     let mut out = Vec::new();
@@ -105,7 +113,7 @@ fn month_buckets(month: NaiveDate) -> Vec<BarBucket> {
     while cursor <= end {
         let bucket_end = std::cmp::min(week_end_sunday(cursor), end);
         out.push(BarBucket {
-            label: format!("{}-{}", cursor.format("%m/%d"), bucket_end.format("%m/%d")),
+            label: bucket_label(i18n, cursor, bucket_end),
             start: cursor,
             end: bucket_end,
         });
@@ -154,31 +162,36 @@ fn format_days(days: f64, decimal_sep: char) -> String {
     }
 }
 
-fn grouped_int(value: &str) -> String {
+fn grouped_int(value: &str, thousands_sep: char) -> String {
     let mut out_rev = String::new();
     for (idx, ch) in value.chars().rev().enumerate() {
         if idx > 0 && idx % 3 == 0 {
-            out_rev.push(',');
+            out_rev.push(thousands_sep);
         }
         out_rev.push(ch);
     }
     out_rev.chars().rev().collect()
 }
 
-fn format_hours_one_decimal(hours: f64, decimal_sep: char, grouped: bool) -> String {
+fn format_hours_one_decimal(
+    hours: f64,
+    decimal_sep: char,
+    thousands_sep: char,
+    grouped: bool,
+) -> String {
     let rounded = (hours * 10.0).round() / 10.0;
     let raw = format!("{rounded:.1}");
     let (int_part, frac_part) = raw.split_once('.').unwrap_or((raw.as_str(), "0"));
     let int_display = if grouped {
-        grouped_int(int_part)
+        grouped_int(int_part, thousands_sep)
     } else {
         int_part.to_string()
     };
     format!("{}{}{}", int_display, decimal_sep, frac_part)
 }
 
-fn format_aligned_hours(minutes: u64, decimal_sep: char) -> AlignedNumber {
-    let value = format_hours_one_decimal(minutes as f64 / 60.0, decimal_sep, true);
+fn format_aligned_hours(minutes: u64, decimal_sep: char, thousands_sep: char) -> AlignedNumber {
+    let value = format_hours_one_decimal(minutes as f64 / 60.0, decimal_sep, thousands_sep, true);
     if let Some((i, f)) = value.split_once(decimal_sep) {
         AlignedNumber {
             int_part: i.to_string(),
@@ -328,7 +341,8 @@ pub fn ReportOverlay(
 
     let bar_buckets = Memo::new(move |_| {
         if period.get() == ReportPeriod::Week {
-            month_buckets(selected_month.get())
+            let current_i18n = i18n.get();
+            month_buckets(selected_month.get(), &current_i18n)
         } else {
             year_buckets(selected_year.get())
         }
@@ -342,7 +356,7 @@ pub fn ReportOverlay(
         };
 
         let projects_in_year = projects.get();
-        bar_buckets
+        let mut buckets = bar_buckets
             .get()
             .into_iter()
             .map(|bucket| {
@@ -422,7 +436,15 @@ pub fn ReportOverlay(
 
                 (bucket, segs)
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        if period.get() == ReportPeriod::Week {
+            let first_non_empty = buckets
+                .iter()
+                .position(|(_, segs)| !segs.is_empty())
+                .unwrap_or(0);
+            buckets.drain(0..first_non_empty);
+        }
+        buckets
     });
 
     let period_totals = Memo::new(move |_| {
@@ -723,7 +745,7 @@ pub fn ReportOverlay(
                                                 let title = format!(
                                                     "{}: {}h",
                                                     segment.label,
-                                                    format_hours_one_decimal(segment.minutes as f64 / 60.0, i18n.get().decimal_separator, false)
+                                                    format_hours_one_decimal(segment.minutes as f64 / 60.0, i18n.get().decimal_separator, i18n.get().thousands_separator, false)
                                                 );
                                                 segment_nodes.push(view! {
                                                     <g>
@@ -752,7 +774,7 @@ pub fn ReportOverlay(
                                                     each={move || period_totals.get()}
                                                     key={|r| format!("{}-{}", r.label, r.class_name)}
                                                     children={move |row: TotalsRow| {
-                                                        let number = format_aligned_hours(row.minutes, i18n.get().decimal_separator);
+                                                        let number = format_aligned_hours(row.minutes, i18n.get().decimal_separator, i18n.get().thousands_separator);
                                                         let title_text = format_hours_wdh(row.minutes as f64 / 60.0, hours_per_day, hours_per_week);
                                                         view! {
                                                             <div class="report-total-item">
@@ -771,7 +793,7 @@ pub fn ReportOverlay(
                                                     <span class="report-filter-swatch report-filter-swatch-placeholder"></span>
                                                     <span class="report-total-label">{move || i18n.get().t(keys::TOTAL)}</span>
                                                     {move || {
-                                                        let number = format_aligned_hours(period_grand_total.get(), i18n.get().decimal_separator);
+                                                        let number = format_aligned_hours(period_grand_total.get(), i18n.get().decimal_separator, i18n.get().thousands_separator);
                                                         let title_text = format_hours_wdh(period_grand_total.get() as f64 / 60.0, hours_per_day, hours_per_week);
                                                         view! {
                                                             <span class="report-total-number" title={title_text}>
@@ -814,7 +836,7 @@ pub fn ReportOverlay(
                                 let title = format!(
                                     "{}: {}h",
                                     slice.label,
-                                    format_hours_one_decimal(slice.minutes as f64 / 60.0, i18n.get().decimal_separator, false)
+                                    format_hours_one_decimal(slice.minutes as f64 / 60.0, i18n.get().decimal_separator, i18n.get().thousands_separator, false)
                                 );
                                 nodes.push(view! {
                                     <g>
@@ -826,9 +848,9 @@ pub fn ReportOverlay(
                                 });
                                 angle = next;
                             }
-                            let work_total = format_aligned_hours(work_total_scope, i18n.get().decimal_separator);
-                            let pto = format_aligned_hours(pto_total, i18n.get().decimal_separator);
-                            let grand = format_aligned_hours(annual_work_total, i18n.get().decimal_separator);
+                            let work_total = format_aligned_hours(work_total_scope, i18n.get().decimal_separator, i18n.get().thousands_separator);
+                            let pto = format_aligned_hours(pto_total, i18n.get().decimal_separator, i18n.get().thousands_separator);
+                            let grand = format_aligned_hours(annual_work_total, i18n.get().decimal_separator, i18n.get().thousands_separator);
                             let work_total_label = if context_year.get() == today.year() {
                                 format!(
                                     "{} {}",
@@ -849,7 +871,7 @@ pub fn ReportOverlay(
                                     </svg>
                                     <div class="report-totals-grid report-pie-totals-grid">
                                         {slices.into_iter().map(|slice| {
-                                            let number = format_aligned_hours(slice.minutes, i18n.get().decimal_separator);
+                                            let number = format_aligned_hours(slice.minutes, i18n.get().decimal_separator, i18n.get().thousands_separator);
                                             let title_text = format_hours_wdh(slice.minutes as f64 / 60.0, hours_per_day, hours_per_week);
                                             view! {
                                                 <div class="report-total-item">

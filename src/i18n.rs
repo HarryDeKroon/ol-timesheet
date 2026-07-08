@@ -459,6 +459,8 @@ pub struct I18n {
     pub lang: String,
     /// The decimal separator for the current locale.
     pub decimal_separator: char,
+    /// The thousands separator for the current locale.
+    pub thousands_separator: char,
 }
 
 impl I18n {
@@ -470,9 +472,16 @@ impl I18n {
             | "sk" | "hu" | "ro" | "bg" | "hr" | "sl" | "el" | "tr" | "ru" | "uk" => ',',
             _ => '.',
         };
+        let thousands_separator = match lang.as_str() {
+            "fr" => ' ',
+            "de" | "nl" | "es" | "it" | "pt" | "da" | "fi" | "nb" | "sv" | "pl" | "cs" | "sk"
+            | "hu" | "ro" | "bg" | "hr" | "sl" | "el" | "tr" | "ru" | "uk" => '.',
+            _ => ',',
+        };
         Self {
             lang,
             decimal_separator,
+            thousands_separator,
         }
     }
 

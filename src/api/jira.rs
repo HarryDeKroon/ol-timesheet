@@ -1447,6 +1447,18 @@ pub async fn prefetch_startup_window(
 ) {
     let back = weeks_back as i64;
     let forward = weeks_forward as i64;
+    let period_start = anchor_monday - chrono::Duration::weeks(back);
+    let period_end = anchor_monday + chrono::Duration::weeks(forward) + chrono::Duration::days(6);
+    if let Err(e) =
+        fetch_timesheet_activity(&creds.email, &display_name, period_start, period_end).await
+    {
+        log::warn!(
+            "[prefetch] startup bitbucket prefetch failed for {} .. {}: {}",
+            period_start,
+            period_end,
+            e
+        );
+    }
     let warmups = ((-back)..=forward).map(|offset| {
         let monday = anchor_monday + chrono::Duration::weeks(offset);
         let start = monday;
