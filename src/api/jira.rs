@@ -1447,22 +1447,17 @@ pub async fn prefetch_startup_window(
 ) {
     let back = weeks_back as i64;
     let forward = weeks_forward as i64;
-    let mut tasks = Vec::new();
-    for offset in (-back)..=forward {
+    let warmups = ((-back)..=forward).map(|offset| {
         let monday = anchor_monday + chrono::Duration::weeks(offset);
         let start = monday;
         let end = monday + chrono::Duration::days(6);
         let creds = creds.clone();
         let display_name = display_name.clone();
-        tasks.push(tokio::spawn(async move {
+        async move {
             prefetch_range(creds, &display_name, start, end).await;
-        }));
-    }
-    for task in tasks {
-        if let Err(e) = task.await {
-            log::warn!("[prefetch] startup warm task failed: {}", e);
         }
-    }
+    });
+    futures::future::join_all(warmups).await;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ use chrono::NaiveDate;
 use leptos::prelude::*;
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -132,6 +132,7 @@ pub fn CellPopup(
     hours_per_week: f64,
     #[prop(default = Vec::new())] suggested_comments: Vec<String>,
     suggested_comment: Option<String>,
+    #[prop(default = Vec::new())] commit_messages: Vec<String>,
     #[prop(default = Vec::new())] commit_links: Vec<String>,
     #[prop(default = Vec::new())] pr_links: Vec<String>,
     is_git_log: bool,
@@ -232,20 +233,38 @@ pub fn CellPopup(
     // There is always at least one (the blank "extra" row).
     let initial_prefills: Vec<String> = suggested_comments;
     let prefills_for_links = initial_prefills.clone();
-    let mut commit_links_for_rows = commit_links;
+    let mut unique_links = Vec::new();
+    let mut seen_links = HashSet::new();
+    for link in commit_links {
+        if seen_links.insert(link.clone()) {
+            unique_links.push(link);
+        }
+    }
+    let commit_link_refs: Vec<(String, String)> = unique_links
+        .into_iter()
+        .enumerate()
+        .map(|(idx, link)| {
+            let message = commit_messages
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(String::new);
+            (link, message)
+        })
+        .collect();
+    let mut commit_refs_for_rows = commit_link_refs.clone();
     let mut pr_links_unique = pr_links;
     pr_links_unique.sort();
     pr_links_unique.dedup();
     let popup_pr_link = pr_links_unique.into_iter().next();
-    let suggested_row_links: Vec<Option<String>> = prefills_for_links
+    let suggested_row_links: Vec<Option<(String, String)>> = prefills_for_links
         .iter()
         .map(|comment| {
             if comment.trim().eq_ignore_ascii_case("review") {
                 None
-            } else if commit_links_for_rows.is_empty() {
+            } else if commit_refs_for_rows.is_empty() {
                 None
             } else {
-                Some(commit_links_for_rows.remove(0))
+                Some(commit_refs_for_rows.remove(0))
             }
         })
         .collect();
@@ -408,7 +427,7 @@ pub fn CellPopup(
                     date,
                     row_index: row_idx,
                 };
-                if timer_mgr.is_active(&timer_id) {
+                if timer_mgr.is_active_untracked(&timer_id) {
                     return true;
                 }
             }
@@ -421,7 +440,7 @@ pub fn CellPopup(
                     date,
                     row_index: existing_count + 1000 + idx,
                 };
-                if timer_mgr.is_active(&timer_id) {
+                if timer_mgr.is_active_untracked(&timer_id) {
                     return true;
                 }
             }
@@ -851,7 +870,7 @@ pub fn CellPopup(
     // Returns a view fragment with play/pause + stop buttons, or an empty
     // spacer when timers are not applicable.
     let build_timer_buttons = move |timer_id: TimerId, hours_sig: RwSignal<String>| {
-        if !is_today && !timer_mgr.is_active(&timer_id) {
+        if !is_today && !timer_mgr.is_active_untracked(&timer_id) {
             return view! { <span class="popup-spacer"></span> }.into_any();
         }
 
@@ -865,7 +884,7 @@ pub fn CellPopup(
         let suggested_comment = suggested_comment_for_persist.clone();
         let pos_sig = pos_sig;
         let on_play_pause = move |_| {
-            let phase = timer_mgr.phase(&tid_for_phase);
+            let phase = timer_mgr.phase_untracked(&tid_for_phase);
             let dec_sep = i18n.get_untracked().decimal_separator;
             match phase {
                 None | Some(TimerPhase::Stopped) => {
@@ -903,7 +922,7 @@ pub fn CellPopup(
                         timer_state,
                     },
                 );
-            } else if let Some(phase_now) = timer_mgr.phase(&tid_persist) {
+            } else if let Some(phase_now) = timer_mgr.phase_untracked(&tid_persist) {
                 let fallback_state = match phase_now {
                     TimerPhase::Running => PersistedTimerState {
                         phase: PersistedTimerPhase::Running,
@@ -1222,14 +1241,18 @@ pub fn CellPopup(
                                 />
                                 <span class="popup-actions">
                                     {timer_buttons}
-                                    {if let Some(href) = row_link {
+                                    {if let Some((href, message)) = row_link {
                                         view! {
                                             <a
                                                 class="popup-link popup-link--commit"
                                                 href={href}
                                                 target="_blank"
                                                 rel="noopener"
-                                                title=move || i18n.get().t(keys::OPEN_COMMIT_IN_BITBUCKET)
+                                                title={if message.trim().is_empty() {
+                                                    i18n.get_untracked().t(keys::OPEN_COMMIT_IN_BITBUCKET)
+                                                } else {
+                                                    message
+                                                }}
                                             >
                                                 <span class="popup-link-base">"\u{1F517}"</span>
                                                 <span class="popup-link-badge">"C"</span>
@@ -1247,6 +1270,29 @@ pub fn CellPopup(
 
             <div class="popup-buttons">
                 <span class="popup-buttons-left">
+                    {commit_link_refs
+                        .iter()
+                        .map(|(href, message)| {
+                            let href = href.clone();
+                            let message = message.clone();
+                            view! {
+                                <a
+                                    class="popup-link popup-link--commit"
+                                    href={href}
+                                    target="_blank"
+                                    rel="noopener"
+                                    title={if message.trim().is_empty() {
+                                        i18n.get_untracked().t(keys::OPEN_COMMIT_IN_BITBUCKET)
+                                    } else {
+                                        message
+                                    }}
+                                >
+                                    <span class="popup-link-base">"\u{1F517}"</span>
+                                    <span class="popup-link-badge">"C"</span>
+                                </a>
+                            }
+                        })
+                        .collect::<Vec<_>>()}
                     {popup_pr_link.clone().map(|href| {
                         view! {
                             <a
