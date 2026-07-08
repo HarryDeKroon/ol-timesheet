@@ -260,10 +260,11 @@ pub async fn build_report_for_year(
         build_report_range(creds, settings, jan1, dec31).await?
     };
 
-    let refresh_start = std::cmp::max(today, jan1);
-    if refresh_start <= dec31 {
-        let delta = build_report_range(creds, settings, refresh_start, dec31).await?;
-        clear_report_range(&mut report, refresh_start, dec31);
+    let refresh_end = std::cmp::min(today, dec31);
+    let refresh_start = jan1;
+    if refresh_start <= refresh_end {
+        let delta = build_report_range(creds, settings, refresh_start, refresh_end).await?;
+        clear_report_range(&mut report, refresh_start, refresh_end);
         merge_report_data(&mut report, delta);
     }
 
