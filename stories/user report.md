@@ -1,6 +1,6 @@
 # User report
 
-al is to add a reporting module to the timesheet, which will give the user an insight of their monthly progress as compared to contract hours, as well as the ratio between billable and overhead hours spent
+Goal is to add a reporting module to the timesheet, which will give the user an insight of their monthly progress as compared to contract hours, as well as the ratio between billable and overhead hours spent
 
 ## Configuration changes
 
@@ -9,7 +9,7 @@ Add a group to the settings dialog, called Reporting
 - "non billable project(s)": text input for a list of project names e.g., TIM
 - "meetings",
 - "local holidays",
-- "planned timed off",
+- "planned time off",
 - "study": all text inputs for a list of work item keys
 
 These are all optional. The labels are of course according to the i18n rules.
