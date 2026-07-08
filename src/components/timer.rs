@@ -406,6 +406,12 @@ impl TimerManager {
         self.inner.with(|map| map.get(id).map(|e| e.phase.clone()))
     }
 
+    /// Return the current phase without subscribing to reactive updates.
+    pub fn phase_untracked(&self, id: &TimerId) -> Option<TimerPhase> {
+        self.inner
+            .with_untracked(|map| map.get(id).map(|e| e.phase.clone()))
+    }
+
     /// `true` if the timer identified by `id` is in the `Running` phase.
     pub fn is_running(&self, id: &TimerId) -> bool {
         matches!(self.phase(id), Some(TimerPhase::Running))
@@ -419,6 +425,24 @@ impl TimerManager {
     /// `true` if a timer exists and is either Running or Paused.
     pub fn is_active(&self, id: &TimerId) -> bool {
         self.is_running(id) || self.is_paused(id)
+    }
+
+    /// `true` if a timer exists and is either Running or Paused, without
+    /// subscribing to reactive updates.
+    pub fn is_active_untracked(&self, id: &TimerId) -> bool {
+        self.is_running_untracked(id) || self.is_paused_untracked(id)
+    }
+
+    /// `true` if the timer identified by `id` is in Running phase, without
+    /// subscribing to reactive updates.
+    pub fn is_running_untracked(&self, id: &TimerId) -> bool {
+        matches!(self.phase_untracked(id), Some(TimerPhase::Running))
+    }
+
+    /// `true` if the timer identified by `id` is in Paused phase, without
+    /// subscribing to reactive updates.
+    pub fn is_paused_untracked(&self, id: &TimerId) -> bool {
+        matches!(self.phase_untracked(id), Some(TimerPhase::Paused { .. }))
     }
 
     /// Return the `TimerId` of the currently running timer, if any.

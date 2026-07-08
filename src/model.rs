@@ -14,6 +14,16 @@ pub struct Settings {
     pub hours_per_week: f64,
     #[serde(default = "default_hours_per_day")]
     pub hours_per_day: f64,
+    #[serde(default)]
+    pub non_billable_project_prefixes: Vec<String>,
+    #[serde(default)]
+    pub meeting_keys: Vec<String>,
+    #[serde(default)]
+    pub local_holiday_keys: Vec<String>,
+    #[serde(default)]
+    pub planned_time_off_keys: Vec<String>,
+    #[serde(default)]
+    pub study_keys: Vec<String>,
 }
 
 fn default_hours_per_week() -> f64 {

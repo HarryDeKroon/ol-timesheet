@@ -24,7 +24,7 @@ pub async fn check_session() -> Result<Option<String>, ServerFnError> {
 pub async fn get_yearly_report(year: i32) -> Result<ReportData, ServerFnError> {
     let (_, session) = crate::auth::current_user_session().await?;
     let creds = session.jira_credentials();
-    crate::api::report::build_report_for_year(&creds, year)
+    crate::api::report::build_report_for_year(&creds, &session.preferences, year)
         .await
         .map_err(ServerFnError::new)
 }
