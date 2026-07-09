@@ -1,6 +1,6 @@
 # Periodic refresh
 
-Goal: User's should always have up-to-date information available.
+Goal: Users should always have up-to-date information available.
 
 ## Interval
 
