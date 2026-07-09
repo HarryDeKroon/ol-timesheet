@@ -1423,9 +1423,14 @@ pub fn TimesheetView() -> impl IntoView {
     };
 
     let on_force_periodic_refresh = move |_| {
+        if !conn.is_available() {
+            return;
+        }
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
+            conn.request_started();
             let _ = force_periodic_refresh().await;
+            conn.request_finished();
         });
     };
 
