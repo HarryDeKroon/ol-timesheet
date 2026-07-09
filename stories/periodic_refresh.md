@@ -4,9 +4,9 @@ Goal: Users should always have up-to-date information available.
 
 ## Interval
 
-When there are web socket connections between the server and one or more browser sessions, the interval is 23 minutes.
-When there are no web sockets, the interval prolonges to be each 127 minutes.
-These intervals are in the server configuration, but default to these values
+When there are WebSocket connections between the server and one or more browser sessions, the interval is 23 minutes.
+When there are no WebSocket connections, the interval prolongs to 127 minutes.
+These intervals are in the server configuration, but default to these values.
 
 ## Server-side check
 
