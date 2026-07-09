@@ -16,4 +16,4 @@ The Jira/Bitbucket fetch goes per active user (as determined from the web socket
 
 ## Client side update
 
-Upon receipt of the diff list from the server on the web socket, check if the today column is visible. if so, update the timesheet with the received changes. Any new work items are added to the top of the timesheet. Show a toast to signal when new information was processed.
+Upon receipt of the diff list from the server on the web socket, check if the today column is visible. If so, update the timesheet with the received changes. Any new work items are added to the top of the timesheet. Show a toast to signal when new information was processed.
