@@ -103,7 +103,11 @@ Parse once at startup in `main.rs`, store in shared app state/config module.
 
 Bitbucket env for workspace-wide mode:
 - `BITBUCKET_SERVER_URL` (example: `https://bitbucket.org/uplandsoftware`)
-- when project keys/URLs not configured, warm/fetch scans repos in full workspace.
+- `BITBUCKET_WORKSPACE` if workspace name should be explicit instead of derived from server URL
+- `BITBUCKET_API_USER` + `BITBUCKET_API_TOKEN` for the server-owned Bitbucket service account:
+  - **Before July 28, 2026:** `BITBUCKET_API_USER` = Bitbucket username, `BITBUCKET_API_TOKEN` = app password
+  - **From July 28, 2026 onward:** `BITBUCKET_API_USER` = service account email, `BITBUCKET_API_TOKEN` = Atlassian API token
+- warm/fetch scans repos in full workspace.
 
 ## Data and API contracts
 

@@ -32,7 +32,7 @@ const ATLASSIAN_RESOURCES_URL: &str = "https://api.atlassian.com/oauth/token/acc
 
 // ─── App config directory ─────────────────────────────────────────────────────
 
-fn app_config_dir() -> std::path::PathBuf {
+pub fn app_config_dir() -> std::path::PathBuf {
     let dir = if let Some(dirs) = directories::ProjectDirs::from("com", "objectiflune", "timesheet")
     {
         dirs.config_dir().to_path_buf()

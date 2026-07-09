@@ -581,14 +581,11 @@ struct CachedWorklogs {
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-/// Fetch all work items the user has logged time on in the given date range,
-/// plus any assigned active tickets (status "In Progress" or "Code Review").
-///
-/// Uses the new `/rest/api/3/search/jql` endpoint with cursor-based pagination.
-pub async fn fetch_work_items(
+async fn fetch_work_items_with_cache_policy(
     creds: &JiraCredentials,
     start: NaiveDate,
     end: NaiveDate,
+    use_cache: bool,
 ) -> Result<Vec<WorkItem>, String> {
     // JQL for work items with worklogs in the date range
     let worklog_jql = format!(
@@ -596,17 +593,19 @@ pub async fn fetch_work_items(
         creds.email, start, end
     );
 
-    // JQL for assigned active tickets
+    // JQL for assigned active tickets. Use Jira's status category instead of
+    // specific status names so project-specific active workflow states
+    // (for example non-billable boards) stay visible too.
     let assigned_jql = format!(
-        "assignee = \"{}\" AND status IN (\"Code Review\", \"In Progress\")",
+        "assignee = \"{}\" AND statusCategory = \"In Progress\"",
         creds.email
     );
 
     log::trace!("[fetch_work_items] worklogDate >= {start} AND worklogDate <= {end}");
 
     // Fetch both result sets and merge/deduplicate by issue key
-    let worklog_items = fetch_work_items_by_jql(creds, &worklog_jql, true).await?;
-    let assigned_items = fetch_work_items_by_jql(creds, &assigned_jql, true).await?;
+    let worklog_items = fetch_work_items_by_jql(creds, &worklog_jql, use_cache).await?;
+    let assigned_items = fetch_work_items_by_jql(creds, &assigned_jql, use_cache).await?;
 
     let mut seen = std::collections::HashSet::new();
     let mut items: Vec<WorkItem> = Vec::new();
@@ -617,6 +616,26 @@ pub async fn fetch_work_items(
     }
 
     Ok(items)
+}
+
+/// Fetch all work items the user has logged time on in the given date range,
+/// plus any assigned active tickets (Jira status category "In Progress").
+///
+/// Uses the new `/rest/api/3/search/jql` endpoint with cursor-based pagination.
+pub async fn fetch_work_items(
+    creds: &JiraCredentials,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<WorkItem>, String> {
+    fetch_work_items_with_cache_policy(creds, start, end, true).await
+}
+
+pub async fn fetch_work_items_fresh(
+    creds: &JiraCredentials,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Vec<WorkItem>, String> {
+    fetch_work_items_with_cache_policy(creds, start, end, false).await
 }
 
 pub async fn fetch_worklog_items_in_range_fresh(
@@ -1313,68 +1332,72 @@ async fn prefetch_range(
 
     let mut all_items = items;
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
+    let bitbucket_range_supported =
+        crate::api::bitbucket::requested_range_in_recent_weeks(start, end);
 
-    match fetch_timesheet_activity(&creds.email, display_name, start, end).await {
-        Ok(activity) => {
-            let known: std::collections::HashSet<String> =
-                all_items.iter().map(|w| w.key.clone()).collect();
-            let missing: Vec<String> = activity
-                .discovered_item_summaries
-                .keys()
-                .filter(|k| !known.contains(k.as_str()))
-                .cloned()
-                .collect();
-            if !missing.is_empty() {
-                if let Ok(found) = fetch_work_items_by_keys(&creds, &missing).await {
-                    all_items.extend(found);
-                }
-            }
-            let mut known_after_fetch: std::collections::HashSet<String> =
-                all_items.iter().map(|w| w.key.clone()).collect();
-            for key in activity.discovered_item_summaries.keys() {
-                if known_after_fetch.contains(key) {
-                    continue;
-                }
-                let summary = activity
+    if bitbucket_range_supported {
+        match fetch_timesheet_activity(&creds.email, &creds.account_id, display_name, start, end).await {
+            Ok(activity) => {
+                let known: std::collections::HashSet<String> =
+                    all_items.iter().map(|w| w.key.clone()).collect();
+                let missing: Vec<String> = activity
                     .discovered_item_summaries
-                    .get(key)
+                    .keys()
+                    .filter(|k| !known.contains(k.as_str()))
                     .cloned()
-                    .unwrap_or_else(|| key.clone());
-                all_items.push(WorkItem {
-                    key: key.clone(),
-                    summary,
-                    icon_url: String::new(),
-                    issue_type: "Bitbucket".to_string(),
-                });
-                known_after_fetch.insert(key.clone());
+                    .collect();
+                if !missing.is_empty() {
+                    if let Ok(found) = fetch_work_items_by_keys(&creds, &missing).await {
+                        all_items.extend(found);
+                    }
+                }
+                let mut known_after_fetch: std::collections::HashSet<String> =
+                    all_items.iter().map(|w| w.key.clone()).collect();
+                for key in activity.discovered_item_summaries.keys() {
+                    if known_after_fetch.contains(key) {
+                        continue;
+                    }
+                    let summary = activity
+                        .discovered_item_summaries
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| key.clone());
+                    all_items.push(WorkItem {
+                        key: key.clone(),
+                        summary,
+                        icon_url: String::new(),
+                        issue_type: "Bitbucket".to_string(),
+                    });
+                    known_after_fetch.insert(key.clone());
+                }
+                for (cell_key, msgs) in activity.commit_messages_by_cell {
+                    let entry = bitbucket_activity.entry(cell_key).or_default();
+                    entry.commit_messages = msgs;
+                }
+                for (cell_key, links) in activity.commit_links_by_cell {
+                    let entry = bitbucket_activity.entry(cell_key).or_default();
+                    let mut merged = entry.commit_links.clone();
+                    merged.extend(links);
+                    merged.sort();
+                    merged.dedup();
+                    entry.commit_links = merged;
+                }
+                for cell_key in activity.pr_review_cells {
+                    let entry = bitbucket_activity.entry(cell_key).or_default();
+                    entry.has_pr_review = true;
+                }
+                for (cell_key, links) in activity.pr_links_by_cell {
+                    let entry = bitbucket_activity.entry(cell_key).or_default();
+                    let mut merged = entry.pr_links.clone();
+                    merged.extend(links);
+                    merged.sort();
+                    merged.dedup();
+                    entry.pr_links = merged;
+                }
             }
-            for (cell_key, msgs) in activity.commit_messages_by_cell {
-                let entry = bitbucket_activity.entry(cell_key).or_default();
-                entry.commit_messages = msgs;
+            Err(e) => {
+                log::warn!("[prefetch] fetch_timesheet_activity failed: {}", e);
             }
-            for (cell_key, links) in activity.commit_links_by_cell {
-                let entry = bitbucket_activity.entry(cell_key).or_default();
-                let mut merged = entry.commit_links.clone();
-                merged.extend(links);
-                merged.sort();
-                merged.dedup();
-                entry.commit_links = merged;
-            }
-            for cell_key in activity.pr_review_cells {
-                let entry = bitbucket_activity.entry(cell_key).or_default();
-                entry.has_pr_review = true;
-            }
-            for (cell_key, links) in activity.pr_links_by_cell {
-                let entry = bitbucket_activity.entry(cell_key).or_default();
-                let mut merged = entry.pr_links.clone();
-                merged.extend(links);
-                merged.sort();
-                merged.dedup();
-                entry.pr_links = merged;
-            }
-        }
-        Err(e) => {
-            log::warn!("[prefetch] fetch_timesheet_activity failed: {}", e);
         }
     }
 
@@ -1425,6 +1448,9 @@ async fn prefetch_range(
         if let Ok(raw) = serde_json::to_string(&week_ts) {
             cache::put(week_key, raw);
             cache::update_cached_week(&creds.account_id, monday, chrono::Utc::now());
+            if bitbucket_range_supported {
+                cache::update_cached_bitbucket_week(&creds.account_id, monday, chrono::Utc::now());
+            }
         }
     }
 
@@ -1486,7 +1512,7 @@ pub async fn prefetch_startup_window(
     let period_start = anchor_monday - chrono::Duration::weeks(back);
     let period_end = anchor_monday + chrono::Duration::weeks(forward) + chrono::Duration::days(6);
     if let Err(e) =
-        fetch_timesheet_activity(&creds.email, &display_name, period_start, period_end).await
+        fetch_timesheet_activity(&creds.email, &creds.account_id, &display_name, period_start, period_end).await
     {
         log::warn!(
             "[prefetch] startup bitbucket prefetch failed for {} .. {}: {}",

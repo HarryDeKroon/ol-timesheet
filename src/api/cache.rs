@@ -102,6 +102,10 @@ pub fn cached_weeks_index_key(account_id: &str) -> String {
     format!("{}:cached_weeks", account_id)
 }
 
+pub fn cached_bitbucket_weeks_index_key(account_id: &str) -> String {
+    format!("{}:cached_bitbucket_weeks", account_id)
+}
+
 pub fn get_cached_weeks(account_id: &str) -> CachedWeeksIndex {
     let key = cached_weeks_index_key(account_id);
     match get(&key) {
@@ -124,6 +128,42 @@ pub fn update_cached_week(account_id: &str, monday: NaiveDate, last_refresh_utc:
     idx.weeks.dedup_by_key(|w| w.monday);
     if let Ok(raw) = serde_json::to_string(&idx) {
         put(cached_weeks_index_key(account_id), raw);
+    }
+}
+
+pub fn get_cached_bitbucket_weeks(account_id: &str) -> CachedWeeksIndex {
+    let key = cached_bitbucket_weeks_index_key(account_id);
+    match get(&key) {
+        Some(raw) => serde_json::from_str::<CachedWeeksIndex>(&raw).unwrap_or_default(),
+        None => CachedWeeksIndex::default(),
+    }
+}
+
+pub fn has_cached_bitbucket_week(account_id: &str, monday: NaiveDate) -> bool {
+    get_cached_bitbucket_weeks(account_id)
+        .weeks
+        .iter()
+        .any(|w| w.monday == monday)
+}
+
+pub fn update_cached_bitbucket_week(
+    account_id: &str,
+    monday: NaiveDate,
+    last_refresh_utc: DateTime<Utc>,
+) {
+    let mut idx = get_cached_bitbucket_weeks(account_id);
+    if let Some(existing) = idx.weeks.iter_mut().find(|w| w.monday == monday) {
+        existing.last_refresh_utc = last_refresh_utc;
+    } else {
+        idx.weeks.push(CachedWeekMeta {
+            monday,
+            last_refresh_utc,
+        });
+    }
+    idx.weeks.sort_by_key(|w| w.monday);
+    idx.weeks.dedup_by_key(|w| w.monday);
+    if let Ok(raw) = serde_json::to_string(&idx) {
+        put(cached_bitbucket_weeks_index_key(account_id), raw);
     }
 }
 
@@ -167,6 +207,24 @@ pub fn prune_old_week_entries(retention_days: i64) {
                     },
                 );
             }
+
+            let bb_key = cached_bitbucket_weeks_index_key(account_id);
+            if let Some(bb_entry) = cache.get(&bb_key) {
+                let mut bb_index: CachedWeeksIndex =
+                    serde_json::from_str(&bb_entry.data).unwrap_or_default();
+                bb_index.weeks.retain(|w| w.monday >= cutoff);
+                if let Ok(raw) = serde_json::to_string(&bb_index) {
+                    cache.insert(
+                        bb_key,
+                        CacheEntry {
+                            data: raw,
+                            expires_at: Instant::now() + DEFAULT_TTL,
+                            created_at_utc: Utc::now(),
+                            ttl_secs: DEFAULT_TTL.as_secs(),
+                        },
+                    );
+                }
+            }
         }
     }
 }
@@ -176,6 +234,8 @@ fn classify_cache_kind(key: &str) -> &'static str {
         "week_cache"
     } else if key.ends_with(":cached_weeks") {
         "cached_weeks"
+    } else if key.ends_with(":cached_bitbucket_weeks") {
+        "cached_bitbucket_weeks"
     } else if key.contains(":jira_search:") {
         "jira_search"
     } else if key.contains(":jira_worklogs:") {

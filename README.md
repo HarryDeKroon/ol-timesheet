@@ -2,7 +2,7 @@
 
 Inspired by [Sander's Java tool](https://bitbucket.org/uplandsoftware/dev-day-experiments/src/timesheet-SvdB/), here another version, that allows to maintain worklog entries that have comments. Also each week displays the total time registered, as well as the total time spent on each work item.
 
-![Screenshot](https://github.com/HarryDeKroon/ol-timesheet/blob/master/screenshots/OL%20Timesheet.png "Sample view")
+![Screenshot](https://github.com/HarryDeKroon/ol-timesheet/blob/develop/screenshots/OL%20Timesheet%2020260706.png "Sample view")
 
 ## Usage
 
@@ -19,11 +19,34 @@ Only one worklog entry can be tracked at a time. If you start tracking a new ent
 
 **Note:** Just as manual time tracking, time tracking is not automatically saved. You must click the "Save" button to save your changes.
 
-## TO DO
-   - Multi user
-   - OAuth2/SSO
-   - CSV/Excel export
-   - Offline worklog queue for intermittent connectivity
-   - Light/Dark mode support
-   - Keyboard navigation in timesheet grid
+## Bitbucket webhooks (optional)
 
+By default the server polls Bitbucket for new commits / pull-request activity every 23 minutes (127 when idle). To get near-instant updates instead, Bitbucket can push `repo:push` and `pullrequest:*` events to the app via a webhook.
+
+Because the app runs on `localhost:8081`, Bitbucket Cloud needs a tunnel to reach it:
+
+- **Cloudflare Tunnel** (recommended — stable URL): `cloudflared tunnel --url http://localhost:8081` with a named tunnel, or
+- **ngrok**: `ngrok http 8081` (free-tier URLs change on every restart; the app re-registers the webhook automatically on startup, so restart the app after restarting the tunnel).
+
+Setup:
+
+1. Set `WEBHOOK_PUBLIC_URL` to the tunnel's public base URL (e.g. `https://my-tunnel.example.com`) in the environment or `.env`.
+2. Configure Bitbucket workspace access with `BITBUCKET_WORKSPACE` (or `BITBUCKET_SERVER_URL`, for example `https://bitbucket.org/uplandsoftware`). Create a dedicated Bitbucket service account (or bot user) and configure the server with its credentials via `BITBUCKET_API_USER` and `BITBUCKET_API_TOKEN`:
+   - **From July 28, 2026 onward (recommended):** Use an **Atlassian API token**. Set `BITBUCKET_API_USER` to the service account's **email address** and `BITBUCKET_API_TOKEN` to the API token generated at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens).
+   - **Before July 28, 2026 (legacy):** Use an app password. Set `BITBUCKET_API_USER` to the service account's **Bitbucket username** and `BITBUCKET_API_TOKEN` to the app password.
+
+   The token/password needs `read:webhook:bitbucket` and `write:webhook:bitbucket` scopes in addition to repository/pullrequest/workspace/project read.
+
+3. Start the tunnel, then the app. On startup it registers (or repoints) a webhook — workspace-level when the token permits, otherwise per repository on the repos where the configured Bitbucket API user has **admin** access (the permission level Bitbucket requires for webhook management) — identified by a marker `ol-timesheet:<hostname>` so each developer machine manages only its own hooks. Repos without a hook remain covered by fallback polling.
+
+A random URL path token and an HMAC-SHA256 signature secret (persisted in `webhook.json` next to the app's config files; override the secret with `WEBHOOK_SECRET`) protect the endpoint. Incoming events are debounced for ~20 seconds and then trigger the same refresh/diff/WebSocket pipeline as the periodic poll.
+
+While webhooks are operational, polling is demoted to a safety-net cadence (`PERIODIC_REFRESH_FALLBACK_MINUTES`, default 127) in case the tunnel drops, and a catch-up refresh runs whenever a browser session (re)connects.
+
+**Not covered:** Jira worklog changes still rely on polling (Jira webhooks require site-admin rights).
+
+## TO DO
+
+- CSV/Excel export
+- Light/Dark mode support
+- Keyboard navigation in timesheet grid

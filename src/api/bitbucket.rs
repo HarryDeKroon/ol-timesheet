@@ -1,6 +1,6 @@
 #![cfg(feature = "ssr")]
 
-use chrono::{DateTime, Datelike, NaiveDate};
+use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Utc};
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -42,6 +42,12 @@ pub struct BitbucketActivity {
 struct BitbucketConfig {
     api_base: String,
     workspace: String,
+    /// Service account username (for app password auth) or email (for Atlassian API token auth).
+    /// Before July 28, 2026: Bitbucket username + app password.
+    /// From July 28, 2026: service account email + Atlassian API token.
+    api_user: String,
+    /// App password or Atlassian API token for the service account.
+    /// See `api_user` field for auth mode determination.
     api_token: String,
 }
 
@@ -53,29 +59,8 @@ impl BitbucketConfig {
             .to_string();
 
         let server_url = std::env::var("BITBUCKET_SERVER_URL").ok();
-        let mut project_url_values = std::env::var("BITBUCKET_PROJECT_URLS")
-            .ok()
-            .map(|v| split_env_list(&v))
-            .unwrap_or_default();
-        if let Ok(single_project_url) = std::env::var("BITBUCKET_PROJECT_URL") {
-            project_url_values.push(single_project_url);
-        }
-        let parsed_projects = project_url_values
-            .iter()
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| {
-                parse_project_url(value).ok_or_else(|| {
-                    format!(
-                        "Invalid Bitbucket project URL '{}'. Expected .../workspace/projects/<KEY>.",
-                        value
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         let workspace = std::env::var("BITBUCKET_WORKSPACE")
             .ok()
-            .or_else(|| parsed_projects.first().map(|(ws, _)| ws.clone()))
             .or_else(|| {
                 server_url
                     .as_deref()
@@ -83,14 +68,17 @@ impl BitbucketConfig {
                     .map(|s| s.to_string())
             })
             .ok_or_else(|| {
-                "BITBUCKET_WORKSPACE is not set and no valid BITBUCKET_SERVER_URL or BITBUCKET_PROJECT_URL(S) found".to_string()
+                "BITBUCKET_WORKSPACE is not set and no valid BITBUCKET_SERVER_URL found".to_string()
             })?;
+        let api_user = std::env::var("BITBUCKET_API_USER")
+            .map_err(|_| "BITBUCKET_API_USER is not set".to_string())?;
         let api_token = std::env::var("BITBUCKET_API_TOKEN")
             .map_err(|_| "BITBUCKET_API_TOKEN is not set".to_string())?;
 
         Ok(Self {
             api_base,
             workspace,
+            api_user,
             api_token,
         })
     }
@@ -108,47 +96,6 @@ fn parse_workspace_url(url: &str) -> Option<&str> {
         None
     } else {
         Some(workspace)
-    }
-}
-
-fn split_env_list(raw: &str) -> Vec<String> {
-    raw.split(|c: char| c == ',' || c == ';' || c == '\n' || c == '\r')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn parse_project_url(url: &str) -> Option<(String, String)> {
-    let trimmed = url.trim();
-    let without_scheme = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .unwrap_or(trimmed);
-    let without_host = without_scheme.strip_prefix("bitbucket.org/")?;
-    let parts = without_host.split('/').collect::<Vec<_>>();
-    if parts.len() < 4 {
-        return None;
-    }
-    if parts.get(1).copied() != Some("workspace") || parts.get(2).copied() != Some("projects") {
-        return None;
-    }
-    let workspace = parts.first()?.trim().to_string();
-    let project_key = parts
-        .get(3)?
-        .split('?')
-        .next()
-        .unwrap_or_default()
-        .split('#')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
-    if workspace.is_empty() || project_key.is_empty() {
-        None
-    } else {
-        Some((workspace, project_key))
     }
 }
 
@@ -270,23 +217,16 @@ struct BitbucketParticipant {
     user: BitbucketUser,
 }
 
-#[derive(Deserialize)]
-struct BitbucketCurrentUser {
-    #[serde(default)]
-    account_id: Option<String>,
-    #[serde(default)]
-    uuid: Option<String>,
-    #[serde(default)]
-    username: Option<String>,
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    nickname: Option<String>,
-}
-
-fn auth_header(user_email: &str, api_token: &str) -> String {
+/// Build HTTP Basic authorization header for Bitbucket service account.
+///
+/// Supports two auth modes:
+/// - **App password (before July 28, 2026):** `api_user` = Bitbucket username, `api_token` = app password
+/// - **Atlassian API token (from July 28, 2026):** `api_user` = service account email, `api_token` = API token
+///
+/// Both modes use the same Basic auth header format: `Basic base64(user:token)`.
+fn auth_header(api_user: &str, api_token: &str) -> String {
     use base64::Engine;
-    let pair = format!("{}:{}", user_email, api_token);
+    let pair = format!("{}:{}", api_user, api_token);
     let encoded = base64::engine::general_purpose::STANDARD.encode(pair);
     format!("Basic {}", encoded)
 }
@@ -297,6 +237,46 @@ fn parse_iso_date(value: &str) -> Option<NaiveDate> {
         // a late-evening local commit into next day and place it in wrong cell.
         .map(|dt| dt.date_naive())
         .ok()
+}
+
+fn parse_iso_timestamp_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&Utc))
+        .ok()
+}
+
+fn local_day_bounds_utc(
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let start_naive = start.and_hms_opt(0, 0, 0)?;
+    let end_naive = end.and_hms_nano_opt(23, 59, 59, 999_999_999)?;
+
+    let start_local = match Local.from_local_datetime(&start_naive) {
+        chrono::LocalResult::Single(dt) => dt,
+        chrono::LocalResult::Ambiguous(early, _) => early,
+        chrono::LocalResult::None => return None,
+    };
+    let end_local = match Local.from_local_datetime(&end_naive) {
+        chrono::LocalResult::Single(dt) => dt,
+        chrono::LocalResult::Ambiguous(_, late) => late,
+        chrono::LocalResult::None => return None,
+    };
+    Some((
+        start_local.with_timezone(&Utc),
+        end_local.with_timezone(&Utc),
+    ))
+}
+
+fn is_before_scan_start(
+    value: &str,
+    scan_start: NaiveDate,
+    scan_start_utc: Option<&DateTime<Utc>>,
+) -> Option<bool> {
+    if let Some(start_utc) = scan_start_utc {
+        return parse_iso_timestamp_utc(value).map(|ts| ts < *start_utc);
+    }
+    parse_iso_date(value).map(|d| d < scan_start)
 }
 
 fn recent_weeks_window() -> (NaiveDate, NaiveDate) {
@@ -313,6 +293,10 @@ fn clamp_to_recent_weeks(start: NaiveDate, end: NaiveDate) -> Option<(NaiveDate,
     let effective_start = std::cmp::max(start, window_start);
     let effective_end = std::cmp::min(end, window_end);
     (effective_start <= effective_end).then_some((effective_start, effective_end))
+}
+
+pub fn requested_range_in_recent_weeks(start: NaiveDate, end: NaiveDate) -> bool {
+    clamp_to_recent_weeks(start, end).is_some()
 }
 
 fn key_in_range(cell_key: &str, start: NaiveDate, end: NaiveDate) -> bool {
@@ -441,61 +425,10 @@ fn author_matches(author: &Option<BitbucketAuthor>, user_email: &str, display_na
     false
 }
 
-fn reviewer_matches(reviewer: &BitbucketUser, user_email: &str, display_name: &str) -> bool {
-    let email = user_email.trim();
-    let display = display_name.trim();
-    let local = email.split('@').next().unwrap_or_default();
-
-    if let Some(name) = &reviewer.display_name {
-        if !display.is_empty() && name.eq_ignore_ascii_case(display) {
-            return true;
-        }
-    }
-    if let Some(username) = &reviewer.username {
-        if !email.is_empty() && username.eq_ignore_ascii_case(email) {
-            return true;
-        }
-        if !local.is_empty() && username.eq_ignore_ascii_case(local) {
-            return true;
-        }
-    }
-    if let Some(nick) = &reviewer.nickname {
-        if !email.is_empty() && nick.eq_ignore_ascii_case(email) {
-            return true;
-        }
-        if !local.is_empty() && nick.eq_ignore_ascii_case(local) {
-            return true;
-        }
-    }
-    false
-}
-
-fn reviewer_matches_identity(
-    reviewer: &BitbucketUser,
-    current_user: &BitbucketCurrentUser,
-) -> bool {
-    if let (Some(a), Some(b)) = (&reviewer.account_id, &current_user.account_id) {
-        if a == b {
-            return true;
-        }
-    }
-    if let (Some(a), Some(b)) = (&reviewer.uuid, &current_user.uuid) {
-        if a == b {
-            return true;
-        }
-    }
-    if let (Some(a), Some(b)) = (&reviewer.username, &current_user.username) {
-        if a.eq_ignore_ascii_case(b) {
-            return true;
-        }
-    }
-    if let (Some(a), Some(b)) = (&reviewer.nickname, &current_user.nickname) {
-        if a.eq_ignore_ascii_case(b) {
-            return true;
-        }
-    }
-    if let (Some(a), Some(b)) = (&reviewer.display_name, &current_user.display_name) {
-        if a.eq_ignore_ascii_case(b) {
+fn reviewer_matches(reviewer: &BitbucketUser, user_account_id: &str) -> bool {
+    // Match by Atlassian account_id (same across Jira and Bitbucket).
+    if let Some(account_id) = &reviewer.account_id {
+        if account_id.eq_ignore_ascii_case(user_account_id) {
             return true;
         }
     }
@@ -513,27 +446,17 @@ fn reviewer_debug_identity(reviewer: &BitbucketUser) -> String {
     )
 }
 
-fn pr_matches_user(
-    pr: &BitbucketPullRequest,
-    current_user: Option<&BitbucketCurrentUser>,
-    user_email: &str,
-    display_name: &str,
-) -> bool {
-    let reviewer_match = pr.reviewers.iter().any(|r| {
-        current_user
-            .map(|u| reviewer_matches_identity(r, u))
-            .unwrap_or(false)
-            || reviewer_matches(r, user_email, display_name)
-    });
+fn pr_matches_user(pr: &BitbucketPullRequest, user_account_id: &str) -> bool {
+    let reviewer_match = pr
+        .reviewers
+        .iter()
+        .any(|r| reviewer_matches(r, user_account_id));
     let participant_reviewer_match = pr.participants.iter().any(|p| {
         p.role
             .as_deref()
             .map(|r| r.eq_ignore_ascii_case("REVIEWER"))
             .unwrap_or(false)
-            && (current_user
-                .map(|u| reviewer_matches_identity(&p.user, u))
-                .unwrap_or(false)
-                || reviewer_matches(&p.user, user_email, display_name))
+            && reviewer_matches(&p.user, user_account_id)
     });
     // Some Bitbucket responses omit explicit reviewers and only expose a
     // participant role that is not AUTHOR (e.g. PARTICIPANT) for review-assigned users.
@@ -542,49 +465,9 @@ fn pr_matches_user(
             .as_deref()
             .map(|r| r.eq_ignore_ascii_case("AUTHOR"))
             .unwrap_or(false)
-            && (current_user
-                .map(|u| reviewer_matches_identity(&p.user, u))
-                .unwrap_or(false)
-                || reviewer_matches(&p.user, user_email, display_name))
+            && reviewer_matches(&p.user, user_account_id)
     });
     reviewer_match || participant_reviewer_match || participant_non_author_match
-}
-
-fn current_user_debug_identity(user: &BitbucketCurrentUser) -> String {
-    format!(
-        "account_id={:?}, uuid={:?}, username={:?}, nickname={:?}, display_name={:?}",
-        user.account_id, user.uuid, user.username, user.nickname, user.display_name
-    )
-}
-
-fn escape_query_value(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn reviewer_filter_query(
-    current_user: &BitbucketCurrentUser,
-    user_email: &str,
-    display_name: &str,
-) -> Option<String> {
-    let mut terms = Vec::<String>::new();
-    let _ = user_email;
-    let _ = display_name;
-    if let Some(v) = current_user.account_id.as_deref().filter(|v| !v.is_empty()) {
-        let qv = escape_query_value(v);
-        terms.push(format!("reviewers.account_id=\"{}\"", qv));
-    }
-    if let Some(v) = current_user.uuid.as_deref().filter(|v| !v.is_empty()) {
-        let qv = escape_query_value(v);
-        terms.push(format!("reviewers.uuid=\"{}\"", qv));
-    }
-    // Keep this query conservative: Bitbucket Cloud search rejects some reviewer
-    // subfields (e.g. display_name), returning 400 for the whole query.
-
-    if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" OR "))
-    }
 }
 
 fn pr_identity_key(repo_slug: &str, pr: &BitbucketPullRequest) -> String {
@@ -756,6 +639,7 @@ async fn fetch_repositories_for_project(
     auth_value: &str,
     project_key: &str,
     start: NaiveDate,
+    start_utc: Option<DateTime<Utc>>,
     _end: NaiveDate,
 ) -> Result<Vec<String>, String> {
     let mut slugs = Vec::<String>::new();
@@ -780,10 +664,14 @@ async fn fetch_repositories_for_project(
 
         let mut reached_older_than_start = false;
         for repo in page.values {
-            let Some(updated) = repo.updated_on.as_deref().and_then(parse_iso_date) else {
+            let Some(updated_raw) = repo.updated_on.as_deref() else {
                 continue;
             };
-            if updated < start {
+            let Some(before_start) = is_before_scan_start(updated_raw, start, start_utc.as_ref())
+            else {
+                continue;
+            };
+            if before_start {
                 reached_older_than_start = true;
                 continue;
             }
@@ -812,6 +700,7 @@ async fn fetch_repositories_for_workspace(
     config: &BitbucketConfig,
     auth_value: &str,
     start: NaiveDate,
+    start_utc: Option<DateTime<Utc>>,
     _end: NaiveDate,
 ) -> Result<Vec<String>, String> {
     let mut slugs = Vec::<String>::new();
@@ -827,10 +716,14 @@ async fn fetch_repositories_for_workspace(
         next_url = page.next.clone();
         let mut reached_older_than_start = false;
         for repo in page.values {
-            let Some(updated) = repo.updated_on.as_deref().and_then(parse_iso_date) else {
+            let Some(updated_raw) = repo.updated_on.as_deref() else {
                 continue;
             };
-            if updated < start {
+            let Some(before_start) = is_before_scan_start(updated_raw, start, start_utc.as_ref())
+            else {
+                continue;
+            };
+            if before_start {
                 reached_older_than_start = true;
                 continue;
             }
@@ -896,38 +789,97 @@ fn urlencoding_jql(s: &str) -> String {
 
 pub async fn fetch_timesheet_activity(
     user_email: &str,
+    user_account_id: &str,
     display_name: &str,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<BitbucketActivity, String> {
-    fetch_timesheet_activity_inner(user_email, display_name, start, end, true).await
+    fetch_timesheet_activity_inner(
+        user_email,
+        user_account_id,
+        display_name,
+        start,
+        end,
+        true,
+        BitbucketScanRange::RecentWeeksWindow,
+    )
+    .await
 }
 
 pub async fn fetch_timesheet_activity_fresh(
     user_email: &str,
+    user_account_id: &str,
     display_name: &str,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<BitbucketActivity, String> {
-    fetch_timesheet_activity_inner(user_email, display_name, start, end, false).await
+    fetch_timesheet_activity_inner(
+        user_email,
+        user_account_id,
+        display_name,
+        start,
+        end,
+        false,
+        BitbucketScanRange::RecentWeeksWindow,
+    )
+    .await
+}
+
+pub async fn fetch_timesheet_activity_fresh_requested_window(
+    user_email: &str,
+    user_account_id: &str,
+    display_name: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<BitbucketActivity, String> {
+    fetch_timesheet_activity_inner(
+        user_email,
+        user_account_id,
+        display_name,
+        start,
+        end,
+        false,
+        BitbucketScanRange::RequestedWindow,
+    )
+    .await
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum BitbucketScanRange {
+    RecentWeeksWindow,
+    RequestedWindow,
 }
 
 async fn fetch_timesheet_activity_inner(
     user_email: &str,
+    user_account_id: &str,
     display_name: &str,
     start: NaiveDate,
     end: NaiveDate,
     use_cache: bool,
+    scan_range: BitbucketScanRange,
 ) -> Result<BitbucketActivity, String> {
-    let Some((requested_start, requested_end)) = clamp_to_recent_weeks(start, end) else {
-        log::info!("[bitbucket] skipping fetch: requested range outside recent-week window");
-        return Ok(BitbucketActivity::default());
+    let (requested_start, requested_end) = match scan_range {
+        BitbucketScanRange::RecentWeeksWindow => {
+            let Some((effective_start, effective_end)) = clamp_to_recent_weeks(start, end) else {
+                log::info!(
+                    "[bitbucket] skipping fetch: requested range outside recent-week window"
+                );
+                return Ok(BitbucketActivity::default());
+            };
+            (effective_start, effective_end)
+        }
+        BitbucketScanRange::RequestedWindow => (start, end),
     };
-    let (scan_start, scan_end) = recent_weeks_window();
+    let (scan_start, scan_end) = match scan_range {
+        BitbucketScanRange::RecentWeeksWindow => recent_weeks_window(),
+        BitbucketScanRange::RequestedWindow => (start, end),
+    };
+    let scan_bounds_utc = local_day_bounds_utc(scan_start, scan_end);
 
     let started_at = std::time::Instant::now();
     let config = BitbucketConfig::from_env()?;
-    let auth_value = auth_header(user_email, &config.api_token);
+    let auth_value = auth_header(&config.api_user, &config.api_token);
     let cache_key = format!(
         "{}|{}",
         config.workspace.to_lowercase(),
@@ -1010,32 +962,20 @@ async fn fetch_timesheet_activity_inner(
         scan_end,
         user_email
     );
-    let current_user: Option<BitbucketCurrentUser> =
-        match get_json::<BitbucketCurrentUser>(&auth_value, &format!("{}/user", config.api_base))
-            .await
-        {
-            Ok(u) => {
-                log::debug!(
-                    "[bitbucket] current user {}",
-                    current_user_debug_identity(&u)
-                );
-                Some(u)
-            }
-            Err(e) => {
-                log::warn!(
-                    "[bitbucket] failed to resolve current user via /user: {}",
-                    e
-                );
-                None
-            }
-        };
-
     // Commits: newest first. Stop once we go past the start date.
     let mut project_repos = Vec::<String>::new();
     let mut seen_repos = HashSet::<String>::new();
     if discovered_project_keys.is_empty() {
-        let repos =
-            fetch_repositories_for_workspace(&config, &auth_value, scan_start, scan_end).await?;
+        let repos = fetch_repositories_for_workspace(
+            &config,
+            &auth_value,
+            scan_start,
+            scan_bounds_utc
+                .as_ref()
+                .map(|(start_utc, _)| start_utc.clone()),
+            scan_end,
+        )
+        .await?;
         for repo in repos {
             if seen_repos.insert(repo.clone()) {
                 project_repos.push(repo);
@@ -1048,6 +988,9 @@ async fn fetch_timesheet_activity_inner(
                 &auth_value,
                 project_key,
                 scan_start,
+                scan_bounds_utc
+                    .as_ref()
+                    .map(|(start_utc, _)| start_utc.clone()),
                 scan_end,
             )
             .await?;
@@ -1114,14 +1057,29 @@ async fn fetch_timesheet_activity_inner(
                 let Some(commit_date) = parse_iso_date(&commit.date) else {
                     continue;
                 };
-                if commit_date < scan_start {
-                    reached_older_than_start = true;
-                    continue;
-                }
-                if commit_date > scan_end
-                    || !author_matches(&commit.author, user_email, display_name)
-                {
-                    continue;
+                if let Some((scan_start_utc, scan_end_utc)) = scan_bounds_utc.as_ref() {
+                    let Some(commit_ts) = parse_iso_timestamp_utc(&commit.date) else {
+                        continue;
+                    };
+                    if commit_ts < *scan_start_utc {
+                        reached_older_than_start = true;
+                        continue;
+                    }
+                    if commit_ts > *scan_end_utc
+                        || !author_matches(&commit.author, user_email, display_name)
+                    {
+                        continue;
+                    }
+                } else {
+                    if commit_date < scan_start {
+                        reached_older_than_start = true;
+                        continue;
+                    }
+                    if commit_date > scan_end
+                        || !author_matches(&commit.author, user_email, display_name)
+                    {
+                        continue;
+                    }
                 }
                 if let Some(key) = extract_work_item_key(&commit.message) {
                     let cleaned = strip_key_prefix(&commit.message, &key);
@@ -1177,7 +1135,7 @@ async fn fetch_timesheet_activity_inner(
         );
         log::debug!("[bitbucket] scanning pullrequests for repo={}", repo_slug);
         let mut pr_next_url = Some(format!(
-            "{}/pullrequests?pagelen=50&sort=-updated_on",
+            "{}/pullrequests?state=OPEN&state=MERGED&pagelen=50&sort=-updated_on",
             repo_base
         ));
         while let Some(url) = pr_next_url {
@@ -1220,6 +1178,11 @@ async fn fetch_timesheet_activity_inner(
                     .as_deref()
                     .or(pr.created_on.as_deref())
                     .and_then(parse_iso_date);
+                let when_ts_utc = pr
+                    .updated_on
+                    .as_deref()
+                    .or(pr.created_on.as_deref())
+                    .and_then(parse_iso_timestamp_utc);
                 let Some(pr_date) = when else {
                     pr_missing_date_count += 1;
                     log::debug!(
@@ -1232,26 +1195,53 @@ async fn fetch_timesheet_activity_inner(
                     continue;
                 };
 
-                if pr_date < scan_start {
-                    reached_older_than_start = true;
-                    pr_before_range_count += 1;
-                    log::debug!(
-                        "[bitbucket] PR skipped (before range): repo={} title={:?} date={}",
-                        repo_slug,
-                        pr.title,
-                        pr_date
-                    );
-                    continue;
-                }
-                if pr_date > scan_end {
-                    pr_after_range_count += 1;
-                    log::debug!(
-                        "[bitbucket] PR skipped (after range): repo={} title={:?} date={}",
-                        repo_slug,
-                        pr.title,
-                        pr_date
-                    );
-                    continue;
+                if let Some((scan_start_utc, scan_end_utc)) = scan_bounds_utc.as_ref() {
+                    let Some(pr_ts) = when_ts_utc else {
+                        continue;
+                    };
+                    if pr_ts < *scan_start_utc {
+                        reached_older_than_start = true;
+                        pr_before_range_count += 1;
+                        log::debug!(
+                            "[bitbucket] PR skipped (before range): repo={} title={:?} date={}",
+                            repo_slug,
+                            pr.title,
+                            pr_date
+                        );
+                        continue;
+                    }
+                    if pr_ts > *scan_end_utc {
+                        pr_after_range_count += 1;
+                        log::debug!(
+                            "[bitbucket] PR skipped (after range): repo={} title={:?} date={}",
+                            repo_slug,
+                            pr.title,
+                            pr_date
+                        );
+                        continue;
+                    }
+                } else {
+                    if pr_date < scan_start {
+                        reached_older_than_start = true;
+                        pr_before_range_count += 1;
+                        log::debug!(
+                            "[bitbucket] PR skipped (before range): repo={} title={:?} date={}",
+                            repo_slug,
+                            pr.title,
+                            pr_date
+                        );
+                        continue;
+                    }
+                    if pr_date > scan_end {
+                        pr_after_range_count += 1;
+                        log::debug!(
+                            "[bitbucket] PR skipped (after range): repo={} title={:?} date={}",
+                            repo_slug,
+                            pr.title,
+                            pr_date
+                        );
+                        continue;
+                    }
                 }
                 let mut reviewer_data = (
                     pr.reviewers
@@ -1265,8 +1255,7 @@ async fn fetch_timesheet_activity_inner(
                         .collect::<Vec<_>>()
                         .join(" | "),
                 );
-                let mut match_found =
-                    pr_matches_user(&pr, current_user.as_ref(), user_email, display_name);
+                let mut match_found = pr_matches_user(&pr, user_account_id);
 
                 // List endpoint may omit reviewer/participant expansions in some environments.
                 if !match_found
@@ -1298,12 +1287,7 @@ async fn fetch_timesheet_activity_inner(
                                         .collect::<Vec<_>>()
                                         .join(" | "),
                                 );
-                                match_found = pr_matches_user(
-                                    &detail,
-                                    current_user.as_ref(),
-                                    user_email,
-                                    display_name,
-                                );
+                                match_found = pr_matches_user(&detail, user_account_id);
                                 log::debug!(
                                     "[bitbucket] PR detail lookup: repo={} id={} match={} reviewers=[{}] participants=[{}]",
                                     repo_slug,
@@ -1328,11 +1312,12 @@ async fn fetch_timesheet_activity_inner(
                 if !match_found {
                     pr_no_reviewer_match_count += 1;
                     log::debug!(
-                        "[bitbucket] PR skipped (reviewer mismatch): repo={} id={:?} title={:?} date={} reviewers=[{}] participants=[{}]",
+                        "[bitbucket] PR skipped (reviewer mismatch): repo={} id={:?} title={:?} date={} target_account_id={} reviewers=[{}] participants=[{}]",
                         repo_slug,
                         pr.id,
                         pr.title,
                         pr_date,
+                        user_account_id,
                         reviewer_data.0,
                         reviewer_data.1
                     );
@@ -1382,90 +1367,6 @@ async fn fetch_timesheet_activity_inner(
                 break;
             }
         }
-
-        // Fallback for environments where reviewer assignment is not
-        // consistently present in list/detail payloads: query PRs by reviewer identity.
-        if let Some(user) = current_user.as_ref() {
-            if let Some(q) = reviewer_filter_query(user, user_email, display_name) {
-                let mut filtered_next = Some(format!(
-                    "{}/pullrequests?pagelen=50&sort=-updated_on&q={}",
-                    repo_base,
-                    urlencoding_jql(&q)
-                ));
-                while let Some(furl) = filtered_next {
-                    let fpage: BitbucketPage<BitbucketPullRequest> = match get_json(
-                        &auth_value,
-                        &furl,
-                    )
-                    .await
-                    {
-                        Ok(page) => page,
-                        Err(err) => {
-                            pr_repo_error_count += 1;
-                            if is_rate_limited_error(&err) {
-                                rate_limit_hit = true;
-                                log::warn!(
-                                    "[bitbucket] reviewer-query scan rate-limited for repo={}, stopping remaining Bitbucket scans for this run",
-                                    repo_slug
-                                );
-                            } else {
-                                log::warn!(
-                                    "[bitbucket] reviewer-query scan failed for repo={} url={} err={}",
-                                    repo_slug,
-                                    furl,
-                                    err
-                                );
-                            }
-                            break;
-                        }
-                    };
-                    filtered_next = fpage.next.clone();
-                    for pr in fpage.values {
-                        let identity = pr_identity_key(repo_slug, &pr);
-                        if seen_pr_identities.contains(&identity) {
-                            continue;
-                        }
-                        let when = pr
-                            .updated_on
-                            .as_deref()
-                            .or(pr.created_on.as_deref())
-                            .and_then(parse_iso_date);
-                        let Some(pr_date) = when else {
-                            continue;
-                        };
-                        if pr_date < scan_start || pr_date > scan_end {
-                            continue;
-                        }
-                        if let Some(key) = extract_work_item_key(&pr.title) {
-                            let map_key = format!("{}:{}", key, pr_date);
-                            activity.pr_review_cells.insert(map_key);
-                            if let Some(link) = pr_link(&repo_base, &pr) {
-                                activity
-                                    .pr_links_by_cell
-                                    .entry(format!("{}:{}", key, pr_date))
-                                    .or_default()
-                                    .push(link);
-                            }
-                            let cleaned = strip_key_prefix(&pr.title, &key);
-                            activity
-                                .discovered_item_summaries
-                                .entry(key.clone())
-                                .or_insert(cleaned);
-                            matched_pr_count += 1;
-                            seen_pr_identities.insert(identity);
-                            log::debug!(
-                                "[bitbucket] PR matched by reviewer query: repo={} id={:?} title={:?} date={} key={}",
-                                repo_slug,
-                                pr.id,
-                                pr.title,
-                                pr_date,
-                                key
-                            );
-                        }
-                    }
-                }
-            }
-        }
     }
 
     log::info!(
@@ -1504,4 +1405,234 @@ async fn fetch_timesheet_activity_inner(
         requested_start,
         requested_end,
     ))
+}
+
+// ─── Webhook registration ────────────────────────────────────────────────────
+
+/// Events subscribed to when registering a webhook.
+const WEBHOOK_EVENTS: [&str; 5] = [
+    "repo:push",
+    "pullrequest:created",
+    "pullrequest:updated",
+    "pullrequest:fulfilled",
+    "pullrequest:approved",
+];
+
+#[derive(Deserialize)]
+struct BitbucketHook {
+    uuid: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Marker stored in the hook description so this machine's hooks can be
+/// found and cleaned up without touching hooks owned by other developers.
+fn webhook_marker() -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "unknown-host".to_string());
+    format!("ol-timesheet:{}", host.to_lowercase())
+}
+
+/// Drop the whole activity cache so the next refresh re-scans Bitbucket.
+/// Called when a webhook event signals new commits / PR activity.
+pub fn invalidate_activity_cache() {
+    if let Ok(mut cache) = BITBUCKET_ACTIVITY_CACHE.lock() {
+        let evicted = cache.len();
+        cache.clear();
+        if evicted > 0 {
+            log::info!(
+                "[bitbucket] activity cache invalidated ({} entr{})",
+                evicted,
+                if evicted == 1 { "y" } else { "ies" }
+            );
+        }
+    }
+}
+
+async fn send_hook_request(
+    auth_value: &str,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    wait_for_global_cooldown().await;
+    let mut req = HTTP
+        .request(method.clone(), url)
+        .header("Authorization", auth_value)
+        .header("Accept", "application/json");
+    if let Some(body) = body {
+        req = req.json(body);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Bitbucket request failed: {}", e))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(serde_json::Value::Null);
+    }
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "Bitbucket API error {} for {} {}: {}",
+            status, method, url, text
+        ));
+    }
+    if text.trim().is_empty() {
+        Ok(serde_json::Value::Null)
+    } else {
+        serde_json::from_str(&text).map_err(|e| format!("Bitbucket JSON parse failed: {}", e))
+    }
+}
+
+fn hook_payload(marker: &str, target_url: &str, secret: &str) -> serde_json::Value {
+    serde_json::json!({
+        "description": marker,
+        "url": target_url,
+        "active": true,
+        "secret": secret,
+        "events": WEBHOOK_EVENTS,
+    })
+}
+
+/// Reconcile hooks under `hooks_base` (a `.../hooks` collection URL) so
+/// exactly one hook carrying this machine's marker points at `target_url`.
+async fn reconcile_hooks_at(
+    auth_value: &str,
+    hooks_base: &str,
+    marker: &str,
+    target_url: &str,
+    secret: &str,
+) -> Result<(), String> {
+    let mut ours = Vec::<BitbucketHook>::new();
+    let mut next_url = Some(format!("{}?pagelen=100", hooks_base));
+    while let Some(url) = next_url {
+        let page: BitbucketPage<BitbucketHook> = get_json(auth_value, &url).await?;
+        next_url = page.next.clone();
+        ours.extend(
+            page.values
+                .into_iter()
+                .filter(|hook| hook.description.as_deref() == Some(marker)),
+        );
+    }
+
+    let payload = hook_payload(marker, target_url, secret);
+    let (matching, stale): (Vec<_>, Vec<_>) = ours
+        .into_iter()
+        .partition(|hook| hook.url.as_deref() == Some(target_url));
+
+    match (matching.is_empty(), stale.first()) {
+        (false, _) => {} // an up-to-date hook already exists
+        (true, Some(hook)) => {
+            // Repoint the first stale hook instead of delete+create.
+            let hook_url = format!("{}/{}", hooks_base, hook.uuid);
+            send_hook_request(auth_value, reqwest::Method::PUT, &hook_url, Some(&payload)).await?;
+            log::info!("[bitbucket] webhook repointed to current tunnel URL");
+        }
+        (true, None) => {
+            send_hook_request(
+                auth_value,
+                reqwest::Method::POST,
+                hooks_base,
+                Some(&payload),
+            )
+            .await?;
+            log::info!("[bitbucket] webhook created at {}", hooks_base);
+        }
+    }
+
+    // Remove any remaining stale duplicates (skip the one repointed above).
+    let skip_first_stale = matching.is_empty();
+    for hook in stale.iter().skip(if skip_first_stale { 1 } else { 0 }) {
+        let hook_url = format!("{}/{}", hooks_base, hook.uuid);
+        if let Err(err) =
+            send_hook_request(auth_value, reqwest::Method::DELETE, &hook_url, None).await
+        {
+            log::warn!("[bitbucket] stale webhook cleanup failed: {}", err);
+        }
+    }
+    Ok(())
+}
+
+/// Repositories in the configured workspace where the configured Bitbucket
+/// API user has admin permission — the level required to manage webhooks. Uses the
+/// workspace-scoped `role=admin` filter (the user-scoped
+/// `/2.0/user/permissions/repositories` endpoint was removed; CHANGE-2770).
+async fn fetch_admin_repo_slugs(
+    config: &BitbucketConfig,
+    auth_value: &str,
+) -> Result<Vec<String>, String> {
+    let mut slugs = Vec::<String>::new();
+    let mut next_url = Some(format!(
+        "{}/repositories/{}?role=admin&pagelen=100",
+        config.api_base, config.workspace
+    ));
+    while let Some(url) = next_url {
+        let page: BitbucketPage<BitbucketProjectRepo> = get_json(auth_value, &url).await?;
+        next_url = page.next.clone();
+        slugs.extend(page.values.into_iter().map(|repo| repo.slug));
+    }
+    slugs.sort();
+    slugs.dedup();
+    Ok(slugs)
+}
+
+/// Register (or update) webhooks so Bitbucket pushes `repo:push` and
+/// `pullrequest:*` events to `target_url`. Tries a single workspace-level
+/// hook first; when the token lacks that permission, falls back to per-repo
+/// hooks on the repositories where the configured API user has admin access
+/// (the level Bitbucket requires for webhook management). Returns the number
+/// of hook collections reconciled.
+pub async fn reconcile_webhooks(target_url: &str, secret: &str) -> Result<usize, String> {
+    let config = BitbucketConfig::from_env()?;
+    let auth_value = auth_header(&config.api_user, &config.api_token);
+    let marker = webhook_marker();
+
+    let workspace_hooks = format!("{}/workspaces/{}/hooks", config.api_base, config.workspace);
+    match reconcile_hooks_at(&auth_value, &workspace_hooks, &marker, target_url, secret).await {
+        Ok(()) => return Ok(1),
+        Err(err) => log::info!(
+            "[bitbucket] workspace-level webhook unavailable ({}), falling back to per-repo hooks",
+            err
+        ),
+    }
+
+    let slugs = fetch_admin_repo_slugs(&config, &auth_value).await?;
+    if slugs.is_empty() {
+        return Err(format!(
+            "no repositories with admin access in workspace {}; ask a workspace admin to grant \
+             repo admin or register a workspace-level webhook (other repos remain covered by \
+             fallback polling)",
+            config.workspace
+        ));
+    }
+    log::info!(
+        "[bitbucket] registering webhooks on {} repo(s) with admin access",
+        slugs.len()
+    );
+    let mut reconciled = 0usize;
+    for slug in &slugs {
+        let repo_hooks = format!(
+            "{}/repositories/{}/{}/hooks",
+            config.api_base, config.workspace, slug
+        );
+        match reconcile_hooks_at(&auth_value, &repo_hooks, &marker, target_url, secret).await {
+            Ok(()) => reconciled += 1,
+            Err(err) => log::warn!(
+                "[bitbucket] webhook reconciliation failed for repo {}: {}",
+                slug,
+                err
+            ),
+        }
+    }
+    if reconciled == 0 {
+        return Err(format!(
+            "webhook registration failed on all {} repositories",
+            slugs.len()
+        ));
+    }
+    Ok(reconciled)
 }
