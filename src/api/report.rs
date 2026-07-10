@@ -3,8 +3,11 @@
 use crate::api::jira::{JiraCredentials, fetch_work_items, fetch_worklogs};
 use crate::model::{NonBillableMinutes, ReportData, Settings};
 use chrono::{Datelike, Local, NaiveDate};
+use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex, OnceLock};
+
+const WORKLOG_FETCH_CONCURRENCY: usize = 8;
 
 #[derive(Clone, Debug)]
 struct ReportCacheEntry {
@@ -90,14 +93,25 @@ async fn build_report_range(
     let study = normalise_list(&settings.study_keys);
     let non_billable_prefixes = normalise_list(&settings.non_billable_project_prefixes);
 
+    // Fetch worklogs for all work items in parallel, bounded by WORKLOG_FETCH_CONCURRENCY.
+    let fetch_results: Vec<Result<_, String>> =
+        futures::stream::iter(work_items.into_iter().map(|item| {
+            let issue_key_norm = item.key.trim().to_uppercase();
+            let project_prefix = issue_project_prefix(&item.key);
+            async move {
+                let (entries, _) = fetch_worklogs(creds, &item.key, start, end).await?;
+                Ok::<_, String>((issue_key_norm, project_prefix, entries))
+            }
+        }))
+        .buffer_unordered(WORKLOG_FETCH_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut billable: HashMap<String, HashMap<String, u64>> = HashMap::new();
     let mut non_billable: HashMap<String, NonBillableMinutes> = HashMap::new();
 
-    for item in work_items {
-        let (entries, _) = fetch_worklogs(creds, &item.key, start, end).await?;
-        let issue_key_norm = item.key.trim().to_uppercase();
-        let project_prefix = issue_project_prefix(&item.key);
-
+    for result in fetch_results {
+        let (issue_key_norm, project_prefix, entries) = result?;
         for entry in entries {
             let day_key = yyyymmdd(entry.date);
             let minutes = (entry.hours * 60.0).round().max(0.0) as u64;
