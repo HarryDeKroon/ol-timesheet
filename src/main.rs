@@ -254,6 +254,7 @@ cfg_if::cfg_if! {
                 }
             });
             tokio::spawn(timesheet::api::periodic_refresh::run_periodic_refresh_loop());
+            tokio::spawn(timesheet::api::webhook::register_on_startup());
 
             let conf = match leptos::config::get_configuration(None) {
                 Ok(conf) => conf,
@@ -270,6 +271,10 @@ cfg_if::cfg_if! {
             let app: Router = Router::new()
                 .route("/ws/heartbeat", get(heartbeat_ws_handler))
                 .route("/ws/timesheet", get(timesheet_ws_handler))
+                .route(
+                    "/webhooks/bitbucket/{token}",
+                    axum::routing::post(timesheet::api::webhook::bitbucket_webhook_handler),
+                )
                 .route("/admin/cache", get(admin_cache_handler))
                 .route("/report/{year}", get(report_handler))
                 .route("/auth/login", get(timesheet::auth::login_handler))

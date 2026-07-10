@@ -8,3 +8,5 @@ pub mod jira;
 pub mod periodic_refresh;
 #[cfg(feature = "ssr")]
 pub mod report;
+#[cfg(feature = "ssr")]
+pub mod webhook;

@@ -76,6 +76,7 @@ pub mod keys {
     pub const OPEN_PR_IN_BITBUCKET: &str = "open_pr_in_bitbucket";
     pub const OPEN_SETTINGS: &str = "open_settings";
     pub const REFRESH_CACHED: &str = "refresh_cached";
+    pub const FORCE_PERIODIC_REFRESH: &str = "force_periodic_refresh";
     pub const USER_REPORT: &str = "user_report";
     pub const LOGOUT: &str = "logout";
     pub const OL_JIRA_DISABLED: &str = "ol_jira_disabled";
@@ -177,6 +178,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_PR_IN_BITBUCKET, "Open pull request in Bitbucket"),
         (keys::OPEN_SETTINGS, "Open settings"),
         (keys::REFRESH_CACHED, "Refresh cached work items"),
+        (keys::FORCE_PERIODIC_REFRESH, "Force periodic refresh"),
         (keys::USER_REPORT, "User report"),
         (keys::LOGOUT, "Log out"),
         (keys::OL_JIRA_DISABLED, "OL Jira integration is disabled because over three years have passed since the last update."),
@@ -301,6 +303,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         ),
         (keys::OPEN_SETTINGS, "Ouvrir les paramètres"),
         (keys::REFRESH_CACHED, "Rafraîchir les éléments en cache"),
+        (keys::FORCE_PERIODIC_REFRESH, "Forcer le rafraîchissement périodique"),
         (keys::USER_REPORT, "Rapport utilisateur"),
         (keys::LOGOUT, "Se déconnecter"),
         (keys::OL_JIRA_DISABLED, "L\u{2019}intégration OL Jira est désactivée car plus de trois ans se sont écoulés depuis la dernière mise à jour."),
@@ -413,6 +416,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         ),
         (keys::OPEN_SETTINGS, "Instellingen openen"),
         (keys::REFRESH_CACHED, "Werkitems in cache vernieuwen"),
+        (keys::FORCE_PERIODIC_REFRESH, "Periodieke verversing forceren"),
         (keys::USER_REPORT, "Gebruikersrapport"),
         (keys::LOGOUT, "Uitloggen"),
         (keys::OL_JIRA_DISABLED, "OL Jira-integratie is uitgeschakeld omdat er meer dan drie jaar zijn verstreken sinds de laatste update."),
