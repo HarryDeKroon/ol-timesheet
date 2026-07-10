@@ -82,17 +82,14 @@ cfg_if::cfg_if! {
             axum::extract::Path(year): axum::extract::Path<i32>,
         ) -> impl axum::response::IntoResponse {
             log::info!("[report] request received year={}", year);
-            let _ = headers;
-            let session = match timesheet::auth::current_user_session().await {
-                Ok((_, session)) => session,
-                Err(_) => {
-                    log::info!("[report] response sent year={} status=401", year);
-                    return (
-                        axum::http::StatusCode::UNAUTHORIZED,
-                        axum::Json(serde_json::json!({ "error": "Not authenticated" })),
-                    );
-                }
+            let Some(snapshot) = timesheet::auth::authenticated_session_from_headers(&headers) else {
+                log::info!("[report] response sent year={} status=401", year);
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": "Not authenticated" })),
+                );
             };
+            let session = snapshot.user;
             let creds = session.jira_credentials();
             let settings = session.preferences;
             match timesheet::api::report::build_report_for_year(&creds, &settings, year).await {
