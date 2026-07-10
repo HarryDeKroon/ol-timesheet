@@ -9,12 +9,14 @@ use crate::components::week_navigator::{WeekNavigator, week_monday};
 use crate::connection::use_connection;
 use crate::formatting::{format_hours_long, format_hours_short};
 use crate::i18n::{I18n, keys};
+#[cfg(feature = "hydrate")]
+use crate::model::TimesheetRefreshDiff;
+#[cfg(feature = "hydrate")]
+use crate::model::TimesheetWsMessage;
 use crate::model::{ConnectionStatus, TimesheetData, WorkItem, WorklogEntry};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use leptos::prelude::*;
 
-#[cfg(feature = "ssr")]
-use crate::api::bitbucket::fetch_timesheet_activity;
 #[cfg(feature = "ssr")]
 use crate::model::CellActivity;
 
@@ -22,7 +24,7 @@ use crate::model::CellActivity;
 use crate::flags::{FLAG_FR, FLAG_NL, FLAG_UK};
 
 #[cfg(feature = "ssr")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "ssr")]
 fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
@@ -47,10 +49,7 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
         .filter(|w| date_in_week(w.date))
         .cloned()
         .collect::<Vec<_>>();
-    // Keep the full issue list so assigned active issues without in-range
-    // worklogs remain visible in cached weekly slices.
-    let work_items = source.work_items.clone();
-    let ytd_hours = source.ytd_hours.clone();
+
     let bitbucket_activity = source
         .bitbucket_activity
         .iter()
@@ -62,6 +61,23 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
                     .map(|_| (k.clone(), v.clone()))
             })
         })
+        .collect::<HashMap<_, _>>();
+
+    // Show all work_items (already filtered by Jira query for active status).
+    // Jira returns items that match: worklogAuthor=user OR assignee=user with active status.
+    // No need to filter by week activity here; active items remain visible all week.
+    let work_items = source.work_items.clone();
+
+    let visible_keys = work_items
+        .iter()
+        .map(|i| i.key.clone())
+        .collect::<HashSet<_>>();
+
+    let ytd_hours = source
+        .ytd_hours
+        .iter()
+        .filter(|(k, _)| visible_keys.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), *v))
         .collect::<HashMap<_, _>>();
 
     TimesheetData {
@@ -121,6 +137,280 @@ fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
     }
 }
 
+#[cfg(feature = "hydrate")]
+fn timesheet_has_activity_for_issue(ts: &TimesheetData, issue_key: &str) -> bool {
+    ts.worklogs.iter().any(|entry| entry.issue_key == issue_key)
+        || ts
+            .bitbucket_activity
+            .keys()
+            .filter_map(|cell_key| cell_key.split_once(':').map(|(key, _)| key))
+            .any(|key| key == issue_key)
+}
+
+#[cfg(feature = "hydrate")]
+fn apply_refresh_diff_to_timesheet(ts: &mut TimesheetData, diff: &TimesheetRefreshDiff) {
+    let mut new_items = Vec::<WorkItem>::new();
+    for item in &diff.work_items_upserted {
+        if let Some(existing) = ts
+            .work_items
+            .iter_mut()
+            .find(|existing| existing.key == item.key)
+        {
+            *existing = item.clone();
+        } else {
+            new_items.push(item.clone());
+        }
+    }
+    for item in new_items.into_iter().rev() {
+        ts.work_items.insert(0, item);
+    }
+
+    for update in &diff.ytd_hours_upserted {
+        ts.ytd_hours.insert(update.issue_key.clone(), update.hours);
+    }
+    for issue_key in &diff.ytd_hours_removed {
+        ts.ytd_hours.remove(issue_key);
+    }
+
+    if !diff.worklog_ids_removed.is_empty() {
+        let removed = diff
+            .worklog_ids_removed
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        ts.worklogs.retain(|entry| !removed.contains(&entry.id));
+    }
+    if !diff.worklogs_upserted.is_empty() {
+        let upsert_ids = diff
+            .worklogs_upserted
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        ts.worklogs
+            .retain(|entry| !upsert_ids.contains(entry.id.as_str()));
+        ts.worklogs.extend(diff.worklogs_upserted.iter().cloned());
+    }
+
+    for cell_key in &diff.bitbucket_cell_keys_removed {
+        ts.bitbucket_activity.remove(cell_key);
+    }
+    for update in &diff.bitbucket_activity_upserted {
+        ts.bitbucket_activity
+            .insert(update.cell_key.clone(), update.activity.clone());
+    }
+
+    for issue_key in &diff.work_item_keys_removed {
+        if !timesheet_has_activity_for_issue(ts, issue_key) {
+            ts.work_items.retain(|item| item.key != *issue_key);
+            ts.ytd_hours.remove(issue_key);
+        }
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn today_is_visible(selected_monday: NaiveDate, num_weeks: usize, today: NaiveDate) -> bool {
+    let start = selected_monday - Duration::weeks((num_weeks.max(1) as i64) - 1);
+    let end = selected_monday + Duration::days(6);
+    today >= start && today <= end
+}
+
+#[cfg(feature = "hydrate")]
+fn visible_range(selected_monday: NaiveDate, num_weeks: usize) -> (NaiveDate, NaiveDate) {
+    let start = selected_monday - Duration::weeks((num_weeks.max(1) as i64) - 1);
+    let end = selected_monday + Duration::days(6);
+    (start, end)
+}
+
+#[cfg(feature = "hydrate")]
+fn cell_key_date(cell_key: &str) -> Option<NaiveDate> {
+    cell_key
+        .rsplit_once(':')
+        .and_then(|(_, date)| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+}
+
+#[cfg(feature = "hydrate")]
+fn diff_affects_visible_range(
+    diff: &TimesheetRefreshDiff,
+    selected_monday: NaiveDate,
+    num_weeks: usize,
+    today: NaiveDate,
+) -> bool {
+    let (start, end) = visible_range(selected_monday, num_weeks);
+    let mut has_dated_changes = false;
+
+    for entry in &diff.worklogs_upserted {
+        has_dated_changes = true;
+        if entry.date >= start && entry.date <= end {
+            return true;
+        }
+    }
+    for update in &diff.bitbucket_activity_upserted {
+        if let Some(date) = cell_key_date(&update.cell_key) {
+            has_dated_changes = true;
+            if date >= start && date <= end {
+                return true;
+            }
+        }
+    }
+    for cell_key in &diff.bitbucket_cell_keys_removed {
+        if let Some(date) = cell_key_date(cell_key) {
+            has_dated_changes = true;
+            if date >= start && date <= end {
+                return true;
+            }
+        }
+    }
+
+    if has_dated_changes {
+        return false;
+    }
+
+    today_is_visible(selected_monday, num_weeks, today)
+}
+
+#[cfg(feature = "hydrate")]
+fn start_timesheet_refresh_socket(
+    last_data: RwSignal<Option<TimesheetData>>,
+    selected_monday: RwSignal<NaiveDate>,
+    num_weeks: RwSignal<usize>,
+    today: RwSignal<NaiveDate>,
+    i18n: RwSignal<I18n>,
+    refresh_toast: RwSignal<Option<String>>,
+) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
+
+    fn schedule_toast_clear(refresh_toast: RwSignal<Option<String>>) {
+        let clear = Closure::wrap(Box::new(move || {
+            refresh_toast.set(None);
+        }) as Box<dyn FnMut()>);
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                clear.as_ref().unchecked_ref(),
+                4000,
+            );
+            clear.forget();
+        }
+    }
+
+    fn schedule_reconnect(
+        last_data: RwSignal<Option<TimesheetData>>,
+        selected_monday: RwSignal<NaiveDate>,
+        num_weeks: RwSignal<usize>,
+        today: RwSignal<NaiveDate>,
+        i18n: RwSignal<I18n>,
+        refresh_toast: RwSignal<Option<String>>,
+    ) {
+        let reconnect = Closure::wrap(Box::new(move || {
+            start_timesheet_refresh_socket(
+                last_data,
+                selected_monday,
+                num_weeks,
+                today,
+                i18n,
+                refresh_toast,
+            );
+        }) as Box<dyn FnMut()>);
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                reconnect.as_ref().unchecked_ref(),
+                5000,
+            );
+            reconnect.forget();
+        }
+    }
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let protocol = location.protocol().unwrap_or_else(|_| "http:".into());
+    let ws_protocol = if protocol == "https:" { "wss:" } else { "ws:" };
+    let host = location.host().unwrap_or_else(|_| "localhost:8081".into());
+    let url = format!("{}//{}/ws/timesheet", ws_protocol, host);
+    let Ok(ws) = WebSocket::new(&url) else {
+        schedule_reconnect(
+            last_data,
+            selected_monday,
+            num_weeks,
+            today,
+            i18n,
+            refresh_toast,
+        );
+        return;
+    };
+
+    {
+        let onmessage = Closure::<dyn Fn(MessageEvent)>::new(move |event: MessageEvent| {
+            let Some(text) = event.data().as_string() else {
+                return;
+            };
+            let Ok(message) = serde_json::from_str::<TimesheetWsMessage>(&text) else {
+                return;
+            };
+            match message {
+                TimesheetWsMessage::RefreshDiff { diff, .. } => {
+                    if diff.is_empty() {
+                        return;
+                    }
+                    if !diff_affects_visible_range(
+                        &diff,
+                        selected_monday.get_untracked(),
+                        num_weeks.get_untracked(),
+                        today.get_untracked(),
+                    ) {
+                        return;
+                    }
+                    let mut applied = false;
+                    last_data.update(|opt| {
+                        if let Some(ts) = opt.as_mut() {
+                            apply_refresh_diff_to_timesheet(ts, &diff);
+                            applied = true;
+                        }
+                    });
+                    if applied {
+                        refresh_toast.set(Some(i18n.get_untracked().t(keys::LIVE_REFRESH_APPLIED)));
+                        schedule_toast_clear(refresh_toast);
+                    }
+                }
+            }
+        });
+        ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+        onmessage.forget();
+    }
+
+    {
+        let onclose = Closure::<dyn Fn(CloseEvent)>::new(move |_: CloseEvent| {
+            schedule_reconnect(
+                last_data,
+                selected_monday,
+                num_weeks,
+                today,
+                i18n,
+                refresh_toast,
+            );
+        });
+        ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+        onclose.forget();
+    }
+
+    {
+        let onerror = Closure::<dyn Fn(Event)>::new(move |_: Event| {
+            log::warn!("Timesheet WebSocket error");
+        });
+        ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+        onerror.forget();
+    }
+
+    {
+        let onopen = Closure::<dyn Fn(Event)>::new(move |_: Event| {
+            log::info!("Timesheet WebSocket opened");
+        });
+        ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+        onopen.forget();
+    }
+}
+
 #[server(GetTimesheetData, "/api")]
 pub async fn get_timesheet_data(
     start: NaiveDate,
@@ -137,6 +427,7 @@ pub async fn get_timesheet_data(
 
     let cache_key = timesheet_data_cache_key(&creds.account_id, start, end);
 
+    let mut cached_week_chunks = HashMap::<NaiveDate, TimesheetData>::new();
     // Week-cache fast path.
     let mut week_chunks = Vec::<TimesheetData>::new();
     for monday in &requested_mondays {
@@ -146,14 +437,48 @@ pub async fn get_timesheet_data(
             break;
         };
         if let Ok(ts) = serde_json::from_str::<TimesheetData>(&raw) {
+            cached_week_chunks.insert(*monday, ts.clone());
             week_chunks.push(ts);
         } else {
             week_chunks.clear();
             break;
         }
     }
+    let mut bitbucket_cached_mondays = crate::api::cache::get_cached_bitbucket_weeks(&creds.account_id)
+        .weeks
+        .into_iter()
+        .map(|week| week.monday)
+        .collect::<HashSet<_>>();
+    let recovered_bitbucket_cached_mondays = cached_week_chunks
+        .iter()
+        .filter(|(_, chunk)| !chunk.bitbucket_activity.is_empty())
+        .map(|(monday, _)| *monday)
+        .filter(|monday| !bitbucket_cached_mondays.contains(monday))
+        .collect::<Vec<_>>();
+    for monday in &recovered_bitbucket_cached_mondays {
+        bitbucket_cached_mondays.insert(*monday);
+        crate::api::cache::update_cached_bitbucket_week(
+            &creds.account_id,
+            *monday,
+            chrono::Utc::now(),
+        );
+    }
+    let missing_bitbucket_mondays = requested_mondays
+        .iter()
+        .cloned()
+        .filter(|monday| !bitbucket_cached_mondays.contains(monday))
+        .collect::<Vec<_>>();
+
     if week_chunks.len() == requested_mondays.len() && !week_chunks.is_empty() {
         let merged = merge_weekly_timesheets(week_chunks);
+        if !missing_bitbucket_mondays.is_empty() {
+            crate::api::periodic_refresh::queue_bitbucket_week_backfill(
+                creds.account_id.clone(),
+                creds.as_ref().clone(),
+                session.display_name.clone(),
+                missing_bitbucket_mondays.clone(),
+            );
+        }
         let selected_monday = end - chrono::Duration::days(6);
         let num_weeks = (((end - start).num_days() + 1) / 7).max(1) as usize;
         tokio::spawn(crate::api::jira::prefetch_adjacent_weeks(
@@ -169,6 +494,14 @@ pub async fn get_timesheet_data(
     if let Some(cached_json) = crate::api::cache::get(&cache_key) {
         if let Ok(ts) = serde_json::from_str::<TimesheetData>(&cached_json) {
             log::info!("[get_timesheet_data] cache hit for {} .. {}", start, end);
+            if !missing_bitbucket_mondays.is_empty() {
+                crate::api::periodic_refresh::queue_bitbucket_week_backfill(
+                    creds.account_id.clone(),
+                    creds.as_ref().clone(),
+                    session.display_name.clone(),
+                    missing_bitbucket_mondays.clone(),
+                );
+            }
             // Still prefetch neighbours so the next navigation is instant.
             let selected_monday = end - chrono::Duration::days(6);
             let num_weeks = (((end - start).num_days() + 1) / 7).max(1) as usize;
@@ -182,22 +515,7 @@ pub async fn get_timesheet_data(
         }
     }
 
-    // 1. Fetch Jira + Bitbucket activity in parallel and merge in this task.
-    // Bitbucket API only supports "since", so scan once from the oldest requested
-    // Monday for the whole requested window. Jira supports weekly ranges.
-    let oldest_monday = requested_mondays.first().copied().unwrap_or(start);
-    let bitbucket_user_email = session.email.clone();
-    let bitbucket_display_name = session.display_name.clone();
-    let bitbucket_handle = tokio::spawn(async move {
-        fetch_timesheet_activity(
-            &bitbucket_user_email,
-            &bitbucket_display_name,
-            oldest_monday,
-            end,
-        )
-        .await
-    });
-
+    // 1. Fetch Jira work items (per week) and merge.
     let jira_handles = requested_mondays
         .iter()
         .map(|monday| {
@@ -222,91 +540,15 @@ pub async fn get_timesheet_data(
     }
     let jira_items = jira_items_by_key.into_values().collect::<Vec<_>>();
 
-    let bitbucket_res = bitbucket_handle
-        .await
-        .map_err(|e| ServerFnError::new(format!("Bitbucket fetch task failed: {}", e)))?;
-
     let mut all_items = jira_items;
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
-    let mut jira_discovered_item_count = 0usize;
-
-    // 1b. Fetch Bitbucket activity (commits + PR reviewer activity) and add
-    // discovered work-item keys to the visible list.
-    match bitbucket_res {
-        Ok(activity) => {
-            let mut discovered_keys: Vec<String> =
-                activity.discovered_item_summaries.keys().cloned().collect();
-            discovered_keys.sort();
-
-            if !discovered_keys.is_empty() {
-                let known: std::collections::HashSet<String> =
-                    all_items.iter().map(|w| w.key.clone()).collect();
-                let missing: Vec<String> = discovered_keys
-                    .iter()
-                    .filter(|k| !known.contains(k.as_str()))
-                    .cloned()
-                    .collect();
-
-                if !missing.is_empty() {
-                    if let Ok(found) =
-                        crate::api::jira::fetch_work_items_by_keys(&creds, &missing).await
-                    {
-                        jira_discovered_item_count = found.len();
-                        all_items.extend(found);
-                    }
-                }
-
-                let mut known_after_fetch: std::collections::HashSet<String> =
-                    all_items.iter().map(|w| w.key.clone()).collect();
-                for key in discovered_keys {
-                    if known_after_fetch.contains(&key) {
-                        continue;
-                    }
-                    let summary = activity
-                        .discovered_item_summaries
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| key.clone());
-                    all_items.push(WorkItem {
-                        key: key.clone(),
-                        summary,
-                        icon_url: String::new(),
-                        issue_type: "Bitbucket".to_string(),
-                    });
-                    known_after_fetch.insert(key);
-                }
-            }
-
-            for (cell_key, msgs) in activity.commit_messages_by_cell {
-                let entry = bitbucket_activity.entry(cell_key).or_default();
-                entry.commit_messages = msgs;
-            }
-            for (cell_key, links) in activity.commit_links_by_cell {
-                let entry = bitbucket_activity.entry(cell_key).or_default();
-                let mut seen = std::collections::HashSet::new();
-                let mut merged = entry.commit_links.clone();
-                merged.extend(links);
-                merged.retain(|link| seen.insert(link.clone()));
-                entry.commit_links = merged;
-            }
-            for cell_key in activity.pr_review_cells {
-                let entry = bitbucket_activity.entry(cell_key).or_default();
-                entry.has_pr_review = true;
-            }
-            for (cell_key, links) in activity.pr_links_by_cell {
-                let entry = bitbucket_activity.entry(cell_key).or_default();
-                let mut merged = entry.pr_links.clone();
-                merged.extend(links);
-                merged.sort();
-                merged.dedup();
-                entry.pr_links = merged;
-            }
-        }
-        Err(e) => {
-            log::warn!(
-                "[get_timesheet_data] fetch_timesheet_activity failed: {}",
-                e
-            );
+    // 1b. Use already-cached Bitbucket week slices for immediate response.
+    for monday in &requested_mondays {
+        let Some(chunk) = cached_week_chunks.get(monday) else {
+            continue;
+        };
+        for (cell_key, activity) in &chunk.bitbucket_activity {
+            bitbucket_activity.insert(cell_key.clone(), activity.clone());
         }
     }
 
@@ -323,11 +565,11 @@ pub async fn get_timesheet_data(
         }
     }
     log::info!(
-        "[get_timesheet_data] jira scan done: range={}..{}, work_items={}, discovered_items={}, worklog_issues={}, worklog_entries={}, elapsed_ms={}",
+        "[get_timesheet_data] jira scan done: range={}..{}, work_items={}, bitbucket_cells_cached={}, worklog_issues={}, worklog_entries={}, elapsed_ms={}",
         start,
         end,
         all_items.len(),
-        jira_discovered_item_count,
+        bitbucket_activity.len(),
         ytd_hours.len(),
         all_worklogs.len(),
         jira_started_at.elapsed().as_millis()
@@ -367,7 +609,23 @@ pub async fn get_timesheet_data(
         if let Ok(raw) = serde_json::to_string(&week_ts) {
             crate::api::cache::put(week_key, raw);
             crate::api::cache::update_cached_week(&creds.account_id, monday, chrono::Utc::now());
+            if bitbucket_cached_mondays.contains(&monday) {
+                crate::api::cache::update_cached_bitbucket_week(
+                    &creds.account_id,
+                    monday,
+                    chrono::Utc::now(),
+                );
+            }
         }
+    }
+
+    if !missing_bitbucket_mondays.is_empty() {
+        crate::api::periodic_refresh::queue_bitbucket_week_backfill(
+            creds.account_id.clone(),
+            creds.as_ref().clone(),
+            session.display_name.clone(),
+            missing_bitbucket_mondays,
+        );
     }
 
     // Prefetch adjacent weeks in the background so the next navigation
@@ -395,8 +653,25 @@ pub async fn clear_cache() -> Result<(), ServerFnError> {
     Ok(())
 }
 
-/// Fetch fresh worklogs for a single issue after a save/update/delete.
-/// Invalidates only this issue's cache entry so the next full load is still fast.
+/// Trigger an immediate periodic refresh for the current user, bypassing the
+/// normal timer. Returns immediately; any diffs are pushed via WebSocket.
+#[server(ForcePeriodicRefresh, "/api")]
+pub async fn force_periodic_refresh() -> Result<(), ServerFnError> {
+    let (_, session) = crate::auth::current_user_session().await?;
+    log::info!(
+        "[force_periodic_refresh] triggered by user {}",
+        session.account_id
+    );
+    #[cfg(feature = "ssr")]
+    {
+        let account_id = session.account_id.clone();
+        tokio::spawn(async move {
+            crate::api::periodic_refresh::force_refresh_account(account_id).await;
+        });
+    }
+    Ok(())
+}
+
 #[server(GetIssueWorklogs, "/api")]
 pub async fn get_issue_worklogs(
     issue_key: String,
@@ -843,6 +1118,17 @@ pub fn TimesheetView() -> impl IntoView {
     let last_data = RwSignal::new(Option::<TimesheetData>::None);
     let is_loading = RwSignal::new(true);
     let error_msg = RwSignal::new(Option::<String>::None);
+    let refresh_toast = RwSignal::new(Option::<String>::None);
+
+    #[cfg(feature = "hydrate")]
+    start_timesheet_refresh_socket(
+        last_data,
+        selected_monday,
+        num_weeks,
+        today,
+        i18n,
+        refresh_toast,
+    );
 
     // ── Work-item search state ──
     let search_query = RwSignal::new(String::new());
@@ -1146,6 +1432,18 @@ pub fn TimesheetView() -> impl IntoView {
         }
     };
 
+    let on_force_periodic_refresh = move |_| {
+        if !conn.is_available() {
+            return;
+        }
+        #[cfg(feature = "hydrate")]
+        leptos::task::spawn_local(async move {
+            conn.request_started();
+            let _ = force_periodic_refresh().await;
+            conn.request_finished();
+        });
+    };
+
     let on_open_settings = {
         let flush_mgr = flush_mgr.clone();
         move |_| {
@@ -1427,9 +1725,6 @@ pub fn TimesheetView() -> impl IntoView {
                                                 data-cell-key={cell_key}
                                                 data-cell-date={cell_date_str}
                                                 on:click=move |_| {
-                                                    if !conn.is_available() {
-                                                        return;
-                                                    }
                                                     // Don't open a duplicate popup for the same cell.
                                                     let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == ck2 && p.date == cell_date));
                                                     if already_open {
@@ -1638,9 +1933,6 @@ pub fn TimesheetView() -> impl IntoView {
                                             data-cell-date={we_sat_str}
 
                                             on:click=move |_| {
-                                                if !conn.is_available() {
-                                                    return;
-                                                }
                                                 let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == we_key2 && p.date == sat));
                                                 if already_open {
                                                     return;
@@ -1861,6 +2153,14 @@ pub fn TimesheetView() -> impl IntoView {
                         <span class="icon-report">{"📊"}</span>
                     </button>
                     <button
+                        class="nav-btn nav-force-refresh"
+                        on:click=on_force_periodic_refresh
+                        title=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
+                        aria-label=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
+>
+                        <span class="icon-force-refresh">{"⟳"}</span>
+                    </button>
+                    <button
                         class="nav-btn nav-refresh"
                         on:click=on_refresh
                         disabled=move || is_refreshing.get()
@@ -1898,6 +2198,10 @@ pub fn TimesheetView() -> impl IntoView {
                 </div>
             </div>
 
+
+            {move || refresh_toast.get().map(|msg| view! {
+                <div class="refresh-toast" role="status" aria-live="polite">{msg}</div>
+            })}
 
             // ── Search dropdown rendered outside the table so it is never
             // clipped by overflow:hidden / sticky headers / stacking contexts.

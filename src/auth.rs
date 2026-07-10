@@ -32,7 +32,7 @@ const ATLASSIAN_RESOURCES_URL: &str = "https://api.atlassian.com/oauth/token/acc
 
 // ─── App config directory ─────────────────────────────────────────────────────
 
-fn app_config_dir() -> std::path::PathBuf {
+pub fn app_config_dir() -> std::path::PathBuf {
     let dir = if let Some(dirs) = directories::ProjectDirs::from("com", "objectiflune", "timesheet")
     {
         dirs.config_dir().to_path_buf()
@@ -469,6 +469,31 @@ pub fn is_authenticated(headers: &HeaderMap) -> bool {
         .get(&session_id)
         .map(|e| now_unix < e.expires_unix)
         .unwrap_or(false)
+}
+
+#[derive(Clone, Debug)]
+pub struct AuthenticatedSessionSnapshot {
+    pub session_id: String,
+    pub user: UserSession,
+}
+
+/// Resolve the authenticated in-memory session for non-Leptos handlers such as
+/// WebSocket upgrades. Does not refresh OAuth tokens or extend the sliding TTL.
+pub fn authenticated_session_from_headers(
+    headers: &HeaderMap,
+) -> Option<AuthenticatedSessionSnapshot> {
+    let raw_token = extract_raw_cookie(headers)?;
+    let session_id = verify_session_token(&raw_token)?;
+    let now_unix = chrono::Utc::now().timestamp();
+    let sessions = SESSIONS.lock().ok()?;
+    let entry = sessions.get(&session_id)?;
+    if now_unix >= entry.expires_unix {
+        return None;
+    }
+    Some(AuthenticatedSessionSnapshot {
+        session_id,
+        user: entry.user.clone(),
+    })
 }
 
 /// Validate a replay-protection nonce for a state-changing request.
