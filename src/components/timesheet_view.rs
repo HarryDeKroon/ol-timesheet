@@ -445,11 +445,25 @@ pub async fn get_timesheet_data(
             break;
         }
     }
-    let bitbucket_cached_mondays = crate::api::cache::get_cached_bitbucket_weeks(&creds.account_id)
+    let mut bitbucket_cached_mondays = crate::api::cache::get_cached_bitbucket_weeks(&creds.account_id)
         .weeks
         .into_iter()
         .map(|week| week.monday)
         .collect::<HashSet<_>>();
+    let recovered_bitbucket_cached_mondays = cached_week_chunks
+        .iter()
+        .filter(|(_, chunk)| !chunk.bitbucket_activity.is_empty())
+        .map(|(monday, _)| *monday)
+        .filter(|monday| !bitbucket_cached_mondays.contains(monday))
+        .collect::<Vec<_>>();
+    for monday in &recovered_bitbucket_cached_mondays {
+        bitbucket_cached_mondays.insert(*monday);
+        crate::api::cache::update_cached_bitbucket_week(
+            &creds.account_id,
+            *monday,
+            chrono::Utc::now(),
+        );
+    }
     let missing_bitbucket_mondays = requested_mondays
         .iter()
         .cloned()
@@ -531,9 +545,6 @@ pub async fn get_timesheet_data(
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
     // 1b. Use already-cached Bitbucket week slices for immediate response.
     for monday in &requested_mondays {
-        if !bitbucket_cached_mondays.contains(monday) {
-            continue;
-        }
         let Some(chunk) = cached_week_chunks.get(monday) else {
             continue;
         };
