@@ -274,7 +274,7 @@ fn build_refresh_diff(old: &RefreshSnapshot, new: &RefreshSnapshot) -> Timesheet
                 if old
                     .ytd_hours
                     .get(&key)
-                    .map(|value| (value - new_value).abs() < f64::EPSILON)
+                    .map(|value| (value - new_value).abs() < 1e-6)
                     != Some(true) =>
             {
                 diff.ytd_hours_upserted.push(YtdHoursUpdate {
