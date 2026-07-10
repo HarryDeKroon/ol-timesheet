@@ -720,7 +720,7 @@ pub fn ReportOverlay(
                             let show_bar_totals = period.get() == ReportPeriod::Week;
                             view! {
                                 <div class={if show_bar_totals { "report-bar-section" } else { "report-bar-section report-bar-section-no-totals" }}>
-                                    <svg class="report-stacked-chart" viewBox="0 0 900 250" preserveAspectRatio="none" role="img" aria-label="Stacked report chart">
+                                    <svg class="report-stacked-chart" viewBox="0 0 900 250" preserveAspectRatio="none" role="img" aria-label=move || i18n.get().t(keys::USER_REPORT)>
                                         {(0..=((y_max as i32) / axis_step)).map(|i| {
                                             let y_units = i * axis_step;
                                             let y = margin_top + plot_height - (y_units as f64 / y_max * plot_height);
