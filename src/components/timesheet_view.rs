@@ -1434,9 +1434,14 @@ pub fn TimesheetView() -> impl IntoView {
     };
 
     let on_force_periodic_refresh = move |_| {
+        if !conn.is_available() {
+            return;
+        }
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
+            conn.request_started();
             let _ = force_periodic_refresh().await;
+            conn.request_finished();
         });
     };
 
@@ -2152,8 +2157,8 @@ pub fn TimesheetView() -> impl IntoView {
                         class="nav-btn nav-force-refresh"
                         on:click=on_force_periodic_refresh
                         title=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
+                        aria-label=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
                     >
-                        <span class="icon-force-refresh">{"⚡"}</span>
                     </button>
                     <button
                         class="nav-btn nav-refresh"

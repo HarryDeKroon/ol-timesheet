@@ -1,12 +1,12 @@
 # Periodic refresh
 
-Goal: User's should always have up-to-date information available.
+Goal: Users should always have up-to-date information available.
 
 ## Interval
 
-When there are web socket connections between the server and one or more browser sessions, the interval is 23 minutes.
-When there are no web sockets, the interval prolonges to be each 127 minutes.
-These intervals are in the server configuration, but default to these values
+When there are WebSocket connections between the server and one or more browser sessions, the interval is 23 minutes.
+When there are no WebSocket connections, the interval prolongs to 127 minutes.
+These intervals are in the server configuration, but default to these values.
 
 ## Server-side check
 
@@ -16,4 +16,4 @@ The Jira/Bitbucket fetch goes per active user (as determined from the web socket
 
 ## Client side update
 
-Upon receipt of the diff list from the server on the web socket, check if the today column is visible. if so, update the timesheet with the received changes. Any new work items are added to the top of the timesheet. Show a toast to signal when new information was processed.
+Upon receipt of the diff list from the server on the web socket, check if the today column is visible. If so, update the timesheet with the received changes. Any new work items are added to the top of the timesheet. Show a toast to signal when new information was processed.
