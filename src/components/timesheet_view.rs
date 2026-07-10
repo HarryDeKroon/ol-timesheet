@@ -2149,8 +2149,8 @@ pub fn TimesheetView() -> impl IntoView {
                         class="nav-btn nav-report"
                         on:click=on_open_report
                         title=move || i18n.get().t(keys::USER_REPORT)
+                        aria-label=move || i18n.get().t(keys::USER_REPORT)
                     >
-                        <span class="icon-report">{"📊"}</span>
                     </button>
                     <button
                         class="nav-btn nav-force-refresh"
