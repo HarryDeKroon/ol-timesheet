@@ -225,13 +225,13 @@ pub fn sort_work_items_for_timesheet(
 ) {
     let keys_with_activity = worklogs
         .iter()
-        .map(|entry| entry.issue_key.clone())
+        .map(|entry| entry.issue_key.as_str())
         .chain(
             bitbucket_activity
                 .keys()
-                .filter_map(|cell_key| cell_key.split_once(':').map(|(key, _)| key.to_string())),
+                .filter_map(|cell_key| cell_key.split_once(':').map(|(key, _)| key)),
         )
-        .collect::<HashSet<_>>();
+        .collect::<HashSet<&str>>();
 
     work_items.sort_by(|a, b| {
         let a_has_activity = keys_with_activity.contains(a.key.as_str());
