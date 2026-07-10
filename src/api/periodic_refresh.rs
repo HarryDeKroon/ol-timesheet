@@ -215,6 +215,12 @@ fn apply_diff_to_timesheet_data(ts: &mut TimesheetData, diff: &TimesheetRefreshD
             ts.ytd_hours.remove(issue_key);
         }
     }
+
+    crate::model::sort_work_items_for_timesheet(
+        &mut ts.work_items,
+        &ts.worklogs,
+        &ts.bitbucket_activity,
+    );
 }
 
 fn update_cached_timesheet_entries(
