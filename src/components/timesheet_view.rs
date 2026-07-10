@@ -2157,7 +2157,8 @@ pub fn TimesheetView() -> impl IntoView {
                         on:click=on_force_periodic_refresh
                         title=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
                         aria-label=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
-                    >
+>
+                        <span class="icon-force-refresh">{"⟳"}</span>
                     </button>
                     <button
                         class="nav-btn nav-refresh"
