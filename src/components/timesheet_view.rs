@@ -40,7 +40,6 @@ fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
 
 #[cfg(feature = "ssr")]
 fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetData {
-    use std::collections::HashSet;
     let sunday = monday + Duration::days(6);
     let date_in_week = |d: NaiveDate| d >= monday && d <= sunday;
 
