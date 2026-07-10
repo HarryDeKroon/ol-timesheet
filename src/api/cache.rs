@@ -216,12 +216,7 @@ pub fn prune_old_week_entries(retention_days: i64) {
                 if let Ok(raw) = serde_json::to_string(&bb_index) {
                     cache.insert(
                         bb_key,
-                        CacheEntry {
-                            data: raw,
-                            expires_at: Instant::now() + DEFAULT_TTL,
-                            created_at_utc: Utc::now(),
-                            ttl_secs: DEFAULT_TTL.as_secs(),
-                        },
+                        cache_entry(raw, DEFAULT_TTL.as_secs()),
                     );
                 }
             }
