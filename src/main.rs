@@ -1,6 +1,7 @@
 #![recursion_limit = "512"]
 
 use leptos::prelude::*;
+use timesheet_lib as timesheet;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "ssr")] {
@@ -17,6 +18,7 @@ cfg_if::cfg_if! {
                         <title>"Timesheet"</title>
                         <link rel="icon" type="image/x-icon" href="/favicon.ico" />
                         <link rel="stylesheet" href="/pkg/timesheet.css" />
+                        <link rel="stylesheet" href="/report.css" />
                         <HydrationScripts options=options.clone() />
                     </head>
                     <body>
@@ -48,10 +50,13 @@ cfg_if::cfg_if! {
             headers: axum::http::HeaderMap,
         ) -> axum::response::Response {
             use axum::response::IntoResponse;
-            if !timesheet::auth::is_authenticated(&headers) {
+            let Some(snapshot) = timesheet::auth::authenticated_session_from_headers(&headers) else {
                 return axum::http::StatusCode::UNAUTHORIZED.into_response();
-            }
-            ws.on_upgrade(handle_heartbeat_socket).into_response()
+            };
+            ws.on_upgrade(move |socket| async move {
+                timesheet::api::periodic_refresh::handle_timesheet_socket(socket, snapshot).await;
+            })
+            .into_response()
         }
 
         async fn admin_cache_handler(
@@ -69,6 +74,36 @@ cfg_if::cfg_if! {
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     axum::Json(serde_json::json!({ "error": e })),
                 ),
+            }
+        }
+
+        async fn report_handler(
+            headers: axum::http::HeaderMap,
+            axum::extract::Path(year): axum::extract::Path<i32>,
+        ) -> impl axum::response::IntoResponse {
+            log::info!("[report] request received year={}", year);
+            let Some(snapshot) = timesheet::auth::authenticated_session_from_headers(&headers) else {
+                log::info!("[report] response sent year={} status=401", year);
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": "Not authenticated" })),
+                );
+            };
+            let session = snapshot.user;
+            let creds = session.jira_credentials();
+            let settings = session.preferences;
+            match timesheet::api::report::build_report_for_year(&creds, &settings, year).await {
+                Ok(report) => {
+                    log::info!("[report] response sent year={} status=200", year);
+                    (axum::http::StatusCode::OK, axum::Json(serde_json::json!(report)))
+                }
+                Err(err) => {
+                    log::info!("[report] response sent year={} status=400", year);
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(serde_json::json!({ "error": err })),
+                    )
+                }
             }
         }
 
@@ -167,9 +202,14 @@ cfg_if::cfg_if! {
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(1);
+            let today = chrono::Local::now().date_naive();
+            timesheet::api::report::set_report_boot_date(today);
             let active_users = timesheet::auth::active_jira_credentials().await;
             if !active_users.is_empty() {
-                let today = chrono::Local::now().date_naive();
+                let report_warm_users = active_users.clone();
+                tokio::spawn(async move {
+                    timesheet::api::report::prewarm_current_year_reports(report_warm_users).await;
+                });
                 let anchor_monday =
                     today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
                 log::info!(
@@ -210,6 +250,8 @@ cfg_if::cfg_if! {
                     timesheet::api::cache::prune_old_week_entries(cache_retention_days);
                 }
             });
+            tokio::spawn(timesheet::api::periodic_refresh::run_periodic_refresh_loop());
+            tokio::spawn(timesheet::api::webhook::register_on_startup());
 
             let conf = match leptos::config::get_configuration(None) {
                 Ok(conf) => conf,
@@ -226,7 +268,12 @@ cfg_if::cfg_if! {
             let app: Router = Router::new()
                 .route("/ws/heartbeat", get(heartbeat_ws_handler))
                 .route("/ws/timesheet", get(timesheet_ws_handler))
+                .route(
+                    "/webhooks/bitbucket/{token}",
+                    axum::routing::post(timesheet::api::webhook::bitbucket_webhook_handler),
+                )
                 .route("/admin/cache", get(admin_cache_handler))
+                .route("/report/{year}", get(report_handler))
                 .route("/auth/login", get(timesheet::auth::login_handler))
                 .route("/auth/callback", get(timesheet::auth::callback_handler))
                 .route("/auth/logout", get(timesheet::auth::logout_handler))

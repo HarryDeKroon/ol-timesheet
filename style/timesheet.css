@@ -267,6 +267,10 @@ main {
 	white-space: nowrap;
 }
 
+.nav-report {
+	white-space: nowrap;
+}
+
 .nav-refresh:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
@@ -470,6 +474,82 @@ main {
 .cell-value {
 	display: block;
 	min-height: 1.2em;
+}
+
+.cell-value-with-commit-overlay-corner {
+	position: relative;
+	display: inline-block;
+	padding-right: 0.45rem;
+}
+
+.cell-value-with-commit-overlay-center {
+	position: relative;
+	display: block;
+	min-width: 1rem;
+	min-height: 1.2em;
+}
+
+.cell-commit-overlay-mark {
+	font-weight: 700;
+	text-align: center;
+	opacity: 0.6;
+	pointer-events: none;
+}
+
+.cell-commit-overlay-mark--corner {
+	position: absolute;
+	right: -0.1rem;
+	top: -0.42rem;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 0.66rem;
+	height: 0.66rem;
+	padding: 0 0.09rem;
+	border-radius: 999px;
+	border: 1px solid #fff;
+	background: #0f766e;
+	color: #fff;
+	font-size: 0.5rem;
+	line-height: 0.61rem;
+}
+
+.cell-commit-overlay-mark--center {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 1.16rem;
+	height: 1.16rem;
+	padding: 0 0.15rem;
+	border-radius: 999px;
+	border: 1px solid #fff;
+	background: #0f766e;
+	color: #fff;
+	font-size: 0.88rem;
+	line-height: 0.99rem;
+}
+
+.cell-pr-overlay-mark--center {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 1.16rem;
+	height: 1.16rem;
+	padding: 0 0.15rem;
+	border-radius: 999px;
+	border: 1px solid #fff;
+	background: #7c3aed;
+	color: #fff;
+	font-size: 0.88rem;
+	line-height: 0.99rem;
 }
 
 .cell-value:hover {
@@ -1235,4 +1315,16 @@ a {
 	   this class ensures the element participates in fixed positioning
 	   consistently. */
 	position: fixed;
+}
+
+.refresh-toast {
+	position: fixed;
+	right: 1.5rem;
+	bottom: 1.5rem;
+	z-index: 5000;
+	padding: 0.75rem 1rem;
+	border-radius: 6px;
+	background: rgba(32, 90, 50, 0.95);
+	color: #fff;
+	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
 }

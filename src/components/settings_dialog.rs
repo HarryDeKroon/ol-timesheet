@@ -3,6 +3,18 @@ use crate::i18n::{I18n, keys};
 use crate::model::Settings;
 use leptos::prelude::*;
 
+fn parse_list_input(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c == ',' || c == ';' || c == '\n' || c == '\r')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn join_list_input(items: &[String]) -> String {
+    items.join(", ")
+}
+
 #[server(GetSettings, "/api")]
 pub async fn get_settings() -> Result<Settings, ServerFnError> {
     let (session_id, session) = crate::auth::current_user_session().await?;
@@ -27,6 +39,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
 
     let ti = i18n.get_untracked();
     let title_prefs = ti.t(keys::PREFERENCES);
+    let title_reporting = ti.t(keys::REPORTING);
     let lbl_hpw = ti.t(keys::HOURS_PER_WEEK);
     let lbl_hpd = ti.t(keys::HOURS_PER_DAY);
 
@@ -34,12 +47,22 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
 
     let hours_per_week = RwSignal::new("40".to_string());
     let hours_per_day = RwSignal::new("8".to_string());
+    let non_billable_project_prefixes = RwSignal::new(String::new());
+    let meeting_keys = RwSignal::new(String::new());
+    let local_holiday_keys = RwSignal::new(String::new());
+    let planned_time_off_keys = RwSignal::new(String::new());
+    let study_keys = RwSignal::new(String::new());
     let error_msg = RwSignal::new(Option::<String>::None);
 
     let save_action = Action::new(move |_: &()| {
         let settings = Settings {
             hours_per_week: hours_per_week.get().parse().unwrap_or(40.0),
             hours_per_day: hours_per_day.get().parse().unwrap_or(8.0),
+            non_billable_project_prefixes: parse_list_input(&non_billable_project_prefixes.get()),
+            meeting_keys: parse_list_input(&meeting_keys.get()),
+            local_holiday_keys: parse_list_input(&local_holiday_keys.get()),
+            planned_time_off_keys: parse_list_input(&planned_time_off_keys.get()),
+            study_keys: parse_list_input(&study_keys.get()),
         };
         async move { save_settings(settings).await }
     });
@@ -58,6 +81,12 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
             if let Ok(s) = result {
                 hours_per_week.set(s.hours_per_week.to_string());
                 hours_per_day.set(s.hours_per_day.to_string());
+                non_billable_project_prefixes
+                    .set(join_list_input(&s.non_billable_project_prefixes));
+                meeting_keys.set(join_list_input(&s.meeting_keys));
+                local_holiday_keys.set(join_list_input(&s.local_holiday_keys));
+                planned_time_off_keys.set(join_list_input(&s.planned_time_off_keys));
+                study_keys.set(join_list_input(&s.study_keys));
             }
         });
     });
@@ -87,6 +116,48 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                             max="24"
                             prop:value={move || hours_per_day.get()}
                             on:input=move |ev| hours_per_day.set(event_target_value(&ev))
+                            class="settings-input"
+                        />
+                    </SettingsGroup>
+                    <SettingsGroup title=title_reporting.clone()>
+                        <label>{move || i18n.get().t(keys::NON_BILLABLE_PROJECTS)}":"</label>
+                        <input
+                            type="text"
+                            prop:value={move || non_billable_project_prefixes.get()}
+                            placeholder={move || i18n.get().t(keys::LIST_INPUT_HINT)}
+                            on:input=move |ev| non_billable_project_prefixes.set(event_target_value(&ev))
+                            class="settings-input"
+                        />
+                        <label>{move || i18n.get().t(keys::MEETINGS)}":"</label>
+                        <input
+                            type="text"
+                            prop:value={move || meeting_keys.get()}
+                            placeholder={move || i18n.get().t(keys::LIST_INPUT_HINT)}
+                            on:input=move |ev| meeting_keys.set(event_target_value(&ev))
+                            class="settings-input"
+                        />
+                        <label>{move || i18n.get().t(keys::LOCAL_HOLIDAYS)}":"</label>
+                        <input
+                            type="text"
+                            prop:value={move || local_holiday_keys.get()}
+                            placeholder={move || i18n.get().t(keys::LIST_INPUT_HINT)}
+                            on:input=move |ev| local_holiday_keys.set(event_target_value(&ev))
+                            class="settings-input"
+                        />
+                        <label>{move || i18n.get().t(keys::PLANNED_TIME_OFF)}":"</label>
+                        <input
+                            type="text"
+                            prop:value={move || planned_time_off_keys.get()}
+                            placeholder={move || i18n.get().t(keys::LIST_INPUT_HINT)}
+                            on:input=move |ev| planned_time_off_keys.set(event_target_value(&ev))
+                            class="settings-input"
+                        />
+                        <label>{move || i18n.get().t(keys::STUDY)}":"</label>
+                        <input
+                            type="text"
+                            prop:value={move || study_keys.get()}
+                            placeholder={move || i18n.get().t(keys::LIST_INPUT_HINT)}
+                            on:input=move |ev| study_keys.set(event_target_value(&ev))
                             class="settings-input"
                         />
                     </SettingsGroup>
