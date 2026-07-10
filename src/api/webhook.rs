@@ -167,8 +167,7 @@ fn parse_repo_full_name(body: &[u8]) -> Option<String> {
 
 /// Axum handler for `POST /webhooks/bitbucket/{token}`.
 ///
-/// Responds quickly and never exposes whether the token/signature was the
-/// failing check (404 for bad token, 401 for bad signature, 200 otherwise).
+/// Responds quickly: returns 404 for a bad token, 401 for a bad signature, 200 otherwise.
 pub async fn bitbucket_webhook_handler(
     Path(token): Path<String>,
     headers: HeaderMap,
