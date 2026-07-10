@@ -123,7 +123,7 @@ fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
     }
 
     let mut work_items = by_key.into_values().collect::<Vec<_>>();
-    work_items.sort_by(|a, b| a.key.cmp(&b.key));
+    crate::model::sort_work_items_for_timesheet(&mut work_items, &worklogs, &bitbucket_activity);
 
     TimesheetData {
         work_items,
@@ -204,6 +204,12 @@ fn apply_refresh_diff_to_timesheet(ts: &mut TimesheetData, diff: &TimesheetRefre
             ts.ytd_hours.remove(issue_key);
         }
     }
+
+    crate::model::sort_work_items_for_timesheet(
+        &mut ts.work_items,
+        &ts.worklogs,
+        &ts.bitbucket_activity,
+    );
 }
 
 #[cfg(feature = "hydrate")]
@@ -575,18 +581,7 @@ pub async fn get_timesheet_data(
         jira_started_at.elapsed().as_millis()
     );
 
-    // Sort work items by key only (natural order).
-    all_items.sort_by(|a, b| {
-        fn parse_jira_key(key: &str) -> (&str, u64) {
-            match key.rsplit_once('-') {
-                Some((prefix, num)) => (prefix, num.parse().unwrap_or(0)),
-                None => (key, 0),
-            }
-        }
-        let (ap, an) = parse_jira_key(&a.key);
-        let (bp, bn) = parse_jira_key(&b.key);
-        ap.cmp(bp).then_with(|| an.cmp(&bn))
-    });
+    crate::model::sort_work_items_for_timesheet(&mut all_items, &all_worklogs, &bitbucket_activity);
 
     let ts = TimesheetData {
         work_items: all_items,
@@ -2151,6 +2146,13 @@ pub fn TimesheetView() -> impl IntoView {
                         title=move || i18n.get().t(keys::USER_REPORT)
                         aria-label=move || i18n.get().t(keys::USER_REPORT)
                     >
+                        <span class="icon-report" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" focusable="false">
+                                <rect class="report-bar report-bar-left" x="4" y="10" width="4" height="10" rx="1"></rect>
+                                <rect class="report-bar report-bar-middle" x="10" y="6" width="4" height="14" rx="1"></rect>
+                                <rect class="report-bar report-bar-right" x="16" y="12" width="4" height="8" rx="1"></rect>
+                            </svg>
+                        </span>
                     </button>
                     <button
                         class="nav-btn nav-force-refresh"

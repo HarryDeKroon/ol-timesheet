@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -202,6 +203,43 @@ impl TimesheetData {
             .map(|i| self.cell_hours(key, monday + chrono::Duration::days(i)))
             .sum()
     }
+}
+
+fn parse_jira_issue_key(key: &str) -> (&str, u64) {
+    match key.rsplit_once('-') {
+        Some((prefix, num)) => (prefix, num.parse().unwrap_or(0)),
+        None => (key, 0),
+    }
+}
+
+pub fn compare_jira_issue_keys(a: &str, b: &str) -> Ordering {
+    let (ap, an) = parse_jira_issue_key(a);
+    let (bp, bn) = parse_jira_issue_key(b);
+    ap.cmp(bp).then_with(|| an.cmp(&bn))
+}
+
+pub fn sort_work_items_for_timesheet(
+    work_items: &mut [WorkItem],
+    worklogs: &[WorklogEntry],
+    bitbucket_activity: &HashMap<String, CellActivity>,
+) {
+    let keys_with_activity = worklogs
+        .iter()
+        .map(|entry| entry.issue_key.as_str())
+        .chain(
+            bitbucket_activity
+                .keys()
+                .filter_map(|cell_key| cell_key.split_once(':').map(|(key, _)| key)),
+        )
+        .collect::<HashSet<&str>>();
+
+    work_items.sort_by(|a, b| {
+        let a_has_activity = keys_with_activity.contains(a.key.as_str());
+        let b_has_activity = keys_with_activity.contains(b.key.as_str());
+        b_has_activity
+            .cmp(&a_has_activity)
+            .then_with(|| compare_jira_issue_keys(&a.key, &b.key))
+    });
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {

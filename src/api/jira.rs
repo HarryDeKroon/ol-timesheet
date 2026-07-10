@@ -665,7 +665,7 @@ fn slice_timesheet_week(
     source: &crate::model::TimesheetData,
     monday: NaiveDate,
 ) -> crate::model::TimesheetData {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     let sunday = monday + chrono::Duration::days(6);
     let in_week = |d: NaiveDate| d >= monday && d <= sunday;
 
@@ -675,36 +675,10 @@ fn slice_timesheet_week(
         .filter(|w| in_week(w.date))
         .cloned()
         .collect::<Vec<_>>();
-    let keys_with_logs = worklogs
-        .iter()
-        .map(|w| w.issue_key.clone())
-        .collect::<HashSet<_>>();
-    let keys_with_activity = source
-        .bitbucket_activity
-        .keys()
-        .filter_map(|k| k.rsplit_once(':'))
-        .filter_map(|(issue_key, date)| {
-            NaiveDate::parse_from_str(date, "%Y-%m-%d")
-                .ok()
-                .filter(|d| in_week(*d))
-                .map(|_| issue_key.to_string())
-        })
-        .collect::<HashSet<_>>();
-    let visible_keys = keys_with_logs
-        .union(&keys_with_activity)
-        .cloned()
-        .collect::<HashSet<_>>();
-
-    let work_items = source
-        .work_items
-        .iter()
-        .filter(|i| visible_keys.contains(&i.key))
-        .cloned()
-        .collect::<Vec<_>>();
+    let work_items = source.work_items.clone();
     let ytd_hours = source
         .ytd_hours
         .iter()
-        .filter(|(k, _)| visible_keys.contains(*k))
         .map(|(k, v)| (k.clone(), *v))
         .collect::<HashMap<_, _>>();
     let bitbucket_activity = source
@@ -1414,18 +1388,8 @@ async fn prefetch_range(
         }
     }
 
-    // 3. Assemble and cache the TimesheetData — sort by key only
-    all_items.sort_by(|a, b| {
-        fn parse_jira_key(key: &str) -> (&str, u64) {
-            match key.rsplit_once('-') {
-                Some((prefix, num)) => (prefix, num.parse().unwrap_or(0)),
-                None => (key, 0),
-            }
-        }
-        let (ap, an) = parse_jira_key(&a.key);
-        let (bp, bn) = parse_jira_key(&b.key);
-        ap.cmp(bp).then_with(|| an.cmp(&bn))
-    });
+    // 3. Assemble and cache the TimesheetData.
+    crate::model::sort_work_items_for_timesheet(&mut all_items, &all_worklogs, &bitbucket_activity);
 
     let prefs = crate::auth::load_user_prefs(&creds.account_id);
     let ts = crate::model::TimesheetData {
