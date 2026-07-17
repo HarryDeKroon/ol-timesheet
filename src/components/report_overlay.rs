@@ -2,7 +2,11 @@ use crate::i18n::{I18n, keys};
 use crate::model::{NonBillableMinutes, ReportData};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use leptos::prelude::*;
+#[cfg(feature = "hydrate")]
+use leptos::web_sys;
 use std::collections::HashMap;
+#[cfg(feature = "hydrate")]
+use wasm_bindgen::JsCast;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReportPeriod {
@@ -289,6 +293,7 @@ pub fn ReportOverlay(
     hours_per_day: f64,
     hours_per_week: f64,
     on_close: Callback<()>,
+    _on_open_settings: Option<Callback<()>>,
 ) -> impl IntoView {
     let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| RwSignal::new(I18n::default()));
     let today = Local::now().date_naive();
@@ -649,6 +654,82 @@ pub fn ReportOverlay(
             selected_year.update(|y| *y += 1);
         }
     };
+
+    #[cfg(feature = "hydrate")]
+    {
+        let on_close = on_close.clone();
+        let on_open_settings = _on_open_settings.clone();
+        let period = period.clone();
+        let selected_month = selected_month.clone();
+        let selected_year = selected_year.clone();
+        let report_keydown_cb = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
+            move |ev: web_sys::KeyboardEvent| {
+                if !ev.alt_key() || ev.ctrl_key() || ev.meta_key() {
+                    return;
+                }
+                match ev.key().to_ascii_lowercase().as_str() {
+                    "p" => {
+                        ev.prevent_default();
+                        if period.get_untracked() == ReportPeriod::Week {
+                            selected_month.update(|m| *m = previous_month(*m));
+                        } else {
+                            selected_year.update(|y| *y -= 1);
+                        }
+                    }
+                    "n" => {
+                        ev.prevent_default();
+                        if period.get_untracked() == ReportPeriod::Week {
+                            selected_month.update(|m| *m = next_month(*m));
+                        } else {
+                            selected_year.update(|y| *y += 1);
+                        }
+                    }
+                    "d" => {
+                        ev.prevent_default();
+                        if let Some(window) = web_sys::window() {
+                            if let Some(document) = window.document() {
+                                if let Some(node) = document.query_selector(".report-controls select").ok().flatten() {
+                                    if let Some(el) = node.dyn_ref::<web_sys::HtmlElement>() {
+                                        let _ = el.click();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "t" => {
+                        ev.prevent_default();
+                        selected_month.set(default_report_month(Local::now().date_naive()));
+                        selected_year.set(Local::now().date_naive().year());
+                    }
+                    "s" => {
+                        ev.prevent_default();
+                        if let Some(cb) = on_open_settings.as_ref() {
+                            cb.run(());
+                        }
+                    }
+                    "w" => {
+                        ev.prevent_default();
+                        on_close.run(());
+                    }
+                    "x" => {
+                        ev.prevent_default();
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.location().set_href("/auth/logout");
+                        }
+                    }
+                    _ => {}
+                }
+            },
+        );
+        if let Some(window) = web_sys::window() {
+            use wasm_bindgen::JsCast;
+            let _ = window.add_event_listener_with_callback(
+                "keydown",
+                report_keydown_cb.as_ref().unchecked_ref(),
+            );
+        }
+        report_keydown_cb.forget();
+    }
 
     view! {
         <div class="report-overlay-backdrop" on:click=move |_| on_close.run(())>

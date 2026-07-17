@@ -87,9 +87,9 @@ body {
 }
 
 main {
-	max-width: 90%;
+	max-width: 94%;
 	margin: 0 auto;
-	padding: 1rem;
+	padding-bottom: 1rem;
 	height: 100vh;
 	box-sizing: border-box;
 	display: flex;
@@ -107,18 +107,30 @@ main {
 /* ─── Settings Dialog ────────────────────────────────────────────────────── */
 
 .settings-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 400;
 	display: flex;
 	justify-content: center;
-	align-items: flex-start;
-	padding-top: 2rem;
+	align-items: center;
+}
+
+.settings-backdrop {
+	position: absolute;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.35);
 }
 
 .settings-dialog {
+	position: relative;
+	z-index: 1;
 	background: #fff;
 	border: 1px solid #ccc;
 	border-radius: 8px;
 	padding: 1.5rem;
-	width: 600px;
+	width: min(80vw, 1100px);
+	max-height: 80vh;
+	overflow: auto;
 	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
 
@@ -212,11 +224,131 @@ main {
 	grid-column: 1 / span 2;
 }
 
+.settings-checkbox-row {
+	grid-column: 1 / span 2;
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	cursor: pointer;
+}
+
+.settings-lang-btn {
+	min-width: 3.5rem;
+}
+
 .user-fullname {
 	margin-left: 0.5rem;
 }
 
 /* ─── Week Navigator ─────────────────────────────────────────────────────── */
+
+.ribbon {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: 0.5rem 0.75rem;
+	margin-bottom: 0.75rem;
+	background: #f8fafc;
+	border: 1px solid #edf2f7;
+	border-radius: 0.5rem;
+	flex-shrink: 0;
+}
+
+.ribbon-section {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	min-width: 0;
+}
+
+.ribbon-left {
+	flex: 0 0 auto;
+}
+
+.ribbon-center {
+	flex: 1 1 auto;
+	justify-content: center;
+}
+
+.ribbon-right {
+	flex: 0 0 auto;
+	margin-left: auto;
+}
+
+.avatar-dropdown {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+}
+
+.avatar-btn {
+	background: transparent;
+	border: 0;
+	padding: 0;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+}
+
+.avatar-img {
+	width: 32px;
+	height: 32px;
+	border-radius: 50%;
+	object-fit: cover;
+	border: 1px solid #cfd6dd;
+	background: #f5f7fa;
+}
+
+.avatar-menu {
+	position: absolute;
+	right: 0;
+	top: calc(100% + 0.25rem);
+	z-index: 350;
+	display: none;
+	flex-direction: column;
+	min-width: 10rem;
+	background: #fff;
+	border: 1px solid #cfd6dd;
+	border-radius: 6px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+	padding: 0.25rem;
+}
+
+.avatar-menu-open {
+	display: flex;
+}
+
+.avatar-menu-item {
+	background: transparent;
+	border: 0;
+	padding: 0.45rem 0.75rem;
+	text-align: left;
+	cursor: pointer;
+	border-radius: 4px;
+	color: inherit;
+	text-decoration: none;
+}
+
+.avatar-menu-item:hover {
+	background: #e8f0fe;
+}
+
+.nav-icon-btn svg {
+	width: 20px;
+	height: 20px;
+	display: block;
+}
+
+.timesheet-report-open .ribbon,
+.timesheet-report-open .timesheet-grid-container,
+.timesheet-report-open .refresh-toast,
+.timesheet-report-open .search-dropdown-backdrop,
+.timesheet-report-open .search-dropdown,
+.timesheet-report-open .popup,
+.timesheet-report-open .settings-overlay {
+	display: none !important;
+}
 
 .week-navigator {
 	display: flex;
@@ -261,6 +393,16 @@ main {
 	display: flex;
 	align-items: center;
 	gap: 0.5rem;
+}
+
+.nav-icon-btn {
+	box-sizing: border-box;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 40px;
+	height: 32px;
+	padding: 3px;
 }
 
 .nav-refresh {
@@ -319,7 +461,7 @@ main {
 .timesheet h1 {
 	margin-bottom: 1rem;
 	flex-shrink: 0;
-	font-size: 1.5em;
+	font-size: 1.3em;
 	font-weight: 500;
 	color: #333;
 	letter-spacing: 0.02em;
@@ -476,9 +618,9 @@ main {
 	min-height: 1.2em;
 }
 
-.cell-value-with-commit-overlay-corner {
-	position: relative;
+.cell-value-with-overlay-corners {
 	display: inline-block;
+	padding-left: 0.45rem;
 	padding-right: 0.45rem;
 }
 
@@ -496,10 +638,10 @@ main {
 	pointer-events: none;
 }
 
-.cell-commit-overlay-mark--corner {
+.cell-commit-overlay-mark--corner-left {
 	position: absolute;
-	right: -0.1rem;
-	top: -0.42rem;
+	left: -0.1rem;
+	top: 0;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -508,7 +650,25 @@ main {
 	padding: 0 0.09rem;
 	border-radius: 999px;
 	border: 1px solid #fff;
-	background: #0f766e;
+	background: #0f766e90;
+	color: #fff;
+	font-size: 0.5rem;
+	line-height: 0.61rem;
+}
+
+.cell-pr-overlay-mark--corner-right {
+	position: absolute;
+	right: 0;
+	top: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 0.66rem;
+	height: 0.66rem;
+	padding: 0 0.09rem;
+	border-radius: 999px;
+	border: 1px solid #fff;
+	background: #7c3aed90;
 	color: #fff;
 	font-size: 0.5rem;
 	line-height: 0.61rem;
@@ -552,9 +712,64 @@ main {
 	line-height: 0.99rem;
 }
 
+.cell-value-with-overlay-center-pair {
+	position: relative;
+	display: block;
+	min-width: 1rem;
+	min-height: 1.2em;
+}
+
+.cell-commit-overlay-mark--pair-left,
+.cell-pr-overlay-mark--pair-right {
+	position: absolute;
+	top: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 0.46rem;
+	height: 0.46rem;
+	padding: 0 0.06rem;
+	border-radius: 999px;
+	border: 1px solid #fff;
+	font-size: 0.35rem;
+	line-height: 0.4rem;
+}
+
+.cell-commit-overlay-mark--pair-left {
+	left: calc(50% - 0.38rem);
+	transform: translate(-50%, -50%);
+	background: #0f766e;
+	color: #fff;
+}
+
+.cell-pr-overlay-mark--pair-right {
+	left: calc(50% + 0.38rem);
+	transform: translate(-50%, -50%);
+	background: #7c3aed;
+	color: #fff;
+}
+
 .cell-value:hover {
 	background: #e8f0fe;
 	border-radius: 2px;
+}
+
+.cell-value:focus::after {
+	content: "";
+	display: block;
+	width: 105%;
+	position: absolute;
+	top: -3%;
+	left: -2%;
+	/* border: medium dashed red; */
+	height: 105%;
+	z-index: 100;
+	outline: solid #0078d4;
+	border-radius: 2px;
+}
+
+.cell-value:focus {
+	outline: none;
 }
 
 /* ─── Cell Popup ─────────────────────────────────────────────────────────── */
@@ -613,6 +828,11 @@ main {
 
 .popup-draggable-title:hover {
 	background: #eef0f4;
+}
+
+.cell-popup:focus-within .popup-draggable-title {
+	background: #dde8f8;
+	border-bottom-color: #aac4e8;
 }
 
 .popup-draggable-title:active {
@@ -1109,7 +1329,7 @@ a {
 	margin: 0.3em 0;
 	padding: 0.4em 0.6em;
 	border-radius: 3px;
-	border-left: 3px solid;
+	border: 1px solid transparent;
 }
 
 .adf-panel-info {

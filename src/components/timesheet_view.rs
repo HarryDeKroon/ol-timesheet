@@ -16,6 +16,9 @@ use crate::model::TimesheetWsMessage;
 use crate::model::{ConnectionStatus, TimesheetData, WorkItem, WorklogEntry};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use leptos::prelude::*;
+#[cfg(feature = "hydrate")]
+use leptos::web_sys;
+use leptos_meta::Title;
 
 #[cfg(feature = "ssr")]
 use crate::model::CellActivity;
@@ -450,11 +453,12 @@ pub async fn get_timesheet_data(
             break;
         }
     }
-    let mut bitbucket_cached_mondays = crate::api::cache::get_cached_bitbucket_weeks(&creds.account_id)
-        .weeks
-        .into_iter()
-        .map(|week| week.monday)
-        .collect::<HashSet<_>>();
+    let mut bitbucket_cached_mondays =
+        crate::api::cache::get_cached_bitbucket_weeks(&creds.account_id)
+            .weeks
+            .into_iter()
+            .map(|week| week.monday)
+            .collect::<HashSet<_>>();
     let recovered_bitbucket_cached_mondays = cached_week_chunks
         .iter()
         .filter(|(_, chunk)| !chunk.bitbucket_activity.is_empty())
@@ -733,6 +737,8 @@ struct PopupInfo {
     site_url: String,
     /// Optional timer draft restored from local storage.
     restored_timer_popup: Option<PersistedTimerPopup>,
+    /// Optional digit key that should seed first empty duration input.
+    initial_digit: Option<char>,
 }
 
 impl Clone for PopupInfo {
@@ -756,6 +762,7 @@ impl Clone for PopupInfo {
             is_today: self.is_today,
             position_style: self.position_style.clone(),
             restored_timer_popup: self.restored_timer_popup.clone(),
+            initial_digit: self.initial_digit,
         }
     }
 }
@@ -883,6 +890,89 @@ fn compute_num_weeks(viewport_width: f64) -> usize {
     if w > 1000 { 1 + (w - 701) / 300 } else { 1 }
 }
 
+#[cfg(feature = "hydrate")]
+fn today_col_index(
+    selected_monday: NaiveDate,
+    num_weeks: usize,
+    today: NaiveDate,
+) -> Option<usize> {
+    let nw = num_weeks.max(1);
+    let start_monday = selected_monday - Duration::weeks((nw as i64) - 1);
+    for wi in 0..nw {
+        let monday = start_monday + Duration::weeks(wi as i64);
+        let friday = monday + Duration::days(4);
+        let sunday = monday + Duration::days(6);
+        if today >= monday && today <= friday {
+            let weekday = (today - monday).num_days() as usize;
+            return Some(wi * 6 + weekday);
+        }
+        if today > friday && today <= sunday {
+            return Some(wi * 6 + 5);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "hydrate")]
+fn focus_grid_cell(row: usize, col: usize) {
+    use wasm_bindgen::JsCast;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let selector = format!(r#"[data-nav-row="{}"][data-nav-col="{}"]"#, row, col);
+    let Some(node) = document.query_selector(&selector).ok().flatten() else {
+        return;
+    };
+    let Some(el) = node.dyn_ref::<web_sys::HtmlElement>() else {
+        return;
+    };
+    let _ = el.focus();
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_digit_fill_for_popup(popup_id: u32, digit: char) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let inputs = popup_node.get_elements_by_class_name("popup-hours");
+        for idx in 0..inputs.length() {
+            let Some(node) = inputs.item(idx) else {
+                continue;
+            };
+            let Some(input) = node.dyn_ref::<web_sys::HtmlInputElement>() else {
+                continue;
+            };
+            if input.value().trim().is_empty() {
+                let value = digit.to_string();
+                input.set_value(&value);
+                if let Ok(ev) = web_sys::Event::new("input") {
+                    let _ = input.dispatch_event(&ev);
+                }
+                let _ = input.focus();
+                break;
+            }
+        }
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 #[component]
@@ -913,7 +1003,7 @@ pub fn TimesheetView() -> impl IntoView {
     ]);
     let lang_signal = RwSignal::new("".to_string());
 
-    #[cfg(not(feature = "ssr"))]
+    #[cfg(feature = "hydrate")]
     {
         if let Some(window) = web_sys::window() {
             let storage = window.local_storage().ok().flatten();
@@ -939,7 +1029,7 @@ pub fn TimesheetView() -> impl IntoView {
         let i18n = i18n.clone();
         let flush_mgr = flush_mgr.clone();
         move |new_lang: String| {
-            #[cfg(not(feature = "ssr"))]
+            #[cfg(feature = "hydrate")]
             {
                 if let Some(window) = web_sys::window() {
                     if let Some(storage) = window.local_storage().ok().flatten() {
@@ -957,7 +1047,7 @@ pub fn TimesheetView() -> impl IntoView {
             let did_flush = flush_mgr.flush_all_then(move || {
                 lang_signal.set(new_lang_inner.clone());
                 i18n_inner.set(I18n::new(&new_lang_inner));
-                #[cfg(not(feature = "ssr"))]
+                #[cfg(feature = "hydrate")]
                 {
                     web_sys::window().map(|w| w.location().reload().ok());
                 }
@@ -992,12 +1082,12 @@ pub fn TimesheetView() -> impl IntoView {
         }
     };
 
-    let lang_dropdown = || {
+    let _lang_dropdown = || {
         let langs1 = supported_langs.clone();
         let langs3 = supported_langs.clone();
         view! {
             <div class="lang-dropdown">
-                <button class="lang-btn" on:click=on_lang_btn_click tabindex="0">
+                <button class="lang-btn" on:click=on_lang_btn_click tabindex="4">
                     <span inner_html={move || {
                         let current_lang = lang_signal.get();
                         langs1.iter().find(|(code, _, _)| *code == current_lang)
@@ -1268,6 +1358,7 @@ pub fn TimesheetView() -> impl IntoView {
                         )
                     }),
                     restored_timer_popup: Some(draft),
+                    initial_digit: None,
                 });
             }
         });
@@ -1276,6 +1367,46 @@ pub fn TimesheetView() -> impl IntoView {
     // State for showing the settings dialog
     let show_settings = RwSignal::new(false);
     let show_report = RwSignal::new(false);
+    let user_menu_open = RwSignal::new(false);
+    let focused_cell = RwSignal::new(Option::<(usize, usize)>::None);
+    #[cfg(feature = "hydrate")]
+    let initial_grid_focus_applied = RwSignal::new(false);
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let nw = num_weeks.get().max(1);
+        let today_date = today.get();
+        let monday = selected_monday.get();
+        let Some(ts) = last_data.get() else {
+            focused_cell.set(None);
+            return;
+        };
+        let row_count = ts.work_items.len();
+        if row_count == 0 {
+            focused_cell.set(None);
+            return;
+        }
+        let col_count = nw * 6;
+        let preferred_col =
+            today_col_index(monday, nw, today_date).unwrap_or(col_count.saturating_sub(1));
+        let middle_row = row_count / 2;
+        focused_cell.update(|cur| match *cur {
+            Some((r, c)) if r < row_count && c < col_count => {}
+            _ => *cur = Some((middle_row, preferred_col)),
+        });
+    });
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some((row, col)) = focused_cell.get() else {
+            return;
+        };
+        if initial_grid_focus_applied.get() {
+            return;
+        }
+        focus_grid_cell(row, col);
+        initial_grid_focus_applied.set(true);
+    });
 
     // Detect date changes on window focus (for overnight transitions)
     #[cfg(feature = "hydrate")]
@@ -1409,24 +1540,6 @@ pub fn TimesheetView() -> impl IntoView {
         });
     };
 
-    // ── Refresh handler: clear server cache then refetch ──
-    let on_refresh = {
-        let flush_mgr = flush_mgr.clone();
-        move |_| {
-            is_refreshing.set(true);
-            flush_mgr.flush_all_then(move || {
-                #[cfg(feature = "hydrate")]
-                leptos::task::spawn_local(async move {
-                    conn.request_started();
-                    let _ = clear_cache().await;
-                    conn.request_finished();
-                    data.refetch();
-                    is_refreshing.set(false);
-                });
-            });
-        }
-    };
-
     let on_force_periodic_refresh = move |_| {
         if !conn.is_available() {
             return;
@@ -1439,12 +1552,12 @@ pub fn TimesheetView() -> impl IntoView {
         });
     };
 
-    let on_open_settings = {
+    let on_open_settings_cb = {
         let flush_mgr = flush_mgr.clone();
-        move |_| {
+        Callback::new(move |_: ()| {
             flush_mgr.flush_all();
             show_settings.set(true);
-        }
+        })
     };
     let on_close_settings = Callback::new(move |_: ()| {
         show_settings.set(false);
@@ -1483,708 +1596,191 @@ pub fn TimesheetView() -> impl IntoView {
         beforeunload_cb.forget();
     }
 
-    view! {
-        <div class="timesheet">
+    let flush_mgr_for_left = flush_mgr.clone();
+    let flush_mgr_for_right = flush_mgr.clone();
 
-            // Timesheet title at the top, showing only user's first name
-            {move || {
+    // ── Global hotkey: Alt+L focuses last selected worklog cell ──
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+
+        let focused_cell_for_hotkey = focused_cell;
+        let selected_monday_for_hotkey = selected_monday;
+        let today_for_hotkey = today;
+        let show_report_for_hotkey = show_report;
+        let flush_mgr_for_hotkey = flush_mgr.clone();
+        let conn_for_hotkey = conn.clone();
+        let focus_last_cell_cb =
+            wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
+                move |ev: web_sys::KeyboardEvent| {
+                    if show_report_for_hotkey.get_untracked() {
+                        return;
+                    }
+                    let key = ev.key();
+                    if !ev.alt_key() || ev.ctrl_key() || ev.meta_key() {
+                        return;
+                    }
+
+                    match key.to_ascii_lowercase().as_str() {
+                        "l" => {
+                            ev.prevent_default();
+                            if let Some((row, col)) = focused_cell_for_hotkey.get_untracked() {
+                                focus_grid_cell(row, col);
+                            }
+                        }
+                        "p" => {
+                            ev.prevent_default();
+                            flush_mgr_for_hotkey.flush_all_then(move || {
+                                selected_monday_for_hotkey
+                                    .set(selected_monday_for_hotkey.get_untracked() - Duration::weeks(1));
+                            });
+                        }
+                        "n" => {
+                            ev.prevent_default();
+                            flush_mgr_for_hotkey.flush_all_then(move || {
+                                selected_monday_for_hotkey
+                                    .set(selected_monday_for_hotkey.get_untracked() + Duration::weeks(1));
+                            });
+                        }
+                        "d" => {
+                            ev.prevent_default();
+                            if let Some(window) = web_sys::window() {
+                                if let Some(document) = window.document() {
+                                    if let Some(node) = document.query_selector(".nav-date").ok().flatten() {
+                                        if let Some(el) = node.dyn_ref::<web_sys::HtmlElement>() {
+                                            let _ = el.click();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "t" => {
+                            ev.prevent_default();
+                            let today_monday = week_monday(today_for_hotkey.get_untracked());
+                            if !today_is_visible(selected_monday_for_hotkey.get_untracked(), num_weeks.get_untracked(), today_for_hotkey.get_untracked()) {
+                                flush_mgr_for_hotkey.flush_all_then(move || {
+                                    selected_monday_for_hotkey.set(today_monday);
+                                });
+                            }
+                        }
+                        "s" => {
+                            ev.prevent_default();
+                            flush_mgr_for_hotkey.flush_all();
+                            show_settings.set(true);
+                        }
+                        "x" => {
+                            ev.prevent_default();
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.location().set_href("/auth/logout");
+                            }
+                        }
+                        "r" => {
+                            ev.prevent_default();
+                            show_report.set(true);
+                        }
+                        "f" => {
+                            ev.prevent_default();
+                            is_refreshing.set(true);
+                            let flush_mgr = flush_mgr_for_hotkey.clone();
+                            let data = data.clone();
+                            let is_refreshing = is_refreshing.clone();
+                            #[cfg(feature = "hydrate")]
+                            leptos::task::spawn_local(async move {
+                                conn_for_hotkey.request_started();
+                                let _ = clear_cache().await;
+                                conn_for_hotkey.request_finished();
+                                flush_mgr.flush_all();
+                                data.refetch();
+                                is_refreshing.set(false);
+                            });
+                        }
+                        _ => {}
+                    }
+                },
+            );
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback(
+                "keydown",
+                focus_last_cell_cb.as_ref().unchecked_ref(),
+            );
+        }
+        focus_last_cell_cb.forget();
+    }
+
+    view! {
+        <div class=move || if show_report.get() { "timesheet timesheet-report-open" } else { "timesheet" }>
+            <Title text=move || {
                 let name = user_name.get();
                 let first_name = name.split_whitespace().next().unwrap_or("").to_string();
-                view! {
-                    <h1>
-                        {i18n.get().t(keys::TIMESHEET_TITLE)}
-                        " "
-                        {first_name}
-                    </h1>
-                }
-            }}
+                format!("{} {}", i18n.get().t(keys::TIMESHEET_TITLE), first_name)
+            } />
 
-            // Error banner (if any)
-            {move || error_msg.get().map(|e| view! { <p class="error">{e}</p> })}
-
-            // Main grid — rendered from last_data so the previous week stays
-            // visible while the next week is loading.
-            <div class="timesheet-grid-container">
-                // Semi-transparent overlay while loading
-                {move || is_loading.get().then(|| view! {
-                    <div class="loading-overlay">
-                        <span class="loading-spinner">{move || i18n.get().t(keys::LOADING_TIMESHEET)}</span>
-                    </div>
-                })}
-
-                {move || {
-                    let ts = match last_data.get() {
-                        Some(ts) => ts,
-                        None => return view! { <div /> }.into_any(),
-                    };
-
-                    let sel_monday = selected_monday.get();
-                    let nw = num_weeks.get();
-
-                    // Mondays for every visible week, oldest (leftmost) first.
-                    let week_mondays: Vec<NaiveDate> = (0..nw)
-                        .map(|i| sel_monday - Duration::weeks((nw - 1 - i) as i64))
-                        .collect();
-
-                    let i = i18n.get();
-                    let dec_sep = i.decimal_separator;
-                    let hpd = ts.hours_per_day;
-                    let hpw = ts.hours_per_week;
-                    let site_url = ts.site_url.clone();
-                    let w_l = i.t(keys::WEEK_ABBR);
-                    let d_l = i.t(keys::DAY_ABBR);
-                    let h_l = i.t(keys::HOUR_ABBR);
-                    let m_l = i.t(keys::MINUTE_ABBR);
-                    let multi = nw > 1;
-
-                    // ── Build header columns for every week group ──
-                    let mut header_cols: Vec<AnyView> = Vec::new();
-                    for (wi, wk_monday) in week_mondays.iter().enumerate() {
-                        let wk_dates: Vec<NaiveDate> = (0..5)
-                            .map(|d| *wk_monday + Duration::days(d))
-                            .collect();
-
-                        for (di, d) in wk_dates.iter().enumerate() {
-                            let day_name = i.t(day_key(di as u32));
-                            let date_str = i.format_day_month(d);
-                            let total_str = format_hours_short(ts.day_total(*d), dec_sep);
-                            let is_today = *d == today.get();
-                            let cls = if is_today {
-                                "col-day col-today"
-                            } else if di == 0 && wi > 0 {
-                                "col-day week-separator"
-                            } else {
-                                "col-day"
+            <div class="ribbon">
+                <div class="ribbon-section ribbon-left">
+                    {move || {
+                        if show_report.get() {
+                            let on_back = {
+                                let show_report = show_report.clone();
+                                move |_| show_report.set(false)
                             };
-                            header_cols.push(view! {
-                                <th class={cls}>
-                                    <div class="day-name">{day_name}</div>
-                                    <div class="day-date">{date_str}</div>
-                                    <div class="day-total">{total_str}</div>
-                                </th>
-                            }.into_any());
-                        }
-
-                        let we_total_str = format_hours_short(ts.weekend_total(*wk_monday), dec_sep);
-                        // Only highlight the weekend column as col-today if today is Sat or Sun AND this weekend column contains today
-                        let today_date = today.get();
-                        let is_today_weekend = (today_date == *wk_monday + Duration::days(5)) || (today_date == *wk_monday + Duration::days(6));
-                        let weekend_cls = if is_today_weekend {
-                            "col-weekend col-today"
-                        } else {
-                            "col-weekend"
-                        };
-                        header_cols.push(view! {
-                            <th class={weekend_cls}>
-                                <div class="day-name" title={i.t(keys::WEEKEND_TITLE)}>{i.t(keys::WEEKEND)}</div>
-                                <div class="day-total">{we_total_str}</div>
-                            </th>
-                        }.into_any());
-
-                        let wk_total_str = format_hours_short(ts.week_total(*wk_monday), dec_sep);
-                        let total_label = if multi {
-                            let wn = wk_monday.iso_week().week();
-                            format!("{}{}", w_l.to_uppercase(), wn)
-                        } else {
-                            i.t(keys::TOTAL)
-                        };
-                        header_cols.push(view! {
-                            <th class="col-total">
-                                <div class="day-name">{total_label}</div>
-                                <div class="day-total">{wk_total_str}</div>
-                            </th>
-                        }.into_any());
-                    }
-
-                    // ── Build body rows ──
-                    let body_rows: Vec<AnyView> = ts.work_items
-                        .iter()
-                        .map(|item| {
-                            let key = item.key.clone();
-                            let item_ytd = ts.item_ytd_total(&key);
-
-                            let header_total = {
-                                let s = format_hours_short(item_ytd, dec_sep);
-                                if s.is_empty() { String::new() } else { format!("{}", s) }
-                            };
-
-                            let icon_url = item.icon_url.clone();
-                            let summary = item.summary.clone();
-                            let _summary_for_title = summary.clone();
-                            let key_display = key.clone();
-                            let mut row_pr_links = ts
-                                .bitbucket_activity
-                                .iter()
-                                .filter_map(|(cell_key, activity)| {
-                                    cell_key
-                                        .strip_prefix(&format!("{}:", key))
-                                        .map(|_| activity.pr_links.clone())
-                                })
-                                .flatten()
-                                .collect::<Vec<_>>();
-                            row_pr_links.sort();
-                            row_pr_links.dedup();
-
-                            // Cells for every visible week group
-                            let mut week_cells: Vec<AnyView> = Vec::new();
-                            for (wi, wk_monday) in week_mondays.iter().enumerate() {
-                                let wk_dates: Vec<NaiveDate> = (0..5)
-                                    .map(|d| *wk_monday + Duration::days(d))
-                                    .collect();
-
-                                // ── Weekday cells ──
-                                for (di, d) in wk_dates.iter().enumerate() {
-                                    let hours = ts.cell_hours(&key, *d);
-                                    let cell_text = format_hours_short(hours, dec_sep);
-                                    let worklogs = ts.cell_worklogs(&key, *d);
-
-                                    let bb_activity_for_closure = ts.bitbucket_activity.clone();
-                                    let cell_activity = bb_activity_for_closure
-                                        .get(&format!("{}:{}", key, d))
-                                        .cloned()
-                                        .unwrap_or_default();
-                                    let commit_messages = cell_activity.commit_messages.clone();
-                                    let has_pr_review = cell_activity.has_pr_review;
-
-                                    let has_commit_associations = !cell_activity.commit_messages.is_empty()
-                                        || !cell_activity.commit_links.is_empty();
-                                    let show_corner_commit_overlay =
-                                        !worklogs.is_empty() && has_commit_associations;
-                                    let show_center_commit_overlay =
-                                        worklogs.is_empty() && has_commit_associations;
-                                    let show_center_pr_overlay =
-                                        worklogs.is_empty() && !has_commit_associations && has_pr_review;
-                                    let (cell_display, title) = if !worklogs.is_empty() {
-                                        // Normal worklog cell
-                                        let title = if worklogs.len() > 1 {
-                                            worklogs
-                                                .iter()
-                                                .map(|w| {
-                                                    let h = format_hours_long(w.hours, hpd, hpw, &w_l, &d_l, &h_l, &m_l);
-                                                    // Strip work item key from start of comment if present
-                                                    let comment = if let Some(stripped) = w.comment.strip_prefix(&format!("{} ", key)) {
-                                                        stripped
-                                                    } else {
-                                                        w.comment.as_str()
-                                                    };
-                                                    if comment.is_empty() {
-                                                        format!("{}", h)
-                                                    } else {
-                                                        format!("{}: {}", h, comment)
-                                                    }
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join("\n")
-                                        } else {
-                                            worklogs[0].comment.clone()
-                                        };
-                                        (cell_text.clone(), title)
-                                    } else if !commit_messages.is_empty() {
-                                        (String::new(), commit_messages.join("\n"))
-                                    } else if has_pr_review {
-                                        (String::new(), String::new())
-                                    } else {
-                                        (String::new(), String::new())
-                                    };
-
-                                    let cell_key = key.clone();
-                                    let cell_date = *d;
-                                    let cell_date_str = d.to_string();
-                                    let cell_entries: Vec<_> = worklogs.into_iter().cloned().collect();
-                                    let ck2 = cell_key.clone();
-                                    let entries2 = cell_entries.clone();
-                                    let is_today = cell_date == today.get();
-                                    let cls = if is_today {
-                                        "col-day timesheet-cell col-today"
-                                    } else if di == 0 && wi > 0 {
-                                        "col-day timesheet-cell week-separator"
-                                    } else {
-                                        "col-day timesheet-cell"
-                                    };
-
-                                    let cell_is_today = is_today;
-                                    let cell_summary = summary.clone();
-                                    let site_url_for_cell = site_url.clone();
-                                    let owner_for_cell_popup = component_owner.clone();
-                                    let row_pr_links_for_cell = row_pr_links.clone();
-                                    week_cells.push(view! {
-                                        <td class={cls} title={title}>
-                                            <span
-                                                class={if show_corner_commit_overlay {
-                                                    "cell-value cell-value-with-commit-overlay-corner"
-                                                } else if show_center_commit_overlay {
-                                                    "cell-value cell-value-with-commit-overlay-center"
-                                                } else {
-                                                    "cell-value"
-                                                }}
-                                                data-cell-key={cell_key}
-                                                data-cell-date={cell_date_str}
-                                                on:click=move |_| {
-                                                    // Don't open a duplicate popup for the same cell.
-                                                    let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == ck2 && p.date == cell_date));
-                                                    if already_open {
-                                                        return;
-                                                    }
-                                                    let (suggested_comments, is_git_log) = if entries2.is_empty() {
-                                                        let activity = bb_activity_for_closure
-                                                            .get(&format!("{}:{}", ck2, cell_date))
-                                                            .cloned()
-                                                            .unwrap_or_default();
-                                                        if !activity.commit_messages.is_empty() {
-                                                            (activity.commit_messages, true)
-                                                        } else if activity.has_pr_review {
-                                                            (vec!["review".to_string()], false)
-                                                        } else {
-                                                            (vec![], false)
-                                                        }
-                                                    } else {
-                                                        (vec![], false)
-                                                    };
-                                                    let suggested_comment = if is_git_log {
-                                                        suggested_comments.first().cloned()
-                                                    } else {
-                                                        None
-                                                    };
-                                                    let activity_links = bb_activity_for_closure
-                                                        .get(&format!("{}:{}", ck2, cell_date))
-                                                        .cloned()
-                                                        .unwrap_or_default();
-                                                    let pos_style = compute_popup_style(
-                                                        &ck2,
-                                                        &cell_date.to_string(),
-                                                        entries2.len(),
-                                                    );
-                                                    let issue_summary = cell_summary.clone();
-                                                    let popup = PopupInfo {
-                                                        popup_id: NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                                        issue_key: ck2.clone(),
-                                                        issue_summary,
-                                                        date: cell_date,
-                                                        entries: entries2.clone(),
-                                                        hours_per_day: hpd,
-                                                        hours_per_week: hpw,
-                                                        suggested_comments,
-                                                        suggested_comment: suggested_comment.clone(),
-                                                        commit_messages: activity_links.commit_messages.clone(),
-                                                        commit_links: activity_links.commit_links,
-                                                        pr_links: row_pr_links_for_cell.clone(),
-                                                        is_git_log,
-                                                        is_weekend: false,
-                                                        is_today: cell_is_today,
-                                                        position_style: owner_for_cell_popup
-                                                            .with(|| RwSignal::new(pos_style)),
-                                                        site_url: site_url_for_cell.clone(),
-                                                        restored_timer_popup: None,
-                                                    };
-                                                    open_popups.update(|ps| ps.push(popup));
-                                                }
-                                            >
-                                                {if show_corner_commit_overlay {
-                                                    view! {
-                                                        <>
-                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner">{"c"}</span>
-                                                            <span class="cell-value-text">{cell_display.clone()}</span>
-                                                        </>
-                                                    }
-                                                        .into_any()
-                                                } else if show_center_commit_overlay {
-                                                    view! {
-                                                        <>
-                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--center">{"c"}</span>
-                                                            <span class="cell-value-text"></span>
-                                                        </>
-                                                    }
-                                                        .into_any()
-                                                } else if show_center_pr_overlay {
-                                                    view! {
-                                                        <>
-                                                            <span class="cell-commit-overlay-mark cell-pr-overlay-mark--center">{"p"}</span>
-                                                            <span class="cell-value-text"></span>
-                                                        </>
-                                                    }
-                                                        .into_any()
-                                                } else {
-                                                    view! { <>{cell_display}</> }.into_any()
-                                                }}
-                                            </span>
-                                        </td>
-                                    }.into_any());
-                                }
-
-                                // ── Weekend cell ──
-                                let sat = *wk_monday + Duration::days(5);
-                                let sun = *wk_monday + Duration::days(6);
-                                let we_hours = ts.weekend_hours(&key, *wk_monday);
-                                let we_text = format_hours_short(we_hours, dec_sep);
-                                let we_worklogs: Vec<_> = ts.cell_worklogs(&key, sat)
-                                    .into_iter()
-                                    .chain(ts.cell_worklogs(&key, sun))
-                                    .collect();
-
-                                let we_title = if we_worklogs.len() > 1 {
-                                    we_worklogs
-                                        .iter()
-                                        .map(|w| {
-                                            let h = format_hours_long(w.hours, hpd, hpw, &w_l, &d_l, &h_l, &m_l);
-                                            // Strip work item key from start of comment if present
-                                            let comment = if let Some(stripped) = w.comment.strip_prefix(&format!("{} ", key)) {
-                                                stripped
-                                            } else {
-                                                w.comment.as_str()
-                                            };
-                                            if comment.is_empty() {
-                                                format!("{}", h)
-                                            } else {
-                                                format!("{}: {}", h, comment)
-                                            }
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                } else if we_worklogs.len() == 1 {
-                                    let h = format_hours_long(we_worklogs[0].hours, hpd, hpw, &w_l, &d_l, &h_l, &m_l);
-                                    let comment = if let Some(stripped) = we_worklogs[0].comment.strip_prefix(&format!("{} ", key)) {
-                                        stripped
-                                    } else {
-                                        we_worklogs[0].comment.as_str()
-                                    };
-                                    if comment.is_empty() {
-                                        h
-                                    } else {
-                                        format!("{}: {}", h, comment)
-                                    }
-                                } else {
-                                    String::new()
-                                };
-
-
-                                let we_entries: Vec<_> = we_worklogs.into_iter().cloned().collect();
-                                let weekend_activity_sat = ts
-                                    .bitbucket_activity
-                                    .get(&format!("{}:{}", key, sat))
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let weekend_activity_sun = ts
-                                    .bitbucket_activity
-                                    .get(&format!("{}:{}", key, sun))
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let mut weekend_commit_messages = weekend_activity_sat.commit_messages;
-                                weekend_commit_messages.extend(weekend_activity_sun.commit_messages);
-                                let weekend_has_pr_review =
-                                    weekend_activity_sat.has_pr_review || weekend_activity_sun.has_pr_review;
-                                let weekend_has_commit_associations = !weekend_commit_messages.is_empty()
-                                    || !weekend_activity_sat.commit_links.is_empty()
-                                    || !weekend_activity_sun.commit_links.is_empty();
-                                let show_corner_commit_overlay_weekend =
-                                    !we_entries.is_empty() && weekend_has_commit_associations;
-                                let show_center_commit_overlay_weekend =
-                                    we_entries.is_empty() && weekend_has_commit_associations;
-                                let show_center_pr_overlay_weekend = we_entries.is_empty()
-                                    && !weekend_has_commit_associations
-                                    && weekend_has_pr_review;
-                                let (we_display, we_tooltip) = if !we_entries.is_empty() {
-                                    (we_text.clone(), we_title.clone())
-                                } else if !weekend_commit_messages.is_empty() {
-                                    (String::new(), weekend_commit_messages.join("\n"))
-                                } else if weekend_has_pr_review {
-                                    (String::new(), String::new())
-                                } else {
-                                    (String::new(), String::new())
-                                };
-
-                                let we_key = key.clone();
-
-                                let we_sat_str = sat.to_string();
-
-                                let we_key2 = we_key.clone();
-
-                                let we_entries2 = we_entries.clone();
-                                let bb_activity_for_closure = ts.bitbucket_activity.clone();
-
-                                // Only highlight the weekend cell as col-today if today is Sat or Sun AND this weekend cell contains today
-                                let today_date = today.get();
-                                let is_today_weekend = (today_date == sat) || (today_date == sun);
-                                let weekend_cls = if is_today_weekend {
-                                    "col-weekend timesheet-cell col-today"
-                                } else {
-                                    "col-weekend timesheet-cell"
-                                };
-                                let we_cell_is_today = is_today_weekend;
-                                let we_summary = summary.clone();
-                                let site_url_for_we = site_url.clone();
-                                let owner_for_weekend_popup = component_owner.clone();
-                                let row_pr_links_for_weekend = row_pr_links.clone();
-                                week_cells.push(view! {
-                                    <td class={weekend_cls} title={we_tooltip}>
-                                        <span
-                                            class={if show_corner_commit_overlay_weekend {
-                                                "cell-value cell-value-with-commit-overlay-corner"
-                                            } else if show_center_commit_overlay_weekend || show_center_pr_overlay_weekend {
-                                                "cell-value cell-value-with-commit-overlay-center"
-                                            } else {
-                                                "cell-value"
-                                            }}
-                                            data-cell-key={we_key}
-                                            data-cell-date={we_sat_str}
-
-                                            on:click=move |_| {
-                                                let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == we_key2 && p.date == sat));
-                                                if already_open {
-                                                    return;
-                                                }
-                                                let (suggested_comments, is_git_log) = if we_entries2.is_empty() {
-                                                    let sat_activity = bb_activity_for_closure
-                                                        .get(&format!("{}:{}", we_key2, sat))
-                                                        .cloned()
-                                                        .unwrap_or_default();
-                                                    let sun_activity = bb_activity_for_closure
-                                                        .get(&format!("{}:{}", we_key2, sun))
-                                                        .cloned()
-                                                        .unwrap_or_default();
-                                                    let mut commit_messages = sat_activity.commit_messages;
-                                                    commit_messages.extend(sun_activity.commit_messages);
-                                                    if !commit_messages.is_empty() {
-                                                        (commit_messages, true)
-                                                    } else if sat_activity.has_pr_review || sun_activity.has_pr_review {
-                                                        (vec!["review".to_string()], false)
-                                                    } else {
-                                                        (vec![], false)
-                                                    }
-                                                } else {
-                                                    (vec![], false)
-                                                };
-                                                let suggested_comment = if is_git_log {
-                                                    suggested_comments.first().cloned()
-                                                } else {
-                                                    None
-                                                };
-                                                let sat_links = bb_activity_for_closure
-                                                    .get(&format!("{}:{}", we_key2, sat))
-                                                    .cloned()
-                                                    .unwrap_or_default();
-                                                let sun_links = bb_activity_for_closure
-                                                    .get(&format!("{}:{}", we_key2, sun))
-                                                    .cloned()
-                                                    .unwrap_or_default();
-                                                let mut weekend_commit_messages = sat_links.commit_messages.clone();
-                                                weekend_commit_messages.extend(sun_links.commit_messages.clone());
-                                                let mut weekend_commit_links = sat_links.commit_links;
-                                                weekend_commit_links.extend(sun_links.commit_links);
-                                                let mut seen_weekend_links = std::collections::HashSet::new();
-                                                weekend_commit_links
-                                                    .retain(|link| seen_weekend_links.insert(link.clone()));
-                                                let pos_style = compute_popup_style(
-                                                    &we_key2,
-                                                    &sat.to_string(),
-                                                    we_entries2.len(),
-                                                );
-                                                let issue_summary = we_summary.clone();
-                                                let popup = PopupInfo {
-                                                    popup_id: NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                                    issue_key: we_key2.clone(),
-                                                    issue_summary,
-                                                    date: sat,
-                                                    entries: we_entries2.clone(),
-                                                    hours_per_day: hpd,
-                                                    hours_per_week: hpw,
-                                                    suggested_comments,
-                                                    suggested_comment: suggested_comment.clone(),
-                                                    commit_messages: weekend_commit_messages,
-                                                    commit_links: weekend_commit_links,
-                                                    pr_links: row_pr_links_for_weekend.clone(),
-                                                    is_git_log,
-                                                    is_weekend: true,
-                                                    is_today: we_cell_is_today,
-                                                    position_style: owner_for_weekend_popup
-                                                        .with(|| RwSignal::new(pos_style)),
-                                                    site_url: site_url_for_we.clone(),
-                                                    restored_timer_popup: None,
-                                                };
-                                                open_popups.update(|ps| ps.push(popup));
-                                            }
-
-                                        >
-                                            {if show_corner_commit_overlay_weekend {
-                                                view! {
-                                                    <>
-                                                        <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner">{"c"}</span>
-                                                        <span class="cell-value-text">{we_display.clone()}</span>
-                                                    </>
-                                                }
-                                                    .into_any()
-                                            } else if show_center_commit_overlay_weekend {
-                                                view! {
-                                                    <>
-                                                        <span class="cell-commit-overlay-mark cell-commit-overlay-mark--center">{"c"}</span>
-                                                        <span class="cell-value-text"></span>
-                                                    </>
-                                                }
-                                                    .into_any()
-                                            } else if show_center_pr_overlay_weekend {
-                                                view! {
-                                                    <>
-                                                        <span class="cell-commit-overlay-mark cell-pr-overlay-mark--center">{"p"}</span>
-                                                        <span class="cell-value-text"></span>
-                                                    </>
-                                                }
-                                                    .into_any()
-                                            } else {
-                                                view! { <>{we_display}</> }.into_any()
-                                            }}
-                                        </span>
-                                    </td>
-                                }.into_any());
-
-                                // ── Week total cell ──
-                                let item_wk_total = ts.item_week_total(&key, *wk_monday);
-                                week_cells.push(view! {
-                                    <td class="col-total">
-                                        {format_hours_short(item_wk_total, dec_sep)}
-                                    </td>
-                                }.into_any());
-                            }
-
                             view! {
-                                <tr>
-                                    <td class="col-item"
-                                        on:mouseenter=move |_ev: leptos::ev::MouseEvent| {
-                                            #[cfg(feature = "hydrate")]
-                                            {
-                                                use wasm_bindgen::JsCast;
-                                                if let Some(el) = _ev.target()
-                                                    .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                                                {
-                                                    if el.scroll_width() > el.client_width() {
-                                                        let _ = el.set_attribute("title", &_summary_for_title);
-                                                    } else {
-                                                        let _ = el.remove_attribute("title");
-                                                    }
-                                                }
-                                            }
+                                <button class="nav-btn nav-icon-btn nav-view-btn" on:click=on_back title=move || i18n.get().t(keys::TIMESHEET_TITLE)>
+                                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                        <circle cx="12" cy="12" r="8.25" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+                                        <circle cx="9.2" cy="10" r="0.85" fill="currentColor"></circle>
+                                        <circle cx="14.8" cy="10" r="0.85" fill="currentColor"></circle>
+                                        <path d="M8.9 14.4h6.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                                    </svg>
+                                </button>
+                            }
+                            .into_any()
+                        } else {
+                            view! {
+                                <>
+                                    <button class="nav-btn nav-icon-btn nav-view-btn" on:click=on_open_report title=move || i18n.get().t(keys::USER_REPORT)>
+                                        <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                            <circle cx="12" cy="12" r="8.25" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+                                            <circle cx="9.2" cy="10" r="0.85" fill="currentColor"></circle>
+                                            <circle cx="14.8" cy="10" r="0.85" fill="currentColor"></circle>
+                                            <path d="M8.8 14.1c0.9 1.1 2.1 1.6 3.2 1.6s2.3-.5 3.2-1.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                                        </svg>
+                                    </button>
+                                    <button class="nav-btn nav-icon-btn nav-force-refresh" on:click=on_force_periodic_refresh title=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH) aria-label=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)>
+                                        <span class="icon-force-refresh">{"⟳"}</span>
+                                    </button>
+                                    <button class="nav-btn nav-icon-btn nav-refresh" on:click={
+                                        let flush_mgr = flush_mgr_for_left.clone();
+                                        let _conn = conn.clone();
+                                        let _data = data.clone();
+                                        let is_refreshing = is_refreshing.clone();
+                                        move |_| {
+                                            is_refreshing.set(true);
+                                            flush_mgr.flush_all_then(move || {
+                                                #[cfg(feature = "hydrate")]
+                                                leptos::task::spawn_local(async move {
+                                                    conn.request_started();
+                                                    let _ = clear_cache().await;
+                                                    conn.request_finished();
+                                                    data.refetch();
+                                                    is_refreshing.set(false);
+                                                });
+                                            });
                                         }
-                                    >
-                                        <img src={icon_url} class="issue-icon" width="12" height="12" alt={i18n.get().t(keys::ISSUE_ICON_ALT)} />
-                                        <a
-                                            href={format!("https://uplandsoftware.atlassian.net/browse/{}", key_display)}
-                                            target="_blank"
-                                            class="issue-key"
-                                        >
-                                            {key_display.clone()}
-                                        </a>
-                                        <span class="issue-summary">{summary}</span>
-                                    </td>
-                                    <td class="col-issue-total">
-                                        {header_total}
-                                    </td>
-                                    {week_cells}
-                                </tr>
-
-                            }.into_any()
-                        })
-                        .collect();
-
-                    // ── Build colgroup cols for table-layout:fixed ──
-                    // col-item has no width so it absorbs whatever space remains after
-                    // all fixed-width columns have claimed their share.
-                    let mut colgroup_cols: Vec<AnyView> = Vec::new();
-                    colgroup_cols.push(view! { <col class="col-item"></col> }.into_any());
-                    colgroup_cols.push(view! { <col class="col-issue-total"></col> }.into_any());
-                    for _ in 0..nw {
-                        for _ in 0..5 {
-                            colgroup_cols.push(view! { <col class="col-day"></col> }.into_any());
+                                    } disabled=move || is_refreshing.get() title=move || i18n.get().t(keys::REFRESH_CACHED)>
+                                        <span class="icon-refresh">{"🔄"}</span>
+                                    </button>
+                                </>
+                            }
+                            .into_any()
                         }
-                        colgroup_cols.push(view! { <col class="col-weekend"></col> }.into_any());
-                        colgroup_cols.push(view! { <col class="col-total"></col> }.into_any());
-                    }
+                    }}
+                </div>
 
-                    view! {
-                        <div class="timesheet-table-wrap">
-                            <table class="timesheet-grid">
-                                <colgroup>{colgroup_cols}</colgroup>
+                <div class="ribbon-section ribbon-center">
+                    <WeekNavigator selected_monday=selected_monday tab_index_base=3 />
+                </div>
 
-                            <thead>
-                                <tr>
-                                    <th class="col-item" colspan="2">
-                                        <input
-                                            type="text"
-                                            class="search-input"
-                                            placeholder={move || i18n.get().t(keys::SEARCH_WORK_ITEM)}
-                                            prop:value={move || search_query.get()}
-                                            on:input=on_search_input.clone()
-                                            on:blur=move |_| {
-                                                show_search_dropdown.set(false);
-                                            }
-                                            on:keydown=move |ev: leptos::ev::KeyboardEvent| {
-                                                if ev.key() == "Escape" {
-                                                    show_search_dropdown.set(false);
-                                                    search_query.set(String::new());
-                                                    search_results.set(vec![]);
-                                                    search_version.set(search_version.get_untracked() + 1);
-                                                }
-                                            }
-                                        />
-                                    </th>
-                                    {header_cols}
-                                </tr>
-
-                                </thead>
-                                <tbody>
-                                    {body_rows}
-                                </tbody>
-                            </table>
-                        </div>
-                    }.into_any()
-                }}
-            </div>
-
-            <div class="bottom-nav">
-                <WeekNavigator selected_monday=selected_monday />
-                <div class="nav-btn-group-right">
-                    <button
-                        class="nav-btn nav-report"
-                        on:click=on_open_report
-                        title=move || i18n.get().t(keys::USER_REPORT)
-                        aria-label=move || i18n.get().t(keys::USER_REPORT)
-                    >
-                        <span class="icon-report" aria-hidden="true">
-                            <svg viewBox="0 0 24 24" focusable="false">
-                                <rect class="report-bar report-bar-left" x="4" y="10" width="4" height="10" rx="1"></rect>
-                                <rect class="report-bar report-bar-middle" x="10" y="6" width="4" height="14" rx="1"></rect>
-                                <rect class="report-bar report-bar-right" x="16" y="12" width="4" height="8" rx="1"></rect>
-                            </svg>
-                        </span>
-                    </button>
-                    <button
-                        class="nav-btn nav-force-refresh"
-                        on:click=on_force_periodic_refresh
-                        title=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
-                        aria-label=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
->
-                        <span class="icon-force-refresh">{"⟳"}</span>
-                    </button>
-                    <button
-                        class="nav-btn nav-refresh"
-                        on:click=on_refresh
-                        disabled=move || is_refreshing.get()
-                        title=move || i18n.get().t(keys::REFRESH_CACHED)
-                    >
-                        <span class="icon-refresh">{"🔄"}</span>
-                    </button>
-                    <button
-                        class="nav-btn nav-settings"
-                        on:click=on_open_settings
-                        title=move || i18n.get().t(keys::OPEN_SETTINGS)
-                    >
-                        <span class="icon-settings">{"⚙️"}</span>
-                    </button>
-                    <a
-                        class="nav-btn nav-logout"
-                        href="/auth/logout"
-                        title=move || i18n.get().t(keys::LOGOUT)
-                    >
-                        <span class="icon-logout">{"🚪"}</span>
-                    </a>
-                    {lang_dropdown()}
+                <div class="ribbon-section ribbon-right">
                     <span
                         class={move || match conn.status() {
                             ConnectionStatus::Online => "circle green",
@@ -2197,98 +1793,1000 @@ pub fn TimesheetView() -> impl IntoView {
                             ConnectionStatus::Offline => i18n.get().t(keys::CONNECTION_DISCONNECTED),
                         }}
                     ></span>
+                    <div class="avatar-dropdown">
+                        <button
+                            class="avatar-btn"
+                            on:click={
+                                let user_menu_open = user_menu_open.clone();
+                                move |_| user_menu_open.update(|open| *open = !*open)
+                            }
+                            aria-label=move || user_name.get()
+                        >
+                            <img src={move || user_avatar.get()} class="avatar-img" alt={move || user_name.get()} />
+                        </button>
+                        <div class=move || if user_menu_open.get() { "avatar-menu avatar-menu-open" } else { "avatar-menu" }>
+                            <button class="avatar-menu-item" title=move || i18n.get().t(keys::OPEN_SETTINGS) on:click={
+                                let flush_mgr = flush_mgr_for_right.clone();
+                                move |_| {
+                                    flush_mgr.flush_all();
+                                    user_menu_open.set(false);
+                                    show_settings.set(true);
+                                }
+                            }>
+                                <span aria-hidden="true">{"⚙"}</span>
+                            </button>
+                            <a class="avatar-menu-item" href="/auth/logout" title=move || i18n.get().t(keys::LOGOUT) on:click=move |_| user_menu_open.set(false)>
+                                <span aria-hidden="true">{"🚪"}</span>
+                            </a>
+                        </div>
+                    </div>
                 </div>
             </div>
 
+            {move || error_msg.get().map(|e| view! { <p class="error">{e}</p> })}
 
-            {move || refresh_toast.get().map(|msg| view! {
-                <div class="refresh-toast" role="status" aria-live="polite">{msg}</div>
-            })}
+                // Main grid — rendered from last_data so the previous week stays
+                // visible while the next week is loading.
+                <div class="timesheet-grid-container">
+                    // Semi-transparent overlay while loading
+                    {move || is_loading.get().then(|| view! {
+                        <div class="loading-overlay">
+                            <span class="loading-spinner">{move || i18n.get().t(keys::LOADING_TIMESHEET)}</span>
+                        </div>
+                    })}
 
-            // ── Search dropdown rendered outside the table so it is never
-            // clipped by overflow:hidden / sticky headers / stacking contexts.
-            // Positioned with position:fixed relative to the .search-input element.
-            {move || show_search_dropdown.get().then(|| {
-                let items = search_results.get();
-                let dd_style = compute_search_dropdown_style();
-                view! {
-                    <div class="search-dropdown-backdrop" on:mousedown=move |_| {
-                        show_search_dropdown.set(false);
-                    }></div>
-                    <ul class="search-dropdown search-dropdown-positioned" style={dd_style}>
-                        {items.into_iter().map(|item| {
-                            let pick_item = item.clone();
-                            let icon = item.icon_url.clone();
-                            let key_label = item.key.clone();
-                            let summary_label = item.summary.clone();
-                            view! {
-                                <li
-                                    class="search-dropdown-item"
-                                    on:mousedown=move |ev: leptos::ev::MouseEvent| {
-                                        ev.prevent_default();
-                                        on_pick_item(pick_item.clone());
-                                    }
-                                >
-                                    <img src={icon.clone()} class="issue-icon" width="12" height="12" alt={i18n.get().t(keys::ISSUE_ICON_ALT)} />
-                                    <span class="issue-key">{key_label.clone()}</span>
-                                    <span class="issue-summary">{summary_label.clone()}</span>
-                                </li>
+                    {move || {
+                        let ts = match last_data.get() {
+                            Some(ts) => ts,
+                            None => return view! { <div /> }.into_any(),
+                        };
+
+                        let sel_monday = selected_monday.get();
+                        let nw = num_weeks.get();
+
+                        // Mondays for every visible week, oldest (leftmost) first.
+                        let week_mondays: Vec<NaiveDate> = (0..nw)
+                            .map(|i| sel_monday - Duration::weeks((nw - 1 - i) as i64))
+                            .collect();
+
+                        let i = i18n.get();
+                        let dec_sep = i.decimal_separator;
+                        let hpd = ts.hours_per_day;
+                        let hpw = ts.hours_per_week;
+                        let site_url = ts.site_url.clone();
+                        let w_l = i.t(keys::WEEK_ABBR);
+                        let d_l = i.t(keys::DAY_ABBR);
+                        let h_l = i.t(keys::HOUR_ABBR);
+                        let m_l = i.t(keys::MINUTE_ABBR);
+                        let multi = nw > 1;
+                        let nav_row_count = ts.work_items.len();
+                        let nav_col_count = nw * 6;
+
+                        // ── Build header columns for every week group ──
+                        let mut header_cols: Vec<AnyView> = Vec::new();
+                        for (wi, wk_monday) in week_mondays.iter().enumerate() {
+                            let wk_dates: Vec<NaiveDate> = (0..5)
+                                .map(|d| *wk_monday + Duration::days(d))
+                                .collect();
+
+                            for (di, d) in wk_dates.iter().enumerate() {
+                                let day_name = i.t(day_key(di as u32));
+                                let date_str = i.format_day_month(d);
+                                let total_str = format_hours_short(ts.day_total(*d), dec_sep);
+                                let is_today = *d == today.get();
+                                let cls = if is_today {
+                                    "col-day col-today"
+                                } else if di == 0 && wi > 0 {
+                                    "col-day week-separator"
+                                } else {
+                                    "col-day"
+                                };
+                                header_cols.push(view! {
+                                    <th class={cls}>
+                                        <div class="day-name">{day_name}</div>
+                                        <div class="day-date">{date_str}</div>
+                                        <div class="day-total">{total_str}</div>
+                                    </th>
+                                }.into_any());
                             }
-                        }).collect::<Vec<_>>()}
-                    </ul>
-                }
-            })}
 
-            // ── Popups rendered outside the table ──
-            // Multiple popups can be open simultaneously. Each is draggable
-            // by its header bar and independently closeable.
-            <For
-                each={move || open_popups.get()}
-                key={|info: &PopupInfo| info.popup_id}
-                children={move |info: PopupInfo| {
-                    let pid = info.popup_id;
-                    let pos_sig = info.position_style;
-                    let on_close_popup = Callback::new(move |_: ()| {
-                        open_popups.update(|ps| ps.retain(|p| p.popup_id != pid));
-                    });
+                            let we_total_str = format_hours_short(ts.weekend_total(*wk_monday), dec_sep);
+                            // Only highlight the weekend column as col-today if today is Sat or Sun AND this weekend column contains today
+                            let today_date = today.get();
+                            let is_today_weekend = (today_date == *wk_monday + Duration::days(5)) || (today_date == *wk_monday + Duration::days(6));
+                            let weekend_cls = if is_today_weekend {
+                                "col-weekend col-today"
+                            } else {
+                                "col-weekend"
+                            };
+                            header_cols.push(view! {
+                                <th class={weekend_cls}>
+                                    <div class="day-name" title={i.t(keys::WEEKEND_TITLE)}>{i.t(keys::WEEKEND)}</div>
+                                    <div class="day-total">{we_total_str}</div>
+                                </th>
+                            }.into_any());
 
+                            let wk_total_str = format_hours_short(ts.week_total(*wk_monday), dec_sep);
+                            let total_label = if multi {
+                                let wn = wk_monday.iso_week().week();
+                                format!("{}{}", w_l.to_uppercase(), wn)
+                            } else {
+                                i.t(keys::TOTAL)
+                            };
+                            header_cols.push(view! {
+                                <th class="col-total">
+                                    <div class="day-name">{total_label}</div>
+                                    <div class="day-total">{wk_total_str}</div>
+                                </th>
+                            }.into_any());
+                        }
+
+                        // ── Build body rows ──
+                        let body_rows: Vec<AnyView> = ts.work_items
+                            .iter()
+                            .enumerate()
+                            .map(|(row_idx, item)| {
+                                let key = item.key.clone();
+                                let item_ytd = ts.item_ytd_total(&key);
+
+                                let header_total = {
+                                    let s = format_hours_short(item_ytd, dec_sep);
+                                    if s.is_empty() { String::new() } else { format!("{}", s) }
+                                };
+
+                                let icon_url = item.icon_url.clone();
+                                let summary = item.summary.clone();
+                                let _summary_for_title = summary.clone();
+                                let key_display = key.clone();
+                                let mut row_pr_links = ts
+                                    .bitbucket_activity
+                                    .iter()
+                                    .filter_map(|(cell_key, activity)| {
+                                        cell_key
+                                            .strip_prefix(&format!("{}:", key))
+                                            .map(|_| activity.pr_links.clone())
+                                    })
+                                    .flatten()
+                                    .collect::<Vec<_>>();
+                                row_pr_links.sort();
+                                row_pr_links.dedup();
+
+                                // Cells for every visible week group
+                                let mut week_cells: Vec<AnyView> = Vec::new();
+                                for (wi, wk_monday) in week_mondays.iter().enumerate() {
+                                    let wk_dates: Vec<NaiveDate> = (0..5)
+                                        .map(|d| *wk_monday + Duration::days(d))
+                                        .collect();
+
+                                    // ── Weekday cells ──
+                                    for (di, d) in wk_dates.iter().enumerate() {
+                                        let hours = ts.cell_hours(&key, *d);
+                                        let cell_text = format_hours_short(hours, dec_sep);
+                                        let worklogs = ts.cell_worklogs(&key, *d);
+
+                                        let bb_activity_for_closure = ts.bitbucket_activity.clone();
+                                        let cell_activity = bb_activity_for_closure
+                                            .get(&format!("{}:{}", key, d))
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        let commit_messages = cell_activity.commit_messages.clone();
+                                        let has_pr_review = cell_activity.has_pr_review;
+
+                                        let has_commit_associations = !cell_activity.commit_messages.is_empty()
+                                            || !cell_activity.commit_links.is_empty();
+                                        let has_worklogs = !worklogs.is_empty();
+                                        let show_corner_commit_overlay =
+                                            has_worklogs && has_commit_associations;
+                                        let show_corner_pr_overlay = has_worklogs && has_pr_review;
+                                        let show_center_dual_overlay =
+                                            !has_worklogs && has_commit_associations && has_pr_review;
+                                        let show_center_commit_overlay =
+                                            !has_worklogs && has_commit_associations && !has_pr_review;
+                                        let show_center_pr_overlay =
+                                            !has_worklogs && !has_commit_associations && has_pr_review;
+                                        let (cell_display, title) = if !worklogs.is_empty() {
+                                            // Normal worklog cell
+                                            let title = if worklogs.len() > 1 {
+                                                worklogs
+                                                    .iter()
+                                                    .map(|w| {
+                                                        let h = format_hours_long(w.hours, hpd, hpw, &w_l, &d_l, &h_l, &m_l);
+                                                        // Strip work item key from start of comment if present
+                                                        let comment = if let Some(stripped) = w.comment.strip_prefix(&format!("{} ", key)) {
+                                                            stripped
+                                                        } else {
+                                                            w.comment.as_str()
+                                                        };
+                                                        if comment.is_empty() {
+                                                            format!("{}", h)
+                                                        } else {
+                                                            format!("{}: {}", h, comment)
+                                                        }
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n")
+                                            } else {
+                                                worklogs[0].comment.clone()
+                                            };
+                                            (cell_text.clone(), title)
+                                        } else if !commit_messages.is_empty() {
+                                            (String::new(), commit_messages.join("\n"))
+                                        } else if has_pr_review {
+                                            (String::new(), String::new())
+                                        } else {
+                                            (String::new(), String::new())
+                                        };
+
+                                        let cell_key = key.clone();
+                                        let cell_date = *d;
+                                        let cell_date_str = d.to_string();
+                                        let cell_entries: Vec<_> = worklogs.into_iter().cloned().collect();
+                                        let ck2 = cell_key.clone();
+                                        let entries2 = cell_entries.clone();
+                                        let is_today = cell_date == today.get();
+                                        let cls = if is_today {
+                                            "col-day timesheet-cell col-today"
+                                        } else if di == 0 && wi > 0 {
+                                            "col-day timesheet-cell week-separator"
+                                        } else {
+                                            "col-day timesheet-cell"
+                                        };
+
+                                        let cell_is_today = is_today;
+                                        let nav_col = wi * 6 + di;
+                                        let cell_summary = summary.clone();
+                                        let site_url_for_cell = site_url.clone();
+                                        let owner_for_cell_popup = component_owner.clone();
+                                        let row_pr_links_for_cell = row_pr_links.clone();
+                                        let open_weekday_popup: std::rc::Rc<dyn Fn(Option<char>)> = std::rc::Rc::new({
+                                            let ck2 = ck2.clone();
+                                            let entries2 = entries2.clone();
+                                            let bb_activity_for_closure = bb_activity_for_closure.clone();
+                                            let cell_summary = cell_summary.clone();
+                                            let row_pr_links_for_cell = row_pr_links_for_cell.clone();
+                                            let site_url_for_cell = site_url_for_cell.clone();
+                                            let owner_for_cell_popup = owner_for_cell_popup.clone();
+                                            move |digit: Option<char>| {
+                                                let existing_popup_id = open_popups.with(|ps| {
+                                                    ps.iter()
+                                                        .find(|p| p.issue_key == ck2 && p.date == cell_date)
+                                                        .map(|p| p.popup_id)
+                                                });
+                                                if let Some(popup_id) = existing_popup_id {
+                                                    #[cfg(feature = "hydrate")]
+                                                    if let Some(d) = digit {
+                                                        schedule_digit_fill_for_popup(popup_id, d);
+                                                    }
+                                                    #[cfg(not(feature = "hydrate"))]
+                                                    let _ = popup_id;
+                                                    return;
+                                                }
+                                                let (suggested_comments, is_git_log) = if entries2.is_empty() {
+                                                    let activity = bb_activity_for_closure
+                                                        .get(&format!("{}:{}", ck2, cell_date))
+                                                        .cloned()
+                                                        .unwrap_or_default();
+                                                    if !activity.commit_messages.is_empty() {
+                                                        (activity.commit_messages, true)
+                                                    } else if activity.has_pr_review {
+                                                        (vec!["review".to_string()], false)
+                                                    } else {
+                                                        (vec![], false)
+                                                    }
+                                                } else {
+                                                    (vec![], false)
+                                                };
+                                                let suggested_comment = if is_git_log {
+                                                    suggested_comments.first().cloned()
+                                                } else {
+                                                    None
+                                                };
+                                                let activity_links = bb_activity_for_closure
+                                                    .get(&format!("{}:{}", ck2, cell_date))
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let pos_style = compute_popup_style(
+                                                    &ck2,
+                                                    &cell_date.to_string(),
+                                                    entries2.len(),
+                                                );
+                                                let issue_summary = cell_summary.clone();
+                                                let popup = PopupInfo {
+                                                    popup_id: NEXT_POPUP_ID.fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    ),
+                                                    issue_key: ck2.clone(),
+                                                    issue_summary,
+                                                    date: cell_date,
+                                                    entries: entries2.clone(),
+                                                    hours_per_day: hpd,
+                                                    hours_per_week: hpw,
+                                                    suggested_comments,
+                                                    suggested_comment: suggested_comment.clone(),
+                                                    commit_messages: activity_links.commit_messages.clone(),
+                                                    commit_links: activity_links.commit_links,
+                                                    pr_links: row_pr_links_for_cell.clone(),
+                                                    is_git_log,
+                                                    is_weekend: false,
+                                                    is_today: cell_is_today,
+                                                    position_style: owner_for_cell_popup
+                                                        .with(|| RwSignal::new(pos_style)),
+                                                    site_url: site_url_for_cell.clone(),
+                                                    restored_timer_popup: None,
+                                                    initial_digit: digit,
+                                                };
+                                                open_popups.update(|ps| ps.push(popup));
+                                            }
+                                        });
+                                        let open_weekday_popup_click = open_weekday_popup.clone();
+                                        let open_weekday_popup_keydown = open_weekday_popup.clone();
+                                        let focused_cell_for_focus = focused_cell;
+                                        let focused_cell_for_tabindex = focused_cell;
+                                        let focused_cell_for_keydown = focused_cell;
+                                        week_cells.push(view! {
+                                            <td class={cls} title={title}>
+                                                <span
+                                                    class={if show_corner_commit_overlay || show_corner_pr_overlay {
+                                                        "cell-value cell-value-with-overlay-corners"
+                                                    } else if show_center_dual_overlay {
+                                                        "cell-value cell-value-with-overlay-center-pair"
+                                                    } else if show_center_commit_overlay {
+                                                        "cell-value cell-value-with-commit-overlay-center"
+                                                    } else {
+                                                        "cell-value"
+                                                    }}
+                                                    data-cell-key={cell_key}
+                                                    data-cell-date={cell_date_str}
+                                                    data-nav-row={row_idx.to_string()}
+                                                    data-nav-col={nav_col.to_string()}
+                                                    role="button"
+                                                    tabindex={move || {
+                                                        if focused_cell_for_tabindex.get() == Some((row_idx, nav_col)) {
+                                                            1
+                                                        } else {
+                                                            -1
+                                                        }
+                                                    }}
+                                                    on:focus=move |_| {
+                                                        focused_cell_for_focus.set(Some((row_idx, nav_col)));
+                                                    }
+                                                    on:click=move |_| {
+                                                        open_weekday_popup_click(None);
+                                                    }
+                                                    on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                                                        let key = ev.key();
+                                                        match key.as_str() {
+                                                            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" => {
+                                                                ev.prevent_default();
+                                                                let row_count = nav_row_count;
+                                                                let col_count = nav_col_count;
+                                                                if row_count == 0 || col_count == 0 {
+                                                                    return;
+                                                                }
+                                                                let mut next_row = row_idx;
+                                                                let mut next_col = nav_col;
+                                                                match key.as_str() {
+                                                                    "ArrowUp" => {
+                                                                        next_row = next_row.saturating_sub(1);
+                                                                    }
+                                                                    "ArrowDown" => {
+                                                                        next_row = (next_row + 1).min(row_count - 1);
+                                                                    }
+                                                                    "ArrowLeft" => {
+                                                                        next_col = next_col.saturating_sub(1);
+                                                                    }
+                                                                    "ArrowRight" => {
+                                                                        next_col = (next_col + 1).min(col_count - 1);
+                                                                    }
+                                                                    _ => {}
+                                                                }
+                                                                focused_cell_for_keydown.set(Some((next_row, next_col)));
+                                                                #[cfg(feature = "hydrate")]
+                                                                focus_grid_cell(next_row, next_col);
+                                                            }
+                                                            "Enter" => {
+                                                                ev.prevent_default();
+                                                                open_weekday_popup_keydown(None);
+                                                            }
+                                                            _ => {
+                                                                if key.len() == 1 {
+                                                                    if let Some(digit) = key.chars().next().filter(|c| c.is_ascii_digit()) {
+                                                                        ev.prevent_default();
+                                                                        open_weekday_popup_keydown(Some(digit));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                >
+                                                    {if show_corner_commit_overlay || show_corner_pr_overlay {
+                                                        view! {
+                                                            <>
+                                                                {show_corner_commit_overlay.then(|| view! {
+                                                                    <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner-left">{"c"}</span>
+                                                                })}
+                                                                {show_corner_pr_overlay.then(|| view! {
+                                                                    <span class="cell-commit-overlay-mark cell-pr-overlay-mark--corner-right">{"p"}</span>
+                                                                })}
+                                                                <span class="cell-value-text">{cell_display.clone()}</span>
+                                                            </>
+                                                        }
+                                                            .into_any()
+                                                    } else if show_center_dual_overlay {
+                                                        view! {
+                                                            <>
+                                                                <span class="cell-commit-overlay-mark cell-commit-overlay-mark--pair-left">{"c"}</span>
+                                                                <span class="cell-commit-overlay-mark cell-pr-overlay-mark--pair-right">{"p"}</span>
+                                                                <span class="cell-value-text"></span>
+                                                            </>
+                                                        }
+                                                            .into_any()
+                                                    } else if show_center_commit_overlay {
+                                                        view! {
+                                                            <>
+                                                                <span class="cell-commit-overlay-mark cell-commit-overlay-mark--center">{"c"}</span>
+                                                                <span class="cell-value-text"></span>
+                                                            </>
+                                                        }
+                                                            .into_any()
+                                                    } else if show_center_pr_overlay {
+                                                        view! {
+                                                            <>
+                                                                <span class="cell-commit-overlay-mark cell-pr-overlay-mark--center">{"p"}</span>
+                                                                <span class="cell-value-text"></span>
+                                                            </>
+                                                        }
+                                                            .into_any()
+                                                    } else {
+                                                        view! { <>{cell_display}</> }.into_any()
+                                                    }}
+                                                </span>
+                                            </td>
+                                        }.into_any());
+                                    }
+
+                                    // ── Weekend cell ──
+                                    let sat = *wk_monday + Duration::days(5);
+                                    let sun = *wk_monday + Duration::days(6);
+                                    let we_hours = ts.weekend_hours(&key, *wk_monday);
+                                    let we_text = format_hours_short(we_hours, dec_sep);
+                                    let we_worklogs: Vec<_> = ts.cell_worklogs(&key, sat)
+                                        .into_iter()
+                                        .chain(ts.cell_worklogs(&key, sun))
+                                        .collect();
+
+                                    let we_title = if we_worklogs.len() > 1 {
+                                        we_worklogs
+                                            .iter()
+                                            .map(|w| {
+                                                let h = format_hours_long(w.hours, hpd, hpw, &w_l, &d_l, &h_l, &m_l);
+                                                // Strip work item key from start of comment if present
+                                                let comment = if let Some(stripped) = w.comment.strip_prefix(&format!("{} ", key)) {
+                                                    stripped
+                                                } else {
+                                                    w.comment.as_str()
+                                                };
+                                                if comment.is_empty() {
+                                                    format!("{}", h)
+                                                } else {
+                                                    format!("{}: {}", h, comment)
+                                                }
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    } else if we_worklogs.len() == 1 {
+                                        let h = format_hours_long(we_worklogs[0].hours, hpd, hpw, &w_l, &d_l, &h_l, &m_l);
+                                        let comment = if let Some(stripped) = we_worklogs[0].comment.strip_prefix(&format!("{} ", key)) {
+                                            stripped
+                                        } else {
+                                            we_worklogs[0].comment.as_str()
+                                        };
+                                        if comment.is_empty() {
+                                            h
+                                        } else {
+                                            format!("{}: {}", h, comment)
+                                        }
+                                    } else {
+                                        String::new()
+                                    };
+
+
+                                    let we_entries: Vec<_> = we_worklogs.into_iter().cloned().collect();
+                                    let weekend_activity_sat = ts
+                                        .bitbucket_activity
+                                        .get(&format!("{}:{}", key, sat))
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let weekend_activity_sun = ts
+                                        .bitbucket_activity
+                                        .get(&format!("{}:{}", key, sun))
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let mut weekend_commit_messages = weekend_activity_sat.commit_messages;
+                                    weekend_commit_messages.extend(weekend_activity_sun.commit_messages);
+                                    let weekend_has_pr_review =
+                                        weekend_activity_sat.has_pr_review || weekend_activity_sun.has_pr_review;
+                                    let weekend_has_commit_associations = !weekend_commit_messages.is_empty()
+                                        || !weekend_activity_sat.commit_links.is_empty()
+                                        || !weekend_activity_sun.commit_links.is_empty();
+                                    let weekend_has_worklogs = !we_entries.is_empty();
+                                    let show_corner_commit_overlay_weekend =
+                                        weekend_has_worklogs && weekend_has_commit_associations;
+                                    let show_corner_pr_overlay_weekend =
+                                        weekend_has_worklogs && weekend_has_pr_review;
+                                    let show_center_dual_overlay_weekend = !weekend_has_worklogs
+                                        && weekend_has_commit_associations
+                                        && weekend_has_pr_review;
+                                    let show_center_commit_overlay_weekend = !weekend_has_worklogs
+                                        && weekend_has_commit_associations
+                                        && !weekend_has_pr_review;
+                                    let show_center_pr_overlay_weekend = !weekend_has_worklogs
+                                        && !weekend_has_commit_associations
+                                        && weekend_has_pr_review;
+                                    let (we_display, we_tooltip) = if !we_entries.is_empty() {
+                                        (we_text.clone(), we_title.clone())
+                                    } else if !weekend_commit_messages.is_empty() {
+                                        (String::new(), weekend_commit_messages.join("\n"))
+                                    } else if weekend_has_pr_review {
+                                        (String::new(), String::new())
+                                    } else {
+                                        (String::new(), String::new())
+                                    };
+
+                                    let we_key = key.clone();
+
+                                    let we_sat_str = sat.to_string();
+
+                                    let we_key2 = we_key.clone();
+
+                                    let we_entries2 = we_entries.clone();
+                                    let bb_activity_for_closure = ts.bitbucket_activity.clone();
+
+                                    // Only highlight the weekend cell as col-today if today is Sat or Sun AND this weekend cell contains today
+                                    let today_date = today.get();
+                                    let is_today_weekend = (today_date == sat) || (today_date == sun);
+                                    let weekend_cls = if is_today_weekend {
+                                        "col-weekend timesheet-cell col-today"
+                                    } else {
+                                        "col-weekend timesheet-cell"
+                                    };
+                                    let we_cell_is_today = is_today_weekend;
+                                    let weekend_nav_col = wi * 6 + 5;
+                                    let we_summary = summary.clone();
+                                    let site_url_for_we = site_url.clone();
+                                    let owner_for_weekend_popup = component_owner.clone();
+                                    let row_pr_links_for_weekend = row_pr_links.clone();
+                                    let open_weekend_popup: std::rc::Rc<dyn Fn(Option<char>)> = std::rc::Rc::new({
+                                        let we_key2 = we_key2.clone();
+                                        let we_entries2 = we_entries2.clone();
+                                        let bb_activity_for_closure = bb_activity_for_closure.clone();
+                                        let we_summary = we_summary.clone();
+                                        let row_pr_links_for_weekend = row_pr_links_for_weekend.clone();
+                                        let site_url_for_we = site_url_for_we.clone();
+                                        let owner_for_weekend_popup = owner_for_weekend_popup.clone();
+                                        move |digit: Option<char>| {
+                                            let existing_popup_id = open_popups.with(|ps| {
+                                                ps.iter()
+                                                    .find(|p| p.issue_key == we_key2 && p.date == sat)
+                                                    .map(|p| p.popup_id)
+                                            });
+                                            if let Some(popup_id) = existing_popup_id {
+                                                #[cfg(feature = "hydrate")]
+                                                if let Some(d) = digit {
+                                                    schedule_digit_fill_for_popup(popup_id, d);
+                                                }
+                                                #[cfg(not(feature = "hydrate"))]
+                                                let _ = popup_id;
+                                                return;
+                                            }
+                                            let (suggested_comments, is_git_log) = if we_entries2.is_empty() {
+                                                let sat_activity = bb_activity_for_closure
+                                                    .get(&format!("{}:{}", we_key2, sat))
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let sun_activity = bb_activity_for_closure
+                                                    .get(&format!("{}:{}", we_key2, sun))
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let mut commit_messages = sat_activity.commit_messages;
+                                                commit_messages.extend(sun_activity.commit_messages);
+                                                if !commit_messages.is_empty() {
+                                                    (commit_messages, true)
+                                                } else if sat_activity.has_pr_review || sun_activity.has_pr_review {
+                                                    (vec!["review".to_string()], false)
+                                                } else {
+                                                    (vec![], false)
+                                                }
+                                            } else {
+                                                (vec![], false)
+                                            };
+                                            let suggested_comment = if is_git_log {
+                                                suggested_comments.first().cloned()
+                                            } else {
+                                                None
+                                            };
+                                            let sat_links = bb_activity_for_closure
+                                                .get(&format!("{}:{}", we_key2, sat))
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            let sun_links = bb_activity_for_closure
+                                                .get(&format!("{}:{}", we_key2, sun))
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            let mut weekend_commit_messages = sat_links.commit_messages.clone();
+                                            weekend_commit_messages.extend(sun_links.commit_messages.clone());
+                                            let mut weekend_commit_links = sat_links.commit_links;
+                                            weekend_commit_links.extend(sun_links.commit_links);
+                                            let mut seen_weekend_links = std::collections::HashSet::new();
+                                            weekend_commit_links
+                                                .retain(|link| seen_weekend_links.insert(link.clone()));
+                                            let pos_style = compute_popup_style(
+                                                &we_key2,
+                                                &sat.to_string(),
+                                                we_entries2.len(),
+                                            );
+                                            let issue_summary = we_summary.clone();
+                                            let popup = PopupInfo {
+                                                popup_id: NEXT_POPUP_ID
+                                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                                issue_key: we_key2.clone(),
+                                                issue_summary,
+                                                date: sat,
+                                                entries: we_entries2.clone(),
+                                                hours_per_day: hpd,
+                                                hours_per_week: hpw,
+                                                suggested_comments,
+                                                suggested_comment: suggested_comment.clone(),
+                                                commit_messages: weekend_commit_messages,
+                                                commit_links: weekend_commit_links,
+                                                pr_links: row_pr_links_for_weekend.clone(),
+                                                is_git_log,
+                                                is_weekend: true,
+                                                is_today: we_cell_is_today,
+                                                position_style: owner_for_weekend_popup
+                                                    .with(|| RwSignal::new(pos_style)),
+                                                site_url: site_url_for_we.clone(),
+                                                restored_timer_popup: None,
+                                                initial_digit: digit,
+                                            };
+                                            open_popups.update(|ps| ps.push(popup));
+                                        }
+                                    });
+                                    let open_weekend_popup_click = open_weekend_popup.clone();
+                                    let open_weekend_popup_keydown = open_weekend_popup.clone();
+                                    let focused_cell_for_weekend_focus = focused_cell;
+                                    let focused_cell_for_weekend_tabindex = focused_cell;
+                                    let focused_cell_for_weekend_keydown = focused_cell;
+                                    week_cells.push(view! {
+                                        <td class={weekend_cls} title={we_tooltip}>
+                                            <span
+                                                class={if show_corner_commit_overlay_weekend
+                                                    || show_corner_pr_overlay_weekend
+                                                {
+                                                    "cell-value cell-value-with-overlay-corners"
+                                                } else if show_center_dual_overlay_weekend {
+                                                    "cell-value cell-value-with-overlay-center-pair"
+                                                } else if show_center_commit_overlay_weekend
+                                                    || show_center_pr_overlay_weekend
+                                                {
+                                                    "cell-value cell-value-with-commit-overlay-center"
+                                                } else {
+                                                    "cell-value"
+                                                }}
+                                                data-cell-key={we_key}
+                                                data-cell-date={we_sat_str}
+                                                data-nav-row={row_idx.to_string()}
+                                                data-nav-col={weekend_nav_col.to_string()}
+                                                role="button"
+                                                tabindex={move || {
+                                                    if focused_cell_for_weekend_tabindex.get()
+                                                        == Some((row_idx, weekend_nav_col))
+                                                    {
+                                                        1
+                                                    } else {
+                                                        -1
+                                                    }
+                                                }}
+                                                on:focus=move |_| {
+                                                    focused_cell_for_weekend_focus
+                                                        .set(Some((row_idx, weekend_nav_col)));
+                                                }
+                                                on:click=move |_| {
+                                                    open_weekend_popup_click(None);
+                                                }
+                                                on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                                                    let key = ev.key();
+                                                    match key.as_str() {
+                                                        "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" => {
+                                                            ev.prevent_default();
+                                                            let row_count = nav_row_count;
+                                                            let col_count = nav_col_count;
+                                                            if row_count == 0 || col_count == 0 {
+                                                                return;
+                                                            }
+                                                            let mut next_row = row_idx;
+                                                            let mut next_col = weekend_nav_col;
+                                                            match key.as_str() {
+                                                                "ArrowUp" => {
+                                                                    next_row = next_row.saturating_sub(1);
+                                                                }
+                                                                "ArrowDown" => {
+                                                                    next_row = (next_row + 1).min(row_count - 1);
+                                                                }
+                                                                "ArrowLeft" => {
+                                                                    next_col = next_col.saturating_sub(1);
+                                                                }
+                                                                "ArrowRight" => {
+                                                                    next_col = (next_col + 1).min(col_count - 1);
+                                                                }
+                                                                _ => {}
+                                                            }
+                                                            focused_cell_for_weekend_keydown
+                                                                .set(Some((next_row, next_col)));
+                                                            #[cfg(feature = "hydrate")]
+                                                            focus_grid_cell(next_row, next_col);
+                                                        }
+                                                        "Enter" => {
+                                                            ev.prevent_default();
+                                                            open_weekend_popup_keydown(None);
+                                                        }
+                                                        _ => {
+                                                            if key.len() == 1 {
+                                                                if let Some(digit) =
+                                                                    key.chars().next().filter(|c| c.is_ascii_digit())
+                                                                {
+                                                                    ev.prevent_default();
+                                                                    open_weekend_popup_keydown(Some(digit));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                            >
+                                                {if show_corner_commit_overlay_weekend || show_corner_pr_overlay_weekend {
+                                                    view! {
+                                                        <>
+                                                            {show_corner_commit_overlay_weekend.then(|| view! {
+                                                                <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner-left">{"c"}</span>
+                                                            })}
+                                                            {show_corner_pr_overlay_weekend.then(|| view! {
+                                                                <span class="cell-commit-overlay-mark cell-pr-overlay-mark--corner-right">{"p"}</span>
+                                                            })}
+                                                            <span class="cell-value-text">{we_display.clone()}</span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else if show_center_dual_overlay_weekend {
+                                                    view! {
+                                                        <>
+                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--pair-left">{"c"}</span>
+                                                            <span class="cell-commit-overlay-mark cell-pr-overlay-mark--pair-right">{"p"}</span>
+                                                            <span class="cell-value-text"></span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else if show_center_commit_overlay_weekend {
+                                                    view! {
+                                                        <>
+                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--center">{"c"}</span>
+                                                            <span class="cell-value-text"></span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else if show_center_pr_overlay_weekend {
+                                                    view! {
+                                                        <>
+                                                            <span class="cell-commit-overlay-mark cell-pr-overlay-mark--center">{"p"}</span>
+                                                            <span class="cell-value-text"></span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else {
+                                                    view! { <>{we_display}</> }.into_any()
+                                                }}
+                                            </span>
+                                        </td>
+                                    }.into_any());
+
+                                    // ── Week total cell ──
+                                    let item_wk_total = ts.item_week_total(&key, *wk_monday);
+                                    week_cells.push(view! {
+                                        <td class="col-total">
+                                            {format_hours_short(item_wk_total, dec_sep)}
+                                        </td>
+                                    }.into_any());
+                                }
+
+                                view! {
+                                    <tr>
+                                        <td class="col-item"
+                                            on:mouseenter=move |_ev: leptos::ev::MouseEvent| {
+                                                #[cfg(feature = "hydrate")]
+                                                {
+                                                    use wasm_bindgen::JsCast;
+                                                    if let Some(el) = _ev.target()
+                                                        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                                                    {
+                                                        if el.scroll_width() > el.client_width() {
+                                                            let _ = el.set_attribute("title", &_summary_for_title);
+                                                        } else {
+                                                            let _ = el.remove_attribute("title");
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        >
+                                            <img src={icon_url} class="issue-icon" width="12" height="12" alt={i18n.get().t(keys::ISSUE_ICON_ALT)} />
+                                            <a
+                                                href={format!("https://uplandsoftware.atlassian.net/browse/{}", key_display)}
+                                                target="_blank"
+                                                class="issue-key"
+                                                tabindex="2"
+                                            >
+                                                {key_display.clone()}
+                                            </a>
+                                            <span class="issue-summary">{summary}</span>
+                                        </td>
+                                        <td class="col-issue-total">
+                                            {header_total}
+                                        </td>
+                                        {week_cells}
+                                    </tr>
+
+                                }.into_any()
+                            })
+                            .collect();
+
+                        // ── Build colgroup cols for table-layout:fixed ──
+                        // col-item has no width so it absorbs whatever space remains after
+                        // all fixed-width columns have claimed their share.
+                        let mut colgroup_cols: Vec<AnyView> = Vec::new();
+                        colgroup_cols.push(view! { <col class="col-item"></col> }.into_any());
+                        colgroup_cols.push(view! { <col class="col-issue-total"></col> }.into_any());
+                        for _ in 0..nw {
+                            for _ in 0..5 {
+                                colgroup_cols.push(view! { <col class="col-day"></col> }.into_any());
+                            }
+                            colgroup_cols.push(view! { <col class="col-weekend"></col> }.into_any());
+                            colgroup_cols.push(view! { <col class="col-total"></col> }.into_any());
+                        }
+
+                        view! {
+                            <div class="timesheet-table-wrap">
+                                <table class="timesheet-grid">
+                                    <colgroup>{colgroup_cols}</colgroup>
+
+                                <thead>
+                                    <tr>
+                                        <th class="col-item" colspan="2">
+                                            <input
+                                                type="text"
+                                                class="search-input"
+                                                placeholder={move || i18n.get().t(keys::SEARCH_WORK_ITEM)}
+                                                prop:value={move || search_query.get()}
+                                                on:input=on_search_input.clone()
+                                                on:blur=move |_| {
+                                                    show_search_dropdown.set(false);
+                                                }
+                                                on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                                                    if ev.key() == "Escape" {
+                                                        show_search_dropdown.set(false);
+                                                        search_query.set(String::new());
+                                                        search_results.set(vec![]);
+                                                        search_version.set(search_version.get_untracked() + 1);
+                                                    }
+                                                }
+                                            />
+                                        </th>
+                                        {header_cols}
+                                    </tr>
+
+                                    </thead>
+                                    <tbody>
+                                        {body_rows}
+                                    </tbody>
+                                </table>
+                            </div>
+                        }.into_any()
+                    }}
+                </div>
+
+                {move || refresh_toast.get().map(|msg| view! {
+                    <div class="refresh-toast" role="status" aria-live="polite">{msg}</div>
+                })}
+
+                // ── Search dropdown rendered outside the table so it is never
+                // clipped by overflow:hidden / sticky headers / stacking contexts.
+                // Positioned with position:fixed relative to the .search-input element.
+                {move || show_search_dropdown.get().then(|| {
+                    let items = search_results.get();
+                    let dd_style = compute_search_dropdown_style();
                     view! {
-                        <CellPopup
-                           popup_id={pid}
-                           pos_sig={pos_sig.clone()}
-                           issue_key={info.issue_key}
-                           issue_summary={info.issue_summary}
-                           date={info.date}
-                           entries={info.entries}
-                           hours_per_day={info.hours_per_day}
-                           hours_per_week={info.hours_per_week}
-                           suggested_comments={info.suggested_comments.clone()}
-                           suggested_comment={info.suggested_comment.clone()}
-                           commit_messages={info.commit_messages.clone()}
-                           commit_links={info.commit_links.clone()}
-                           pr_links={info.pr_links.clone()}
-                           is_git_log={info.is_git_log}
-                           is_weekend={info.is_weekend}
-                           restored_timer_popup={info.restored_timer_popup.clone()}
-                           is_today={info.is_today}
-                           on_close=on_close_popup
-                           on_changed=on_popup_changed
-                           site_url={info.site_url}
-                        />
+                        <div class="search-dropdown-backdrop" on:mousedown=move |_| {
+                            show_search_dropdown.set(false);
+                        }></div>
+                        <ul class="search-dropdown search-dropdown-positioned" style={dd_style}>
+                            {items.into_iter().map(|item| {
+                                let pick_item = item.clone();
+                                let icon = item.icon_url.clone();
+                                let key_label = item.key.clone();
+                                let summary_label = item.summary.clone();
+                                view! {
+                                    <li
+                                        class="search-dropdown-item"
+                                        on:mousedown=move |ev: leptos::ev::MouseEvent| {
+                                            ev.prevent_default();
+                                            on_pick_item(pick_item.clone());
+                                        }
+                                    >
+                                        <img src={icon.clone()} class="issue-icon" width="12" height="12" alt={i18n.get().t(keys::ISSUE_ICON_ALT)} />
+                                        <span class="issue-key">{key_label.clone()}</span>
+                                        <span class="issue-summary">{summary_label.clone()}</span>
+                                    </li>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </ul>
                     }
-                }}
-            />
-            // Settings dialog modal
-            {move || show_settings.get().then(|| view! {
-                <SettingsDialog on_ok=on_close_settings on_cancel=on_close_settings />
-            })}
-            {move || show_report.get().then(|| view! {
-                <ReportOverlay
-                    hours_per_day={last_data.get().map(|d| d.hours_per_day).unwrap_or(8.0)}
-                    hours_per_week={last_data.get().map(|d| d.hours_per_week).unwrap_or(40.0)}
-                    on_close=on_close_report
+                })}
+
+                // ── Popups rendered outside the table ──
+                // Multiple popups can be open simultaneously. Each is draggable
+                // by its header bar and independently closeable.
+                <For
+                    each={move || open_popups.get()}
+                    key={|info: &PopupInfo| info.popup_id}
+                    children={move |info: PopupInfo| {
+                        let pid = info.popup_id;
+                        let pos_sig = info.position_style;
+                        let on_close_popup = Callback::new(move |_: ()| {
+                            open_popups.update(|ps| ps.retain(|p| p.popup_id != pid));
+                            #[cfg(feature = "hydrate")]
+                            if let Some((row, col)) = focused_cell.get_untracked() {
+                                focus_grid_cell(row, col);
+                            }
+                        });
+
+                        view! {
+                            <CellPopup
+                               popup_id={pid}
+                               pos_sig={pos_sig.clone()}
+                               issue_key={info.issue_key}
+                               issue_summary={info.issue_summary}
+                               date={info.date}
+                               entries={info.entries}
+                               hours_per_day={info.hours_per_day}
+                               hours_per_week={info.hours_per_week}
+                               suggested_comments={info.suggested_comments.clone()}
+                               suggested_comment={info.suggested_comment.clone()}
+                               commit_messages={info.commit_messages.clone()}
+                               commit_links={info.commit_links.clone()}
+                               pr_links={info.pr_links.clone()}
+                               is_git_log={info.is_git_log}
+                               is_weekend={info.is_weekend}
+                               restored_timer_popup={info.restored_timer_popup.clone()}
+                               is_today={info.is_today}
+                               on_close=on_close_popup
+                               on_changed=on_popup_changed
+                               site_url={info.site_url}
+                               initial_digit={info.initial_digit}
+                            />
+                        }
+                    }}
                 />
-            })}
-        </div>
-    }
+                // Settings dialog modal
+                {move || show_settings.get().then(|| view! {
+                    <SettingsDialog on_ok=on_close_settings on_cancel=on_close_settings />
+                })}
+                {move || show_report.get().then(|| view! {
+                    <ReportOverlay
+                        hours_per_day={last_data.get().map(|d| d.hours_per_day).unwrap_or(8.0)}
+                        hours_per_week={last_data.get().map(|d| d.hours_per_week).unwrap_or(40.0)}
+                        on_close=on_close_report
+                        _on_open_settings=Some(on_open_settings_cb)
+                    />
+                })}
+            </div>
+        }
 }

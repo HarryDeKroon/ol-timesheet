@@ -103,6 +103,10 @@ pub mod keys {
     pub const REPORT_YEAR_SCOPE: &str = "report_year_scope";
     pub const REPORT_PTO_TOTAL: &str = "report_pto_total";
     pub const LIVE_REFRESH_APPLIED: &str = "live_refresh_applied";
+    pub const DURATIONS: &str = "durations";
+    pub const PULL_REQUESTS: &str = "pull_requests";
+    pub const LANGUAGE: &str = "language";
+    pub const SHOW_MERGED_PR_ACTIVITY: &str = "show_merged_pr_activity";
 }
 
 type TranslationMap = HashMap<&'static str, HashMap<&'static str, &'static str>>;
@@ -208,6 +212,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Year"),
         (keys::REPORT_PTO_TOTAL, "PTO"),
         (keys::LIVE_REFRESH_APPLIED, "Timesheet updated"),
+        (keys::DURATIONS, "Durations"),
+        (keys::PULL_REQUESTS, "Pull requests"),
+        (keys::LANGUAGE, "Language"),
+        (keys::SHOW_MERGED_PR_ACTIVITY, "Show \u{2018}merged\u{2019} activity"),
     ]
     .into_iter()
     .collect();
@@ -336,6 +344,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Année"),
         (keys::REPORT_PTO_TOTAL, "CP"),
         (keys::LIVE_REFRESH_APPLIED, "Feuille de temps mise à jour"),
+        (keys::DURATIONS, "Dur\u{00E9}es"),
+        (keys::PULL_REQUESTS, "Demandes de tirage"),
+        (keys::LANGUAGE, "Langue"),
+        (keys::SHOW_MERGED_PR_ACTIVITY, "Afficher l\u{2019}activit\u{00E9} \u{AB}\u{00A0}fusionn\u{00E9}e\u{00A0}\u{BB}"),
     ]
     .into_iter()
     .collect();
@@ -449,6 +461,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Jaar"),
         (keys::REPORT_PTO_TOTAL, "Verlof"),
         (keys::LIVE_REFRESH_APPLIED, "Urenstaat bijgewerkt"),
+        (keys::DURATIONS, "Duraties"),
+        (keys::PULL_REQUESTS, "Pull requests"),
+        (keys::LANGUAGE, "Taal"),
+        (keys::SHOW_MERGED_PR_ACTIVITY, "Toon \u{2018}samengevoegde\u{2019} activiteit"),
     ]
     .into_iter()
     .collect();

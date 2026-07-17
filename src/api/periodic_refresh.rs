@@ -336,6 +336,7 @@ fn build_refresh_diff(old: &RefreshSnapshot, new: &RefreshSnapshot) -> Timesheet
 
 fn bitbucket_activity_cells_from_source(
     activity: &bitbucket::BitbucketActivity,
+    show_merged_pr_activity: bool,
 ) -> HashMap<String, CellActivity> {
     let mut by_cell = HashMap::<String, CellActivity>::new();
     for (cell_key, commit_messages) in &activity.commit_messages_by_cell {
@@ -347,6 +348,9 @@ fn bitbucket_activity_cells_from_source(
         entry.commit_links = commit_links.clone();
     }
     for cell_key in &activity.pr_review_cells {
+        if !show_merged_pr_activity && activity.pr_merged_cells.contains(cell_key) {
+            continue;
+        }
         let entry = by_cell.entry(cell_key.clone()).or_default();
         entry.has_pr_review = true;
     }
@@ -466,7 +470,17 @@ async fn build_refresh_snapshot(
         let entry = bitbucket_activity_by_cell.entry(cell_key).or_default();
         entry.commit_links = commit_links;
     }
-    for cell_key in bitbucket_activity.pr_review_cells {
+    let prefs = crate::auth::load_user_prefs(&creds.account_id);
+    let filtered_pr_review: HashSet<String> = if prefs.show_merged_pr_activity {
+        bitbucket_activity.pr_review_cells
+    } else {
+        bitbucket_activity
+            .pr_review_cells
+            .difference(&bitbucket_activity.pr_merged_cells)
+            .cloned()
+            .collect()
+    };
+    for cell_key in filtered_pr_review {
         let entry = bitbucket_activity_by_cell.entry(cell_key).or_default();
         entry.has_pr_review = true;
     }
@@ -759,7 +773,8 @@ async fn backfill_bitbucket_week_for_account(
         }
     };
 
-    let cells = bitbucket_activity_cells_from_source(&fetched);
+    let prefs = crate::auth::load_user_prefs(account_id);
+    let cells = bitbucket_activity_cells_from_source(&fetched, prefs.show_merged_pr_activity);
     let mut diff = TimesheetRefreshDiff::default();
     diff.bitbucket_activity_upserted = cells
         .into_iter()

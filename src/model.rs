@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,12 @@ pub struct Settings {
     pub planned_time_off_keys: Vec<String>,
     #[serde(default)]
     pub study_keys: Vec<String>,
+    #[serde(default = "default_show_merged_pr_activity")]
+    pub show_merged_pr_activity: bool,
+}
+
+fn default_show_merged_pr_activity() -> bool {
+    true
 }
 
 fn default_hours_per_week() -> f64 {
@@ -223,23 +229,8 @@ pub fn sort_work_items_for_timesheet(
     worklogs: &[WorklogEntry],
     bitbucket_activity: &HashMap<String, CellActivity>,
 ) {
-    let keys_with_activity = worklogs
-        .iter()
-        .map(|entry| entry.issue_key.as_str())
-        .chain(
-            bitbucket_activity
-                .keys()
-                .filter_map(|cell_key| cell_key.split_once(':').map(|(key, _)| key)),
-        )
-        .collect::<HashSet<&str>>();
-
-    work_items.sort_by(|a, b| {
-        let a_has_activity = keys_with_activity.contains(a.key.as_str());
-        let b_has_activity = keys_with_activity.contains(b.key.as_str());
-        b_has_activity
-            .cmp(&a_has_activity)
-            .then_with(|| compare_jira_issue_keys(&a.key, &b.key))
-    });
+    let _ = (worklogs, bitbucket_activity);
+    work_items.sort_by(|a, b| compare_jira_issue_keys(&a.key, &b.key));
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {

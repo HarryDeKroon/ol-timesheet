@@ -214,10 +214,7 @@ pub fn prune_old_week_entries(retention_days: i64) {
                     serde_json::from_str(&bb_entry.data).unwrap_or_default();
                 bb_index.weeks.retain(|w| w.monday >= cutoff);
                 if let Ok(raw) = serde_json::to_string(&bb_index) {
-                    cache.insert(
-                        bb_key,
-                        cache_entry(raw, DEFAULT_TTL.as_secs()),
-                    );
+                    cache.insert(bb_key, cache_entry(raw, DEFAULT_TTL.as_secs()));
                 }
             }
         }

@@ -1308,10 +1308,23 @@ async fn prefetch_range(
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
     let bitbucket_range_supported =
         crate::api::bitbucket::requested_range_in_recent_weeks(start, end);
+    let prefs = crate::auth::load_user_prefs(&creds.account_id);
 
     if bitbucket_range_supported {
-        match fetch_timesheet_activity(&creds.email, &creds.account_id, display_name, start, end).await {
+        match fetch_timesheet_activity(&creds.email, &creds.account_id, display_name, start, end)
+            .await
+        {
             Ok(activity) => {
+                let filtered_pr_review: std::collections::HashSet<String> =
+                    if prefs.show_merged_pr_activity {
+                        activity.pr_review_cells.clone()
+                    } else {
+                        activity
+                            .pr_review_cells
+                            .difference(&activity.pr_merged_cells)
+                            .cloned()
+                            .collect()
+                    };
                 let known: std::collections::HashSet<String> =
                     all_items.iter().map(|w| w.key.clone()).collect();
                 let missing: Vec<String> = activity
@@ -1356,7 +1369,7 @@ async fn prefetch_range(
                     merged.dedup();
                     entry.commit_links = merged;
                 }
-                for cell_key in activity.pr_review_cells {
+                for cell_key in filtered_pr_review {
                     let entry = bitbucket_activity.entry(cell_key).or_default();
                     entry.has_pr_review = true;
                 }
@@ -1391,7 +1404,6 @@ async fn prefetch_range(
     // 3. Assemble and cache the TimesheetData.
     crate::model::sort_work_items_for_timesheet(&mut all_items, &all_worklogs, &bitbucket_activity);
 
-    let prefs = crate::auth::load_user_prefs(&creds.account_id);
     let ts = crate::model::TimesheetData {
         work_items: all_items,
         worklogs: all_worklogs,
@@ -1475,8 +1487,14 @@ pub async fn prefetch_startup_window(
     let forward = weeks_forward as i64;
     let period_start = anchor_monday - chrono::Duration::weeks(back);
     let period_end = anchor_monday + chrono::Duration::weeks(forward) + chrono::Duration::days(6);
-    if let Err(e) =
-        fetch_timesheet_activity(&creds.email, &creds.account_id, &display_name, period_start, period_end).await
+    if let Err(e) = fetch_timesheet_activity(
+        &creds.email,
+        &creds.account_id,
+        &display_name,
+        period_start,
+        period_end,
+    )
+    .await
     {
         log::warn!(
             "[prefetch] startup bitbucket prefetch failed for {} .. {}: {}",

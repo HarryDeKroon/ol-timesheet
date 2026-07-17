@@ -18,6 +18,26 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 /// Generate a replay-protection nonce in `{unix_secs}:{random_hex}` format.
 /// On WASM uses `js_sys`; on the server side (SSR compilation stub) uses chrono.
+
+/// Monotonically increasing counter used to assign z-index to popups when they
+/// gain focus, so the most recently focused popup is always on top.
+static POPUP_Z_COUNTER: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(100);
+
+/// Parse `"left:Xpx;top:Ypx[;...]"` into `(left, top)` in pixels.
+fn parse_popup_pos(style: &str) -> (f64, f64) {
+    let mut left = 0.0_f64;
+    let mut top = 0.0_f64;
+    for part in style.split(';') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix("left:") {
+            left = v.trim_end_matches("px").parse().unwrap_or(0.0);
+        } else if let Some(v) = part.strip_prefix("top:") {
+            top = v.trim_end_matches("px").parse().unwrap_or(0.0);
+        }
+    }
+    (left, top)
+}
 fn new_request_nonce() -> String {
     cfg_if::cfg_if! {
         if #[cfg(feature = "ssr")] {
@@ -97,6 +117,48 @@ fn worklog_url(site_url: &str, issue_key: &str, worklog_id: &str) -> String {
     )
 }
 
+#[cfg(feature = "hydrate")]
+fn schedule_initial_digit_fill(popup_id: u32, digit: char) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let inputs = popup_node.get_elements_by_class_name("popup-hours");
+        for idx in 0..inputs.length() {
+            let Some(node) = inputs.item(idx) else {
+                continue;
+            };
+            let Some(input) = node.dyn_ref::<web_sys::HtmlInputElement>() else {
+                continue;
+            };
+            if input.value().trim().is_empty() {
+                let value = digit.to_string();
+                input.set_value(&value);
+                if let Ok(ev) = web_sys::Event::new("input") {
+                    let _ = input.dispatch_event(&ev);
+                }
+                let _ = input.focus();
+                break;
+            }
+        }
+    });
+
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
 /// Data kept per existing worklog entry in the popup.
 #[derive(Clone)]
 struct ExistingEntry {
@@ -144,6 +206,7 @@ pub fn CellPopup(
     on_close: Callback<()>,
     on_changed: Callback<String>,
     #[prop(default = String::new())] site_url: String,
+    #[prop(default = None)] initial_digit: Option<char>,
 ) -> impl IntoView {
     let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| {
         log::error!("I18n context not provided in CellPopup, using English fallback");
@@ -155,6 +218,13 @@ pub fn CellPopup(
 
     let issue_key_for_close = issue_key.clone();
     let date_for_close = date;
+
+    #[cfg(feature = "hydrate")]
+    if let Some(digit) = initial_digit {
+        schedule_initial_digit_fill(popup_id, digit);
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = initial_digit;
 
     let restored_popup = restored_timer_popup.filter(|popup| {
         popup.issue_key == issue_key && popup.date == date && !popup.rows.is_empty()
@@ -817,17 +887,61 @@ pub fn CellPopup(
     let on_keydown = {
         let on_save = on_save.clone();
         let on_close_with_timers = on_close_with_timers.clone();
-        move |ev: leptos::ev::KeyboardEvent| match ev.key().as_str() {
+        move |ev: leptos::ev::KeyboardEvent| {
+            let key = ev.key();
+            // Ctrl+Arrow: move popup. Ctrl+Alt+Arrow: 1px; Ctrl+Arrow: 1 char/line.
+            if ev.ctrl_key() {
+                let delta: f64 = match key.as_str() {
+                    "ArrowLeft" | "ArrowRight" if ev.alt_key() => 1.0,
+                    "ArrowUp"   | "ArrowDown"  if ev.alt_key() => 1.0,
+                    "ArrowLeft" | "ArrowRight" => 8.0,
+                    "ArrowUp"   | "ArrowDown"  => 20.0,
+                    _ => 0.0,
+                };
+                if delta > 0.0 {
+                    ev.prevent_default();
+                    ev.stop_propagation();
+                    let cur = pos_sig.get_untracked();
+                    let (mut left, mut top) = parse_popup_pos(&cur);
+                    match key.as_str() {
+                        "ArrowLeft"  => left -= delta,
+                        "ArrowRight" => left += delta,
+                        "ArrowUp"    => top  -= delta,
+                        "ArrowDown"  => top  += delta,
+                        _ => {}
+                    }
+                    pos_sig.set(format!("left:{:.0}px;top:{:.0}px", left, top));
+                    return;
+                }
+            }
+            match key.as_str() {
             "Enter" => {
+                // Don't intercept Enter inside a textarea (user wants a newline).
+                #[cfg(feature = "hydrate")]
+                {
+                    use leptos::wasm_bindgen::JsCast;
+                    let is_textarea = ev
+                        .target()
+                        .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+                        .map(|el| el.tag_name().eq_ignore_ascii_case("textarea"))
+                        .unwrap_or(false);
+                    if is_textarea {
+                        return;
+                    }
+                }
                 if save_enabled.get() && conn.is_available() {
+                    ev.prevent_default();
                     on_save(None);
                 }
             }
             "Escape" => {
+                ev.prevent_default();
+                ev.stop_propagation();
                 on_close_with_timers();
             }
             _ => {}
-        }
+        } // match key
+        } // closure
     };
 
     // ── Blur handler for dynamic new rows ───────────────────────────────
@@ -1048,6 +1162,35 @@ pub fn CellPopup(
 
     let popup_ref: NodeRef<leptos::html::Div> = NodeRef::new();
 
+    // Focus the first input after the popup mounts. We defer via
+    // requestAnimationFrame so that child components (inputs) are in the DOM.
+    // Restored timer popups open automatically on page load; skip stealing
+    // focus from the grid in that case.
+    #[cfg(feature = "hydrate")]
+    if restored_popup.is_none() {
+        use leptos::wasm_bindgen::JsCast;
+        use leptos::wasm_bindgen::closure::Closure;
+        let popup_ref_focus = popup_ref;
+        Effect::new(move |_| {
+            if let Some(el) = popup_ref_focus.get() {
+                let root_html: web_sys::HtmlElement = el.unchecked_ref::<web_sys::HtmlElement>().clone();
+                let cb = Closure::once(move || {
+                    if let Ok(Some(node)) = root_html
+                        .query_selector("input:not([disabled]),textarea:not([disabled])")
+                    {
+                        if let Ok(input) = node.dyn_into::<web_sys::HtmlElement>() {
+                            let _ = input.focus();
+                        }
+                    }
+                });
+                if let Some(window) = web_sys::window() {
+                    let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
+                }
+                cb.forget();
+            }
+        });
+    }
+
     let dragging_md = is_dragging.clone();
     let sx_md = drag_start_x.clone();
     let sy_md = drag_start_y.clone();
@@ -1070,20 +1213,31 @@ pub fn CellPopup(
         ev.prevent_default();
     };
 
+    let z_index = RwSignal::new(
+        POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+    );
+
+    let on_focusin = move |_: leptos::ev::FocusEvent| {
+        let next = POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        z_index.set(next);
+    };
+
     //
     view! {
          <div
             class="cell-popup"
             node_ref=popup_ref
             data-popup-id={popup_id.to_string()}
-            style=move || pos_sig.get()
+            style=move || format!("{};z-index:{}", pos_sig.get(), z_index.get())
+            on:keydown=on_keydown
+            on:focusin=on_focusin
          >
             <div class="popup-draggable-title" on:mousedown=on_header_mousedown>
             <span class="popup-key">{issue_key}</span>
             <span class="popup-summary" title={issue_summary}>{issue_summary.clone()}</span>
             <span class="popup-date">{i18n.get_untracked().format_date(&date)}</span>
         </div>
-        <div class="cell-popup-content" on:keydown=on_keydown tabindex="0">
+        <div class="cell-popup-content" tabindex="0">
             <div class="popup-entries">
                 // ── Existing entry rows ─────────────────────────────────
                 {existing

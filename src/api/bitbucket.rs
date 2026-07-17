@@ -34,6 +34,7 @@ pub struct BitbucketActivity {
     pub commit_messages_by_cell: HashMap<String, Vec<String>>,
     pub commit_links_by_cell: HashMap<String, Vec<String>>,
     pub pr_review_cells: HashSet<String>,
+    pub pr_merged_cells: HashSet<String>,
     pub pr_links_by_cell: HashMap<String, Vec<String>>,
     pub discovered_item_summaries: HashMap<String, String>,
 }
@@ -172,6 +173,8 @@ struct BitbucketPullRequest {
     #[serde(default)]
     id: Option<u64>,
     title: String,
+    #[serde(default)]
+    state: Option<String>,
     #[serde(default)]
     updated_on: Option<String>,
     #[serde(default)]
@@ -344,6 +347,11 @@ fn filter_activity_by_range(
             if let Some(key) = issue_key_from_cell(cell_key) {
                 referenced_keys.insert(key);
             }
+        }
+    }
+    for cell_key in &source.pr_merged_cells {
+        if key_in_range(cell_key, start, end) {
+            filtered.pr_merged_cells.insert(cell_key.clone());
         }
     }
     for (cell_key, values) in &source.pr_links_by_cell {
@@ -1326,7 +1334,10 @@ async fn fetch_timesheet_activity_inner(
                 if let Some(key) = extract_work_item_key(&pr.title) {
                     seen_pr_identities.insert(pr_identity_key(repo_slug, &pr));
                     let map_key = format!("{}:{}", key, pr_date);
-                    activity.pr_review_cells.insert(map_key);
+                    activity.pr_review_cells.insert(map_key.clone());
+                    if pr.state.as_deref() == Some("MERGED") {
+                        activity.pr_merged_cells.insert(map_key.clone());
+                    }
                     if let Some(link) = pr_link(&repo_base, &pr) {
                         activity
                             .pr_links_by_cell
