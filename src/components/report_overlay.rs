@@ -2,14 +2,10 @@ use crate::i18n::{I18n, keys};
 use crate::model::{NonBillableMinutes, ReportData};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use leptos::prelude::*;
-#[cfg(feature = "hydrate")]
-use leptos::web_sys;
 use std::collections::HashMap;
-#[cfg(feature = "hydrate")]
-use wasm_bindgen::JsCast;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReportPeriod {
+pub enum ReportPeriod {
     Week,
     Month,
 }
@@ -74,7 +70,7 @@ fn month_start(date: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
 }
 
-fn previous_month(date: NaiveDate) -> NaiveDate {
+pub(crate) fn previous_month(date: NaiveDate) -> NaiveDate {
     let d = month_start(date);
     if d.month() == 1 {
         NaiveDate::from_ymd_opt(d.year() - 1, 12, 1).unwrap_or(d)
@@ -83,7 +79,7 @@ fn previous_month(date: NaiveDate) -> NaiveDate {
     }
 }
 
-fn next_month(date: NaiveDate) -> NaiveDate {
+pub(crate) fn next_month(date: NaiveDate) -> NaiveDate {
     let d = month_start(date);
     if d.month() == 12 {
         NaiveDate::from_ymd_opt(d.year() + 1, 1, 1).unwrap_or(d)
@@ -140,7 +136,7 @@ fn year_buckets(year: i32) -> Vec<BarBucket> {
         .collect()
 }
 
-fn default_report_month(today: NaiveDate) -> NaiveDate {
+pub(crate) fn default_report_month(today: NaiveDate) -> NaiveDate {
     if today.day() < 9 {
         previous_month(today)
     } else {
@@ -288,21 +284,33 @@ fn text_contrast_class(fill_class: &str) -> &'static str {
     }
 }
 
-#[component]
-pub fn ReportOverlay(
-    hours_per_day: f64,
-    hours_per_week: f64,
-    on_close: Callback<()>,
-    _on_open_settings: Option<Callback<()>>,
-) -> impl IntoView {
-    let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| RwSignal::new(I18n::default()));
+#[derive(Clone)]
+pub struct ReportState {
+    pub period: RwSignal<ReportPeriod>,
+    pub selected_month: RwSignal<NaiveDate>,
+    pub selected_year: RwSignal<i32>,
+    pub loading: RwSignal<bool>,
+    pub error: RwSignal<Option<String>>,
+    pub report_cache: RwSignal<HashMap<i32, ReportData>>,
+}
+
+pub fn create_report_state() -> ReportState {
     let today = Local::now().date_naive();
-    let period = RwSignal::new(ReportPeriod::Week);
-    let selected_month = RwSignal::new(default_report_month(today));
-    let selected_year = RwSignal::new(today.year());
-    let loading = RwSignal::new(false);
-    let error = RwSignal::new(Option::<String>::None);
-    let report_cache = RwSignal::new(HashMap::<i32, ReportData>::new());
+    let state = ReportState {
+        period: RwSignal::new(ReportPeriod::Week),
+        selected_month: RwSignal::new(default_report_month(today)),
+        selected_year: RwSignal::new(today.year()),
+        loading: RwSignal::new(false),
+        error: RwSignal::new(Option::<String>::None),
+        report_cache: RwSignal::new(HashMap::<i32, ReportData>::new()),
+    };
+
+    let period = state.period;
+    let selected_month = state.selected_month;
+    let selected_year = state.selected_year;
+    let loading = state.loading;
+    let error = state.error;
+    let report_cache = state.report_cache;
 
     let context_year = Memo::new(move |_| {
         if period.get() == ReportPeriod::Week {
@@ -331,6 +339,87 @@ pub fn ReportOverlay(
             }
             loading.set(false);
         });
+    });
+    #[cfg(not(feature = "hydrate"))]
+    let _ = error;
+
+    state
+}
+
+#[component]
+pub fn ReportRibbonControls(state: ReportState) -> impl IntoView {
+    let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| RwSignal::new(I18n::default()));
+    let period = state.period;
+    let selected_month = state.selected_month;
+    let selected_year = state.selected_year;
+
+    let on_prev = move |_| {
+        if period.get() == ReportPeriod::Week {
+            selected_month.update(|m| *m = previous_month(*m));
+        } else {
+            selected_year.update(|y| *y -= 1);
+        }
+    };
+    let on_next = move |_| {
+        if period.get() == ReportPeriod::Week {
+            selected_month.update(|m| *m = next_month(*m));
+        } else {
+            selected_year.update(|y| *y += 1);
+        }
+    };
+
+    view! {
+        <div class="report-ribbon-controls">
+            <div class="report-period-nav">
+                <button class="nav-btn" on:click=on_prev title={move || i18n.get().t(keys::REPORT_PREVIOUS)}>{"◀"}</button>
+                <span class="report-period-label">
+                    {move || if period.get() == ReportPeriod::Week {
+                        selected_month.get().format("%Y-%m").to_string()
+                    } else {
+                        selected_year.get().to_string()
+                    }}
+                </span>
+                <button class="nav-btn" on:click=on_next title={move || i18n.get().t(keys::REPORT_NEXT)}>{"▶"}</button>
+            </div>
+
+            <div class="report-controls">
+                <label>
+                    {move || i18n.get().t(keys::REPORT_PERIOD)}
+                    <select on:change=move |ev| {
+                        let value = event_target_value(&ev);
+                        if value == "month" {
+                            period.set(ReportPeriod::Month);
+                            selected_year.set(selected_month.get().year());
+                        } else {
+                            period.set(ReportPeriod::Week);
+                        }
+                    }>
+                        <option value="week" selected={move || period.get() == ReportPeriod::Week}>{move || i18n.get().t(keys::REPORT_PERIOD_WEEK)}</option>
+                        <option value="month" selected={move || period.get() == ReportPeriod::Month}>{move || i18n.get().t(keys::REPORT_PERIOD_MONTH)}</option>
+                    </select>
+                </label>
+            </div>
+        </div>
+    }
+}
+
+#[component]
+pub fn ReportView(state: ReportState, hours_per_day: f64, hours_per_week: f64) -> impl IntoView {
+    let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| RwSignal::new(I18n::default()));
+    let today = Local::now().date_naive();
+    let period = state.period;
+    let selected_month = state.selected_month;
+    let selected_year = state.selected_year;
+    let loading = state.loading;
+    let error = state.error;
+    let report_cache = state.report_cache;
+
+    let context_year = Memo::new(move |_| {
+        if period.get() == ReportPeriod::Week {
+            selected_month.get().year()
+        } else {
+            selected_year.get()
+        }
     });
 
     let projects = Memo::new(move |_| {
@@ -640,365 +729,235 @@ pub fn ReportOverlay(
         (slices, work_total_scope, pto_total, annual_work_total)
     });
 
-    let on_prev = move |_| {
-        if period.get() == ReportPeriod::Week {
-            selected_month.update(|m| *m = previous_month(*m));
-        } else {
-            selected_year.update(|y| *y -= 1);
-        }
-    };
-    let on_next = move |_| {
-        if period.get() == ReportPeriod::Week {
-            selected_month.update(|m| *m = next_month(*m));
-        } else {
-            selected_year.update(|y| *y += 1);
-        }
-    };
-
-    #[cfg(feature = "hydrate")]
-    {
-        let on_close = on_close.clone();
-        let on_open_settings = _on_open_settings.clone();
-        let period = period.clone();
-        let selected_month = selected_month.clone();
-        let selected_year = selected_year.clone();
-        let report_keydown_cb = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
-            move |ev: web_sys::KeyboardEvent| {
-                if !ev.alt_key() || ev.ctrl_key() || ev.meta_key() {
-                    return;
-                }
-                match ev.key().to_ascii_lowercase().as_str() {
-                    "p" => {
-                        ev.prevent_default();
-                        if period.get_untracked() == ReportPeriod::Week {
-                            selected_month.update(|m| *m = previous_month(*m));
-                        } else {
-                            selected_year.update(|y| *y -= 1);
-                        }
-                    }
-                    "n" => {
-                        ev.prevent_default();
-                        if period.get_untracked() == ReportPeriod::Week {
-                            selected_month.update(|m| *m = next_month(*m));
-                        } else {
-                            selected_year.update(|y| *y += 1);
-                        }
-                    }
-                    "d" => {
-                        ev.prevent_default();
-                        if let Some(window) = web_sys::window() {
-                            if let Some(document) = window.document() {
-                                if let Some(node) = document.query_selector(".report-controls select").ok().flatten() {
-                                    if let Some(el) = node.dyn_ref::<web_sys::HtmlElement>() {
-                                        let _ = el.click();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "t" => {
-                        ev.prevent_default();
-                        selected_month.set(default_report_month(Local::now().date_naive()));
-                        selected_year.set(Local::now().date_naive().year());
-                    }
-                    "s" => {
-                        ev.prevent_default();
-                        if let Some(cb) = on_open_settings.as_ref() {
-                            cb.run(());
-                        }
-                    }
-                    "w" => {
-                        ev.prevent_default();
-                        on_close.run(());
-                    }
-                    "x" => {
-                        ev.prevent_default();
-                        if let Some(window) = web_sys::window() {
-                            let _ = window.location().set_href("/auth/logout");
-                        }
-                    }
-                    _ => {}
-                }
-            },
-        );
-        if let Some(window) = web_sys::window() {
-            use wasm_bindgen::JsCast;
-            let _ = window.add_event_listener_with_callback(
-                "keydown",
-                report_keydown_cb.as_ref().unchecked_ref(),
-            );
-        }
-        report_keydown_cb.forget();
-    }
-
     view! {
-        <div class="report-overlay-backdrop" on:click=move |_| on_close.run(())>
-            <div class="report-overlay" on:click=move |ev: leptos::ev::MouseEvent| ev.stop_propagation()>
-                <div class="report-header">
-                    <h2>{move || i18n.get().t(keys::USER_REPORT)}</h2>
-                    <button class="report-close" on:click=move |_| on_close.run(())>{move || i18n.get().t(keys::CLOSE)}</button>
-                </div>
+        <div class="report-view">
+            {move || error.get().map(|msg| view! { <p class="error">{msg}</p> })}
 
-                <div class="report-toolbar">
-                    <div class="report-controls">
-                        <label>
-                            {move || i18n.get().t(keys::REPORT_PERIOD)}
-                            <select on:change=move |ev| {
-                                let value = event_target_value(&ev);
-                                if value == "month" {
-                                    period.set(ReportPeriod::Month);
-                                    selected_year.set(selected_month.get().year());
-                                } else {
-                                    period.set(ReportPeriod::Week);
-                                }
-                            }>
-                                <option value="week" selected={move || period.get() == ReportPeriod::Week}>{move || i18n.get().t(keys::REPORT_PERIOD_WEEK)}</option>
-                                <option value="month" selected={move || period.get() == ReportPeriod::Month}>{move || i18n.get().t(keys::REPORT_PERIOD_MONTH)}</option>
-                            </select>
-                        </label>
-                    </div>
-                </div>
+            <div class="report-content">
+                <div class="report-chart-panel">
+                    {move || {
+                        if loading.get() {
+                            return view! { <p>{move || i18n.get().t(keys::REPORT_LOADING)}</p> }.into_any();
+                        }
+                        let bars = bar_segments.get();
+                        if bars.is_empty() {
+                            return view! { <p>{move || i18n.get().t(keys::REPORT_NO_DATA)}</p> }.into_any();
+                        }
 
-                {move || error.get().map(|msg| view! { <p class="error">{msg}</p> })}
+                        let chart_width = 900.0_f64;
+                        let chart_height = 250.0_f64;
+                        let margin_left = 42.0_f64;
+                        let margin_bottom = 20.0_f64;
+                        let margin_top = 4.0_f64;
+                        let plot_width = chart_width - margin_left - 10.0;
+                        let plot_height = chart_height - margin_bottom - margin_top;
+                        let y_max = if period.get() == ReportPeriod::Week { 7.0_f64 } else { 25.0_f64 };
+                        let axis_step = if period.get() == ReportPeriod::Week { 1 } else { 5 };
+                        let thick_step = if period.get() == ReportPeriod::Week { 5 } else { 10 };
+                        let bar_count = bars.len().max(1) as f64;
+                        let slot_width = plot_width / bar_count;
+                        let bar_width = slot_width * 0.7;
 
-                <div class="report-content">
-                    <div class="report-chart-panel">
-                        <div class="report-period-nav">
-                            <button class="nav-btn" on:click=on_prev title={move || i18n.get().t(keys::REPORT_PREVIOUS)}>{"◀"}</button>
-                            <span class="report-period-label">
-                                {move || if period.get() == ReportPeriod::Week {
-                                    selected_month.get().format("%Y-%m").to_string()
-                                } else {
-                                    selected_year.get().to_string()
-                                }}
-                            </span>
-                            <button class="nav-btn" on:click=on_next title={move || i18n.get().t(keys::REPORT_NEXT)}>{"▶"}</button>
-                        </div>
-
-                        {move || {
-                            if loading.get() {
-                                return view! { <p>{move || i18n.get().t(keys::REPORT_LOADING)}</p> }.into_any();
-                            }
-                            let bars = bar_segments.get();
-                            if bars.is_empty() {
-                                return view! { <p>{move || i18n.get().t(keys::REPORT_NO_DATA)}</p> }.into_any();
-                            }
-
-                            let chart_width = 900.0_f64;
-                            let chart_height = 250.0_f64;
-                            let margin_left = 42.0_f64;
-                            let margin_bottom = 20.0_f64;
-                            let margin_top = 4.0_f64;
-                            let plot_width = chart_width - margin_left - 10.0;
-                            let plot_height = chart_height - margin_bottom - margin_top;
-                            let y_max = if period.get() == ReportPeriod::Week { 7.0_f64 } else { 25.0_f64 };
-                            let axis_step = if period.get() == ReportPeriod::Week { 1 } else { 5 };
-                            let thick_step = if period.get() == ReportPeriod::Week { 5 } else { 10 };
-                            let bar_count = bars.len().max(1) as f64;
-                            let slot_width = plot_width / bar_count;
-                            let bar_width = slot_width * 0.7;
-
-                            let show_bar_totals = period.get() == ReportPeriod::Week;
-                            view! {
-                                <div class={if show_bar_totals { "report-bar-section" } else { "report-bar-section report-bar-section-no-totals" }}>
-                                    <svg class="report-stacked-chart" viewBox="0 0 900 250" preserveAspectRatio="none" role="img" aria-label=move || i18n.get().t(keys::USER_REPORT)>
-                                        {(0..=((y_max as i32) / axis_step)).map(|i| {
-                                            let y_units = i * axis_step;
-                                            let y = margin_top + plot_height - (y_units as f64 / y_max * plot_height);
-                                            let class_name = if y_units % thick_step == 0 { "report-grid-line-thick" } else { "report-grid-line-thin" };
-                                            view! {
-                                                <g>
-                                                    <line class={class_name} x1={margin_left.to_string()} y1={y.to_string()} x2={(margin_left + plot_width).to_string()} y2={y.to_string()}></line>
-                                                    <text class="report-axis-label" x="4" y={(y + 4.0).to_string()}>{y_units.to_string()}</text>
-                                                </g>
-                                            }
-                                        }).collect::<Vec<_>>()}
-
-                                        {bars.into_iter().enumerate().map(|(idx, (bucket, segments))| {
-                                            let x = margin_left + idx as f64 * slot_width + (slot_width - bar_width) / 2.0;
-                                            let mut acc_days = 0.0_f64;
-                                            let mut segment_nodes = Vec::new();
-                                            for segment in segments {
-                                                let h = (segment.days / y_max) * plot_height;
-                                                let y = margin_top + plot_height - ((acc_days + segment.days) / y_max * plot_height);
-                                                acc_days += segment.days;
-                                                let contrast = text_contrast_class(&segment.class_name);
-                                                let title = format!(
-                                                    "{}: {}h",
-                                                    segment.label,
-                                                    format_hours_one_decimal(segment.minutes as f64 / 60.0, i18n.get().decimal_separator, i18n.get().thousands_separator, false)
-                                                );
-                                                segment_nodes.push(view! {
-                                                    <g>
-                                                        <rect class={format!("report-stack-segment {}", segment.class_name)} x={x.to_string()} y={y.to_string()} width={bar_width.to_string()} height={h.to_string()}>
-                                                            <title>{title}</title>
-                                                        </rect>
-                                                        <text class={format!("report-stack-label {}", contrast)} x={(x + bar_width / 2.0).to_string()} y={(y + h / 2.0 + 3.0).to_string()}>
-                                                            {format_days(segment.days, i18n.get().decimal_separator)}
-                                                        </text>
-                                                    </g>
-                                                });
-                                            }
-                                            view! {
-                                                <g>
-                                                    {segment_nodes}
-                                                    <text class="report-axis-label report-x-label" x={(x + bar_width / 2.0).to_string()} y={(chart_height - 8.0).to_string()}>{bucket.label}</text>
-                                                </g>
-                                            }
-                                        }).collect::<Vec<_>>()}
-                                    </svg>
-
-                                    {move || show_bar_totals.then(|| {
+                        let show_bar_totals = period.get() == ReportPeriod::Week;
+                        view! {
+                            <div class={if show_bar_totals { "report-bar-section" } else { "report-bar-section report-bar-section-no-totals" }}>
+                                <svg class="report-stacked-chart" viewBox="0 0 900 250" preserveAspectRatio="none" role="img" aria-label=move || i18n.get().t(keys::USER_REPORT)>
+                                    {(0..=((y_max as i32) / axis_step)).map(|i| {
+                                        let y_units = i * axis_step;
+                                        let y = margin_top + plot_height - (y_units as f64 / y_max * plot_height);
+                                        let class_name = if y_units % thick_step == 0 { "report-grid-line-thick" } else { "report-grid-line-thin" };
                                         view! {
-                                            <div class="report-totals-grid">
-                                                <For
-                                                    each={move || period_totals.get()}
-                                                    key={|r| format!("{}-{}", r.label, r.class_name)}
-                                                    children={move |row: TotalsRow| {
-                                                        let number = format_aligned_hours(row.minutes, i18n.get().decimal_separator, i18n.get().thousands_separator);
-                                                        let title_text = format_hours_wdh(row.minutes as f64 / 60.0, hours_per_day, hours_per_week);
-                                                        view! {
-                                                            <div class="report-total-item">
-                                                                <span class={format!("report-filter-swatch {}", row.class_name)}></span>
-                                                                <span class="report-total-label">{row.label}</span>
-                                                                <span class="report-total-number" title={title_text}>
-                                                                    <span class="report-total-int">{number.int_part}</span>
-                                                                    <span class="report-total-sep">{number.sep_part}</span>
-                                                                    <span class="report-total-frac">{number.frac_part}</span>
-                                                                </span>
-                                                            </div>
-                                                        }
-                                                    }}
-                                                />
-                                                <div class="report-total-item report-total-item-grand">
-                                                    <span class="report-filter-swatch report-filter-swatch-placeholder"></span>
-                                                    <span class="report-total-label">{move || i18n.get().t(keys::TOTAL)}</span>
-                                                    {move || {
-                                                        let number = format_aligned_hours(period_grand_total.get(), i18n.get().decimal_separator, i18n.get().thousands_separator);
-                                                        let title_text = format_hours_wdh(period_grand_total.get() as f64 / 60.0, hours_per_day, hours_per_week);
-                                                        view! {
+                                            <g>
+                                                <line class={class_name} x1={margin_left.to_string()} y1={y.to_string()} x2={(margin_left + plot_width).to_string()} y2={y.to_string()}></line>
+                                                <text class="report-axis-label" x="4" y={(y + 4.0).to_string()}>{y_units.to_string()}</text>
+                                            </g>
+                                        }
+                                    }).collect::<Vec<_>>()}
+
+                                    {bars.into_iter().enumerate().map(|(idx, (bucket, segments))| {
+                                        let x = margin_left + idx as f64 * slot_width + (slot_width - bar_width) / 2.0;
+                                        let mut acc_days = 0.0_f64;
+                                        let mut segment_nodes = Vec::new();
+                                        for segment in segments {
+                                            let h = (segment.days / y_max) * plot_height;
+                                            let y = margin_top + plot_height - ((acc_days + segment.days) / y_max * plot_height);
+                                            acc_days += segment.days;
+                                            let contrast = text_contrast_class(&segment.class_name);
+                                            let title = format!(
+                                                "{}: {}h",
+                                                segment.label,
+                                                format_hours_one_decimal(segment.minutes as f64 / 60.0, i18n.get().decimal_separator, i18n.get().thousands_separator, false)
+                                            );
+                                            segment_nodes.push(view! {
+                                                <g>
+                                                    <rect class={format!("report-stack-segment {}", segment.class_name)} x={x.to_string()} y={y.to_string()} width={bar_width.to_string()} height={h.to_string()}>
+                                                        <title>{title}</title>
+                                                    </rect>
+                                                    <text class={format!("report-stack-label {}", contrast)} x={(x + bar_width / 2.0).to_string()} y={(y + h / 2.0 + 3.0).to_string()}>
+                                                        {format_days(segment.days, i18n.get().decimal_separator)}
+                                                    </text>
+                                                </g>
+                                            });
+                                        }
+                                        view! {
+                                            <g>
+                                                {segment_nodes}
+                                                <text class="report-axis-label report-x-label" x={(x + bar_width / 2.0).to_string()} y={(chart_height - 8.0).to_string()}>{bucket.label}</text>
+                                            </g>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </svg>
+
+                                {move || show_bar_totals.then(|| {
+                                    view! {
+                                        <div class="report-totals-grid">
+                                            <For
+                                                each={move || period_totals.get()}
+                                                key={|r| format!("{}-{}", r.label, r.class_name)}
+                                                children={move |row: TotalsRow| {
+                                                    let number = format_aligned_hours(row.minutes, i18n.get().decimal_separator, i18n.get().thousands_separator);
+                                                    let title_text = format_hours_wdh(row.minutes as f64 / 60.0, hours_per_day, hours_per_week);
+                                                    view! {
+                                                        <div class="report-total-item">
+                                                            <span class={format!("report-filter-swatch {}", row.class_name)}></span>
+                                                            <span class="report-total-label">{row.label}</span>
                                                             <span class="report-total-number" title={title_text}>
                                                                 <span class="report-total-int">{number.int_part}</span>
                                                                 <span class="report-total-sep">{number.sep_part}</span>
                                                                 <span class="report-total-frac">{number.frac_part}</span>
                                                             </span>
-                                                        }
-                                                    }}
-                                                </div>
+                                                        </div>
+                                                    }
+                                                }}
+                                            />
+                                            <div class="report-total-item report-total-item-grand">
+                                                <span class="report-filter-swatch report-filter-swatch-placeholder"></span>
+                                                <span class="report-total-label">{move || i18n.get().t(keys::TOTAL)}</span>
+                                                {move || {
+                                                    let number = format_aligned_hours(period_grand_total.get(), i18n.get().decimal_separator, i18n.get().thousands_separator);
+                                                    let title_text = format_hours_wdh(period_grand_total.get() as f64 / 60.0, hours_per_day, hours_per_week);
+                                                    view! {
+                                                        <span class="report-total-number" title={title_text}>
+                                                            <span class="report-total-int">{number.int_part}</span>
+                                                            <span class="report-total-sep">{number.sep_part}</span>
+                                                            <span class="report-total-frac">{number.frac_part}</span>
+                                                        </span>
+                                                    }
+                                                }}
+                                            </div>
+                                        </div>
+                                    }
+                                })}
+                            </div>
+                        }.into_any()
+                    }}
+                </div>
+
+                <div class="report-chart-panel">
+                    {move || {
+                        let (slices, work_total_scope, pto_total, annual_work_total) = pie_data.get();
+                        if slices.is_empty() {
+                            return view! { <p>{move || i18n.get().t(keys::REPORT_NO_DATA)}</p> }.into_any();
+                        }
+                        let mut angle = -std::f64::consts::FRAC_PI_2;
+                        let cx = 130.0_f64;
+                        let cy = 130.0_f64;
+                        let r = 129.0_f64;
+                        let mut nodes = Vec::new();
+                        for slice in slices.iter().cloned() {
+                            let frac = if work_total_scope == 0 { 0.0 } else { slice.minutes as f64 / work_total_scope as f64 };
+                            if frac <= 0.0 {
+                                continue;
+                            }
+                            let next = angle + frac * std::f64::consts::TAU;
+                            let mid = angle + (next - angle) / 2.0;
+                            let label_x = cx + (r * 0.62) * mid.cos();
+                            let label_y = cy + (r * 0.62) * mid.sin();
+                            let contrast = text_contrast_class(&slice.class_name);
+                            let title = format!(
+                                "{}: {}h",
+                                slice.label,
+                                format_hours_one_decimal(slice.minutes as f64 / 60.0, i18n.get().decimal_separator, i18n.get().thousands_separator, false)
+                            );
+                            nodes.push(view! {
+                                <g>
+                                    <path class={format!("report-pie-slice {}", slice.class_name)} d={pie_path(cx, cy, r, angle, next)}>
+                                        <title>{title}</title>
+                                    </path>
+                                    <text class={format!("report-pie-label {}", contrast)} x={label_x.to_string()} y={(label_y + 3.0).to_string()}>{format!("{:.0}%", frac * 100.0)}</text>
+                                </g>
+                            });
+                            angle = next;
+                        }
+                        let work_total = format_aligned_hours(work_total_scope, i18n.get().decimal_separator, i18n.get().thousands_separator);
+                        let pto = format_aligned_hours(pto_total, i18n.get().decimal_separator, i18n.get().thousands_separator);
+                        let grand = format_aligned_hours(annual_work_total, i18n.get().decimal_separator, i18n.get().thousands_separator);
+                        let work_total_label = if context_year.get() == today.year() {
+                            format!(
+                                "{} {}",
+                                i18n.get().t(keys::REPORT_YTD_SCOPE),
+                                i18n.get().t(keys::REPORT_GRAND_TOTAL)
+                            )
+                        } else {
+                            format!(
+                                "{} {}",
+                                i18n.get().t(keys::REPORT_YEAR_SCOPE),
+                                i18n.get().t(keys::REPORT_GRAND_TOTAL)
+                            )
+                        };
+                        view! {
+                            <div class="report-pie-section">
+                                <svg class="report-pie-chart" viewBox="0 0 260 260" role="img" aria-label=move || i18n.get().t(keys::USER_REPORT)>
+                                    {nodes}
+                                </svg>
+                                <div class="report-totals-grid report-pie-totals-grid">
+                                    {slices.into_iter().map(|slice| {
+                                        let number = format_aligned_hours(slice.minutes, i18n.get().decimal_separator, i18n.get().thousands_separator);
+                                        let title_text = format_hours_wdh(slice.minutes as f64 / 60.0, hours_per_day, hours_per_week);
+                                        view! {
+                                            <div class="report-total-item">
+                                                <span class={format!("report-filter-swatch {}", slice.class_name)}></span>
+                                                <span class="report-total-label">{slice.label}</span>
+                                                <span class="report-total-number" title={title_text}>
+                                                    <span class="report-total-int">{number.int_part}</span>
+                                                    <span class="report-total-sep">{number.sep_part}</span>
+                                                    <span class="report-total-frac">{number.frac_part}</span>
+                                                </span>
                                             </div>
                                         }
-                                    })}
-                                </div>
-                            }.into_any()
-                        }}
-                    </div>
-
-                    <div class="report-chart-panel">
-                        {move || {
-                            let (slices, work_total_scope, pto_total, annual_work_total) = pie_data.get();
-                            if slices.is_empty() {
-                                return view! { <p>{move || i18n.get().t(keys::REPORT_NO_DATA)}</p> }.into_any();
-                            }
-                            let mut angle = -std::f64::consts::FRAC_PI_2;
-                            let cx = 130.0_f64;
-                            let cy = 130.0_f64;
-                            let r = 129.0_f64;
-                            let mut nodes = Vec::new();
-                            for slice in slices.iter().cloned() {
-                                let frac = if work_total_scope == 0 { 0.0 } else { slice.minutes as f64 / work_total_scope as f64 };
-                                if frac <= 0.0 {
-                                    continue;
-                                }
-                                let next = angle + frac * std::f64::consts::TAU;
-                                let mid = angle + (next - angle) / 2.0;
-                                let label_x = cx + (r * 0.62) * mid.cos();
-                                let label_y = cy + (r * 0.62) * mid.sin();
-                                let contrast = text_contrast_class(&slice.class_name);
-                                let title = format!(
-                                    "{}: {}h",
-                                    slice.label,
-                                    format_hours_one_decimal(slice.minutes as f64 / 60.0, i18n.get().decimal_separator, i18n.get().thousands_separator, false)
-                                );
-                                nodes.push(view! {
-                                    <g>
-                                        <path class={format!("report-pie-slice {}", slice.class_name)} d={pie_path(cx, cy, r, angle, next)}>
-                                            <title>{title}</title>
-                                        </path>
-                                        <text class={format!("report-pie-label {}", contrast)} x={label_x.to_string()} y={(label_y + 3.0).to_string()}>{format!("{:.0}%", frac * 100.0)}</text>
-                                    </g>
-                                });
-                                angle = next;
-                            }
-                            let work_total = format_aligned_hours(work_total_scope, i18n.get().decimal_separator, i18n.get().thousands_separator);
-                            let pto = format_aligned_hours(pto_total, i18n.get().decimal_separator, i18n.get().thousands_separator);
-                            let grand = format_aligned_hours(annual_work_total, i18n.get().decimal_separator, i18n.get().thousands_separator);
-                            let work_total_label = if context_year.get() == today.year() {
-                                format!(
-                                    "{} {}",
-                                    i18n.get().t(keys::REPORT_YTD_SCOPE),
-                                    i18n.get().t(keys::REPORT_GRAND_TOTAL)
-                                )
-                            } else {
-                                format!(
-                                    "{} {}",
-                                    i18n.get().t(keys::REPORT_YEAR_SCOPE),
-                                    i18n.get().t(keys::REPORT_GRAND_TOTAL)
-                                )
-                            };
-                            view! {
-                                <div class="report-pie-section">
-                                    <svg class="report-pie-chart" viewBox="0 0 260 260" role="img" aria-label=move || i18n.get().t(keys::USER_REPORT)>
-                                        {nodes}
-                                    </svg>
-                                    <div class="report-totals-grid report-pie-totals-grid">
-                                        {slices.into_iter().map(|slice| {
-                                            let number = format_aligned_hours(slice.minutes, i18n.get().decimal_separator, i18n.get().thousands_separator);
-                                            let title_text = format_hours_wdh(slice.minutes as f64 / 60.0, hours_per_day, hours_per_week);
-                                            view! {
-                                                <div class="report-total-item">
-                                                    <span class={format!("report-filter-swatch {}", slice.class_name)}></span>
-                                                    <span class="report-total-label">{slice.label}</span>
-                                                    <span class="report-total-number" title={title_text}>
-                                                        <span class="report-total-int">{number.int_part}</span>
-                                                        <span class="report-total-sep">{number.sep_part}</span>
-                                                        <span class="report-total-frac">{number.frac_part}</span>
-                                                    </span>
-                                                </div>
-                                            }
-                                        }).collect::<Vec<_>>()}
-                                        <div class="report-total-item">
-                                            <span class="report-filter-swatch report-color-nonbillable-pto"></span>
-                                            <span class="report-total-label">{move || i18n.get().t(keys::PLANNED_TIME_OFF)}</span>
-                                            <span class="report-total-number" title={format_hours_wdh(pto_total as f64 / 60.0, hours_per_day, hours_per_week)}>
-                                                <span class="report-total-int">{pto.int_part}</span>
-                                                <span class="report-total-sep">{pto.sep_part}</span>
-                                                <span class="report-total-frac">{pto.frac_part}</span>
-                                            </span>
-                                        </div>
-                                        <div class="report-total-divider"></div>
-                                        <div class="report-total-item report-total-item-grand">
-                                            <span class="report-filter-swatch report-filter-swatch-placeholder"></span>
-                                            <span class="report-total-label">{work_total_label}</span>
-                                            <span class="report-total-number" title={format_hours_wdh(work_total_scope as f64 / 60.0, hours_per_day, hours_per_week)}>
-                                                <span class="report-total-int">{work_total.int_part}</span>
-                                                <span class="report-total-sep">{work_total.sep_part}</span>
-                                                <span class="report-total-frac">{work_total.frac_part}</span>
-                                            </span>
-                                        </div>
-                                        <div class="report-total-item">
-                                            <span class="report-filter-swatch report-filter-swatch-placeholder"></span>
-                                            <span class="report-total-label">{move || i18n.get().t(keys::REPORT_GRAND_TOTAL)}</span>
-                                            <span class="report-total-number" title={format_hours_wdh(annual_work_total as f64 / 60.0, hours_per_day, hours_per_week)}>
-                                                <span class="report-total-int">{grand.int_part}</span>
-                                                <span class="report-total-sep">{grand.sep_part}</span>
-                                                <span class="report-total-frac">{grand.frac_part}</span>
-                                            </span>
-                                        </div>
+                                    }).collect::<Vec<_>>()}
+                                    <div class="report-total-item">
+                                        <span class="report-filter-swatch report-color-nonbillable-pto"></span>
+                                        <span class="report-total-label">{move || i18n.get().t(keys::PLANNED_TIME_OFF)}</span>
+                                        <span class="report-total-number" title={format_hours_wdh(pto_total as f64 / 60.0, hours_per_day, hours_per_week)}>
+                                            <span class="report-total-int">{pto.int_part}</span>
+                                            <span class="report-total-sep">{pto.sep_part}</span>
+                                            <span class="report-total-frac">{pto.frac_part}</span>
+                                        </span>
+                                    </div>
+                                    <div class="report-total-divider"></div>
+                                    <div class="report-total-item report-total-item-grand">
+                                        <span class="report-filter-swatch report-filter-swatch-placeholder"></span>
+                                        <span class="report-total-label">{work_total_label}</span>
+                                        <span class="report-total-number" title={format_hours_wdh(work_total_scope as f64 / 60.0, hours_per_day, hours_per_week)}>
+                                            <span class="report-total-int">{work_total.int_part}</span>
+                                            <span class="report-total-sep">{work_total.sep_part}</span>
+                                            <span class="report-total-frac">{work_total.frac_part}</span>
+                                        </span>
+                                    </div>
+                                    <div class="report-total-item">
+                                        <span class="report-filter-swatch report-filter-swatch-placeholder"></span>
+                                        <span class="report-total-label">{move || i18n.get().t(keys::REPORT_GRAND_TOTAL)}</span>
+                                        <span class="report-total-number" title={format_hours_wdh(annual_work_total as f64 / 60.0, hours_per_day, hours_per_week)}>
+                                            <span class="report-total-int">{grand.int_part}</span>
+                                            <span class="report-total-sep">{grand.sep_part}</span>
+                                            <span class="report-total-frac">{grand.frac_part}</span>
+                                        </span>
                                     </div>
                                 </div>
-                            }.into_any()
-                        }}
-                    </div>
+                            </div>
+                        }.into_any()
+                    }}
                 </div>
             </div>
         </div>

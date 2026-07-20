@@ -203,6 +203,7 @@ cfg_if::cfg_if! {
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(1);
             let today = chrono::Local::now().date_naive();
+            let persisted_last_update = timesheet::api::cache::load_persisted_cache();
             timesheet::api::report::set_report_boot_date(today);
             let active_users = timesheet::auth::active_jira_credentials().await;
             if !active_users.is_empty() {
@@ -210,23 +211,48 @@ cfg_if::cfg_if! {
                 tokio::spawn(async move {
                     timesheet::api::report::prewarm_current_year_reports(report_warm_users).await;
                 });
-                let anchor_monday =
-                    today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
-                log::info!(
-                    "[startup] warming cache window for {} active session(s), monday={}, back={}, forward={}",
-                    active_users.len(),
-                    anchor_monday,
-                    startup_back,
-                    startup_forward
-                );
-                for user in active_users {
-                    tokio::spawn(timesheet::api::jira::prefetch_startup_window(
-                        std::sync::Arc::new(user.creds),
-                        user.display_name,
+                if let Some(last_update) = persisted_last_update {
+                    if last_update < today {
+                        log::info!(
+                            "[startup] cache restored from yaml; warming delta for {} active session(s), {}..{}",
+                            active_users.len(),
+                            last_update,
+                            today
+                        );
+                        for user in active_users {
+                            tokio::spawn(timesheet::api::jira::prefetch_since_last_update(
+                                std::sync::Arc::new(user.creds),
+                                user.display_name,
+                                last_update,
+                                today,
+                            ));
+                        }
+                    } else {
+                        log::info!(
+                            "[startup] cache restored from yaml; no startup warm required (last_update={}, today={})",
+                            last_update,
+                            today
+                        );
+                    }
+                } else {
+                    let anchor_monday =
+                        today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+                    log::info!(
+                        "[startup] warming cache window for {} active session(s), monday={}, back={}, forward={}",
+                        active_users.len(),
                         anchor_monday,
                         startup_back,
-                        startup_forward,
-                    ));
+                        startup_forward
+                    );
+                    for user in active_users {
+                        tokio::spawn(timesheet::api::jira::prefetch_startup_window(
+                            std::sync::Arc::new(user.creds),
+                            user.display_name,
+                            anchor_monday,
+                            startup_back,
+                            startup_forward,
+                        ));
+                    }
                 }
             } else {
                 log::info!("[startup] no active sessions for startup cache warm");

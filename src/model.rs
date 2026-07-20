@@ -114,6 +114,8 @@ pub struct CellActivity {
     #[serde(default)]
     pub commit_links: Vec<String>,
     #[serde(default)]
+    pub test_result_links: Vec<String>,
+    #[serde(default)]
     pub has_pr_review: bool,
     #[serde(default)]
     pub pr_links: Vec<String>,

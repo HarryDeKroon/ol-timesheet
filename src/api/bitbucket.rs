@@ -33,6 +33,7 @@ struct BitbucketActivityCacheEntry {
 pub struct BitbucketActivity {
     pub commit_messages_by_cell: HashMap<String, Vec<String>>,
     pub commit_links_by_cell: HashMap<String, Vec<String>>,
+    pub test_result_links_by_cell: HashMap<String, Vec<String>>,
     pub pr_review_cells: HashSet<String>,
     pub pr_merged_cells: HashSet<String>,
     pub pr_links_by_cell: HashMap<String, Vec<String>>,
@@ -335,6 +336,16 @@ fn filter_activity_by_range(
         if key_in_range(cell_key, start, end) {
             filtered
                 .commit_links_by_cell
+                .insert(cell_key.clone(), values.clone());
+            if let Some(key) = issue_key_from_cell(cell_key) {
+                referenced_keys.insert(key);
+            }
+        }
+    }
+    for (cell_key, values) in &source.test_result_links_by_cell {
+        if key_in_range(cell_key, start, end) {
+            filtered
+                .test_result_links_by_cell
                 .insert(cell_key.clone(), values.clone());
             if let Some(key) = issue_key_from_cell(cell_key) {
                 referenced_keys.insert(key);
@@ -971,6 +982,7 @@ async fn fetch_timesheet_activity_inner(
         user_email
     );
     // Commits: newest first. Stop once we go past the start date.
+    let mut jenkins_link_cache = HashMap::<String, Option<String>>::new();
     let mut project_repos = Vec::<String>::new();
     let mut seen_repos = HashSet::<String>::new();
     if discovered_project_keys.is_empty() {
@@ -1016,6 +1028,7 @@ async fn fetch_timesheet_activity_inner(
     );
     let mut commit_page_count = 0usize;
     let mut matched_commit_count = 0usize;
+    let mut matched_test_result_count = 0usize;
     let mut commit_repo_error_count = 0usize;
     let mut rate_limit_hit = false;
     for repo_slug in &project_repos {
@@ -1092,6 +1105,42 @@ async fn fetch_timesheet_activity_inner(
                 if let Some(key) = extract_work_item_key(&commit.message) {
                     let cleaned = strip_key_prefix(&commit.message, &key);
                     let map_key = format!("{}:{}", key, commit_date);
+                    if let Some(hash) = commit.hash.as_deref() {
+                        let lookup_key = format!(
+                            "{}|{}|{}",
+                            repo_slug.to_lowercase(),
+                            key.to_lowercase(),
+                            hash.to_lowercase()
+                        );
+                        let test_link = if let Some(cached) = jenkins_link_cache.get(&lookup_key) {
+                            cached.clone()
+                        } else {
+                            let resolved = crate::api::jenkins::find_test_results_url_for_commit(
+                                repo_slug, &key, hash,
+                            )
+                            .await
+                            .unwrap_or_else(|err| {
+                                log::debug!(
+                                    "[jenkins] lookup failed repo={} key={} hash={} err={}",
+                                    repo_slug,
+                                    key,
+                                    hash,
+                                    err
+                                );
+                                None
+                            });
+                            jenkins_link_cache.insert(lookup_key, resolved.clone());
+                            resolved
+                        };
+                        if let Some(link) = test_link {
+                            activity
+                                .test_result_links_by_cell
+                                .entry(map_key.clone())
+                                .or_default()
+                                .push(link);
+                            matched_test_result_count += 1;
+                        }
+                    }
                     if let Some(link) = commit_link(&repo_base, &commit) {
                         activity
                             .commit_links_by_cell
@@ -1381,9 +1430,10 @@ async fn fetch_timesheet_activity_inner(
     }
 
     log::info!(
-        "[bitbucket] done: commit_pages={}, matched_commits={}, commit_repo_errors={}, pr_pages={}, matched_prs={}, pr_repo_errors={}, pr_missing_date={}, pr_before_range={}, pr_after_range={}, pr_reviewer_mismatch={}, pr_missing_key={}, repos_scanned={}, commit_cells={}, pr_cells={}, discovered_keys={}, elapsed_ms={}",
+        "[bitbucket] done: commit_pages={}, matched_commits={}, matched_tests={}, commit_repo_errors={}, pr_pages={}, matched_prs={}, pr_repo_errors={}, pr_missing_date={}, pr_before_range={}, pr_after_range={}, pr_reviewer_mismatch={}, pr_missing_key={}, repos_scanned={}, commit_cells={}, test_cells={}, pr_cells={}, discovered_keys={}, elapsed_ms={}",
         commit_page_count,
         matched_commit_count,
+        matched_test_result_count,
         commit_repo_error_count,
         pr_page_count,
         matched_pr_count,
@@ -1395,6 +1445,7 @@ async fn fetch_timesheet_activity_inner(
         pr_missing_key_count,
         project_repos.len(),
         activity.commit_messages_by_cell.len(),
+        activity.test_result_links_by_cell.len(),
         activity.pr_review_cells.len(),
         activity.discovered_item_summaries.len(),
         started_at.elapsed().as_millis()

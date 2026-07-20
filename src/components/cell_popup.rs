@@ -21,8 +21,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 /// Monotonically increasing counter used to assign z-index to popups when they
 /// gain focus, so the most recently focused popup is always on top.
-static POPUP_Z_COUNTER: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(100);
+static POPUP_Z_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
 
 /// Parse `"left:Xpx;top:Ypx[;...]"` into `(left, top)` in pixels.
 fn parse_popup_pos(style: &str) -> (f64, f64) {
@@ -196,6 +195,7 @@ pub fn CellPopup(
     suggested_comment: Option<String>,
     #[prop(default = Vec::new())] commit_messages: Vec<String>,
     #[prop(default = Vec::new())] commit_links: Vec<String>,
+    #[prop(default = Vec::new())] test_result_links: Vec<String>,
     #[prop(default = Vec::new())] pr_links: Vec<String>,
     is_git_log: bool,
     #[prop(default = false)] is_weekend: bool,
@@ -326,6 +326,10 @@ pub fn CellPopup(
     pr_links_unique.sort();
     pr_links_unique.dedup();
     let popup_pr_link = pr_links_unique.into_iter().next();
+    let mut test_links_unique = test_result_links;
+    test_links_unique.sort();
+    test_links_unique.dedup();
+    let popup_test_link = test_links_unique.into_iter().next();
     let suggested_row_links: Vec<Option<(String, String)>> = prefills_for_links
         .iter()
         .map(|comment| {
@@ -893,9 +897,9 @@ pub fn CellPopup(
             if ev.ctrl_key() {
                 let delta: f64 = match key.as_str() {
                     "ArrowLeft" | "ArrowRight" if ev.alt_key() => 1.0,
-                    "ArrowUp"   | "ArrowDown"  if ev.alt_key() => 1.0,
+                    "ArrowUp" | "ArrowDown" if ev.alt_key() => 1.0,
                     "ArrowLeft" | "ArrowRight" => 8.0,
-                    "ArrowUp"   | "ArrowDown"  => 20.0,
+                    "ArrowUp" | "ArrowDown" => 20.0,
                     _ => 0.0,
                 };
                 if delta > 0.0 {
@@ -904,10 +908,10 @@ pub fn CellPopup(
                     let cur = pos_sig.get_untracked();
                     let (mut left, mut top) = parse_popup_pos(&cur);
                     match key.as_str() {
-                        "ArrowLeft"  => left -= delta,
+                        "ArrowLeft" => left -= delta,
                         "ArrowRight" => left += delta,
-                        "ArrowUp"    => top  -= delta,
-                        "ArrowDown"  => top  += delta,
+                        "ArrowUp" => top -= delta,
+                        "ArrowDown" => top += delta,
                         _ => {}
                     }
                     pos_sig.set(format!("left:{:.0}px;top:{:.0}px", left, top));
@@ -915,32 +919,20 @@ pub fn CellPopup(
                 }
             }
             match key.as_str() {
-            "Enter" => {
-                // Don't intercept Enter inside a textarea (user wants a newline).
-                #[cfg(feature = "hydrate")]
-                {
-                    use leptos::wasm_bindgen::JsCast;
-                    let is_textarea = ev
-                        .target()
-                        .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
-                        .map(|el| el.tag_name().eq_ignore_ascii_case("textarea"))
-                        .unwrap_or(false);
-                    if is_textarea {
-                        return;
+                "Enter" if ev.ctrl_key() => {
+                    if save_enabled.get() && conn.is_available() {
+                        ev.prevent_default();
+                        ev.stop_propagation();
+                        on_save(None);
                     }
                 }
-                if save_enabled.get() && conn.is_available() {
+                "Escape" => {
                     ev.prevent_default();
-                    on_save(None);
+                    ev.stop_propagation();
+                    on_close_with_timers();
                 }
-            }
-            "Escape" => {
-                ev.prevent_default();
-                ev.stop_propagation();
-                on_close_with_timers();
-            }
-            _ => {}
-        } // match key
+                _ => {}
+            } // match key
         } // closure
     };
 
@@ -1111,6 +1103,9 @@ pub fn CellPopup(
     };
 
     let on_close_with_timers_for_btn = on_close_with_timers.clone();
+    let on_title_action_mousedown = move |ev: leptos::ev::MouseEvent| {
+        ev.stop_propagation();
+    };
 
     // ── Drag support ──
     #[cfg(feature = "hydrate")]
@@ -1173,10 +1168,11 @@ pub fn CellPopup(
         let popup_ref_focus = popup_ref;
         Effect::new(move |_| {
             if let Some(el) = popup_ref_focus.get() {
-                let root_html: web_sys::HtmlElement = el.unchecked_ref::<web_sys::HtmlElement>().clone();
+                let root_html: web_sys::HtmlElement =
+                    el.unchecked_ref::<web_sys::HtmlElement>().clone();
                 let cb = Closure::once(move || {
-                    if let Ok(Some(node)) = root_html
-                        .query_selector("input:not([disabled]),textarea:not([disabled])")
+                    if let Ok(Some(node)) =
+                        root_html.query_selector("input:not([disabled]),textarea:not([disabled])")
                     {
                         if let Ok(input) = node.dyn_into::<web_sys::HtmlElement>() {
                             let _ = input.focus();
@@ -1213,9 +1209,8 @@ pub fn CellPopup(
         ev.prevent_default();
     };
 
-    let z_index = RwSignal::new(
-        POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
-    );
+    let z_index =
+        RwSignal::new(POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
 
     let on_focusin = move |_: leptos::ev::FocusEvent| {
         let next = POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -1233,10 +1228,29 @@ pub fn CellPopup(
             on:focusin=on_focusin
          >
             <div class="popup-draggable-title" on:mousedown=on_header_mousedown>
-            <span class="popup-key">{issue_key}</span>
-            <span class="popup-summary" title={issue_summary}>{issue_summary.clone()}</span>
-            <span class="popup-date">{i18n.get_untracked().format_date(&date)}</span>
-        </div>
+                <span class="popup-key">{issue_key}</span>
+                <span class="popup-summary" title={issue_summary}>{issue_summary.clone()}</span>
+                <span class="popup-date">{i18n.get_untracked().format_date(&date)}</span>
+                <span class="popup-title-actions" on:mousedown=on_title_action_mousedown>
+                    <button
+                        class="popup-title-action popup-title-save"
+                        tabindex="-1"
+                        on:click=move |_| on_save(None)
+                        disabled=move || !save_enabled.get() || !conn.is_available()
+                        title=move || i18n.get().t(keys::SAVE)
+                    >
+                        {"✓"}
+                    </button>
+                    <button
+                        class="popup-title-action popup-title-close"
+                        tabindex="-1"
+                        on:click=move |_| on_close_with_timers_for_btn()
+                        title=move || i18n.get().t(keys::CLOSE)
+                    >
+                        {"×"}
+                    </button>
+                </span>
+            </div>
         <div class="cell-popup-content" tabindex="0">
             <div class="popup-entries">
                 // ── Existing entry rows ─────────────────────────────────
@@ -1461,18 +1475,20 @@ pub fn CellPopup(
                             </a>
                         }
                     })}
-                </span>
-                <span class="popup-buttons-right">
-                    <button
-                        class="btn-ok"
-                        on:click=move |_| on_save(None)
-                        disabled=move || !save_enabled.get() || !conn.is_available()
-                    >
-                        {move || i18n.get().t(keys::SAVE)}
-                    </button>
-                    <button class="btn-cancel" on:click=move |_| on_close_with_timers_for_btn()>
-                        {move || i18n.get().t(keys::CLOSE)}
-                    </button>
+                    {popup_test_link.clone().map(|href| {
+                        view! {
+                            <a
+                                class="popup-link popup-link--test"
+                                href={href}
+                                target="_blank"
+                                rel="noopener"
+                                title=move || i18n.get().t(keys::OPEN_TEST_RESULTS_IN_JENKINS)
+                            >
+                                <span class="popup-link-base">"\u{1F517}"</span>
+                                <span class="popup-link-badge">"T"</span>
+                            </a>
+                        }
+                    })}
                 </span>
             </div>
         </div>

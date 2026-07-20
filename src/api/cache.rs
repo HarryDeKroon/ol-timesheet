@@ -4,6 +4,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,139 @@ static CACHE: LazyLock<Mutex<HashMap<String, CacheEntry>>> =
 
 /// Default TTL for cached responses: 5 days.
 const DEFAULT_TTL: Duration = Duration::from_secs(5 * 24 * 3600);
+const CACHE_PERSIST_FILE: &str = "cache.yaml";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedCacheEntry {
+    key: String,
+    data: String,
+    created_at_utc: DateTime<Utc>,
+    ttl_secs: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedCacheFile {
+    last_update_utc: DateTime<Utc>,
+    entries: Vec<PersistedCacheEntry>,
+}
+
+fn cache_persist_path() -> std::path::PathBuf {
+    crate::auth::app_config_dir().join(CACHE_PERSIST_FILE)
+}
+
+fn build_persisted_cache_file(cache: &HashMap<String, CacheEntry>) -> PersistedCacheFile {
+    let now = Instant::now();
+    let entries = cache
+        .iter()
+        .filter(|(_, entry)| entry.expires_at > now)
+        .map(|(key, entry)| PersistedCacheEntry {
+            key: key.clone(),
+            data: entry.data.clone(),
+            created_at_utc: entry.created_at_utc,
+            ttl_secs: entry.ttl_secs.max(1),
+        })
+        .collect::<Vec<_>>();
+    PersistedCacheFile {
+        last_update_utc: Utc::now(),
+        entries,
+    }
+}
+
+fn write_persisted_cache_file(file: &PersistedCacheFile) {
+    let path = cache_persist_path();
+    let raw = match serde_yaml::to_string(file) {
+        Ok(raw) => raw,
+        Err(err) => {
+            log::warn!("[cache] failed to serialize cache yaml: {}", err);
+            return;
+        }
+    };
+    if let Err(err) = fs::write(&path, raw) {
+        log::warn!(
+            "[cache] failed to persist cache yaml {}: {}",
+            path.display(),
+            err
+        );
+    }
+}
+
+fn persist_cache_snapshot(snapshot: Option<PersistedCacheFile>) {
+    if let Some(file) = snapshot {
+        write_persisted_cache_file(&file);
+    }
+}
+
+pub fn load_persisted_cache() -> Option<NaiveDate> {
+    let path = cache_persist_path();
+    if !path.exists() {
+        return None;
+    }
+
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            log::warn!(
+                "[cache] failed to read persisted cache {}: {}",
+                path.display(),
+                err
+            );
+            return None;
+        }
+    };
+
+    let file = match serde_yaml::from_str::<PersistedCacheFile>(&raw) {
+        Ok(file) => file,
+        Err(err) => {
+            log::warn!(
+                "[cache] failed to parse persisted cache yaml {}: {}",
+                path.display(),
+                err
+            );
+            return None;
+        }
+    };
+
+    let now_utc = Utc::now();
+    let now_instant = Instant::now();
+    let mut loaded = 0usize;
+
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.clear();
+        for entry in file.entries {
+            let expires_at_utc =
+                entry.created_at_utc + chrono::Duration::seconds(entry.ttl_secs.max(1) as i64);
+            let remaining = (expires_at_utc - now_utc).num_seconds();
+            if remaining <= 0 {
+                continue;
+            }
+            cache.insert(
+                entry.key,
+                CacheEntry {
+                    data: entry.data,
+                    expires_at: now_instant + Duration::from_secs(remaining as u64),
+                    created_at_utc: entry.created_at_utc,
+                    ttl_secs: entry.ttl_secs.max(1),
+                },
+            );
+            loaded += 1;
+        }
+    } else {
+        log::warn!("[cache] cache lock unavailable while loading persisted cache");
+        return None;
+    }
+
+    log::info!(
+        "[cache] restored {} cache entr{} from {}",
+        loaded,
+        if loaded == 1 { "y" } else { "ies" },
+        path.display()
+    );
+    Some(
+        file.last_update_utc
+            .with_timezone(&chrono::Local)
+            .date_naive(),
+    )
+}
 
 /// Retrieve a cached value by key. Returns `None` if absent or expired.
 pub fn get(key: &str) -> Option<String> {
@@ -33,10 +167,13 @@ pub fn get(key: &str) -> Option<String> {
 
 /// Store a value in the cache with the default TTL.
 pub fn put(key: String, data: String) {
+    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
         let ttl_secs = DEFAULT_TTL.as_secs();
         cache.insert(key, cache_entry(data, ttl_secs));
+        snapshot = Some(build_persisted_cache_file(&cache));
     }
+    persist_cache_snapshot(snapshot);
 }
 
 fn cache_entry(data: String, ttl_secs: u64) -> CacheEntry {
@@ -50,16 +187,26 @@ fn cache_entry(data: String, ttl_secs: u64) -> CacheEntry {
 
 /// Remove a single cache entry by exact key.
 pub fn remove(key: &str) {
+    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
-        cache.remove(key);
+        if cache.remove(key).is_some() {
+            snapshot = Some(build_persisted_cache_file(&cache));
+        }
     }
+    persist_cache_snapshot(snapshot);
 }
 
 /// Remove all cache entries whose key starts with the given prefix.
 pub fn remove_by_prefix(prefix: &str) {
+    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
+        let before = cache.len();
         cache.retain(|k, _| !k.starts_with(prefix));
+        if cache.len() != before {
+            snapshot = Some(build_persisted_cache_file(&cache));
+        }
     }
+    persist_cache_snapshot(snapshot);
 }
 
 /// Remove all cache entries that belong to a specific user.
@@ -70,17 +217,28 @@ pub fn remove_user_cache(account_id: &str) {
 
 /// Remove all entries from the cache.
 pub fn clear_all() {
+    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
-        cache.clear();
+        if !cache.is_empty() {
+            cache.clear();
+            snapshot = Some(build_persisted_cache_file(&cache));
+        }
     }
+    persist_cache_snapshot(snapshot);
 }
 
 /// Remove all expired entries from the cache.
 pub fn evict_expired() {
+    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
+        let before = cache.len();
         let now = Instant::now();
         cache.retain(|_, entry| entry.expires_at > now);
+        if cache.len() != before {
+            snapshot = Some(build_persisted_cache_file(&cache));
+        }
     }
+    persist_cache_snapshot(snapshot);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,7 +327,9 @@ pub fn update_cached_bitbucket_week(
 
 pub fn prune_old_week_entries(retention_days: i64) {
     let cutoff = Utc::now().date_naive() - chrono::Duration::days(retention_days.max(1));
+    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
+        let mut changed = false;
         let keys = cache.keys().cloned().collect::<Vec<_>>();
         for key in keys {
             if !key.contains(":cached_weeks") {
@@ -192,6 +352,7 @@ pub fn prune_old_week_entries(retention_days: i64) {
             if old_mondays.is_empty() {
                 continue;
             }
+            changed = true;
             index.weeks.retain(|w| w.monday >= cutoff);
             for monday in old_mondays {
                 cache.remove(&week_cache_key(account_id, monday));
@@ -218,7 +379,11 @@ pub fn prune_old_week_entries(retention_days: i64) {
                 }
             }
         }
+        if changed {
+            snapshot = Some(build_persisted_cache_file(&cache));
+        }
     }
+    persist_cache_snapshot(snapshot);
 }
 
 fn classify_cache_kind(key: &str) -> &'static str {
@@ -287,7 +452,9 @@ where
     F: FnMut(&str, &str) -> Option<String>,
 {
     let prefix = format!("{}:", account_id);
+    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
+        let mut changed = false;
         let keys = cache
             .iter()
             .filter(|(key, entry)| key.starts_with(&prefix) && entry.expires_at > Instant::now())
@@ -301,7 +468,12 @@ where
             let current = existing.data.clone();
             if let Some(updated) = updater(&key, &current) {
                 cache.insert(key, cache_entry(updated, ttl_secs));
+                changed = true;
             }
         }
+        if changed {
+            snapshot = Some(build_persisted_cache_file(&cache));
+        }
     }
+    persist_cache_snapshot(snapshot);
 }

@@ -74,6 +74,7 @@ pub mod keys {
     pub const OPEN_IN_JIRA: &str = "open_in_jira";
     pub const OPEN_COMMIT_IN_BITBUCKET: &str = "open_commit_in_bitbucket";
     pub const OPEN_PR_IN_BITBUCKET: &str = "open_pr_in_bitbucket";
+    pub const OPEN_TEST_RESULTS_IN_JENKINS: &str = "open_test_results_in_jenkins";
     pub const OPEN_SETTINGS: &str = "open_settings";
     pub const REFRESH_CACHED: &str = "refresh_cached";
     pub const FORCE_PERIODIC_REFRESH: &str = "force_periodic_refresh";
@@ -88,6 +89,12 @@ pub mod keys {
     pub const PLANNED_TIME_OFF: &str = "planned_time_off";
     pub const STUDY: &str = "study";
     pub const LIST_INPUT_HINT: &str = "list_input_hint";
+    pub const SETTINGS_ADD_ENTRY: &str = "settings_add_entry";
+    pub const SETTINGS_ERROR_HOURS_PER_WEEK: &str = "settings_error_hours_per_week";
+    pub const SETTINGS_ERROR_HOURS_PER_DAY: &str = "settings_error_hours_per_day";
+    pub const SETTINGS_ERROR_NON_BILLABLE: &str = "settings_error_non_billable";
+    pub const SETTINGS_ERROR_REPORTING_WORK_ITEMS: &str = "settings_error_reporting_work_items";
+    pub const SETTINGS_ERROR_REPORTING_UNIQUE: &str = "settings_error_reporting_unique";
     pub const REPORT_PERIOD: &str = "report_period";
     pub const REPORT_PERIOD_WEEK: &str = "report_period_week";
     pub const REPORT_PERIOD_MONTH: &str = "report_period_month";
@@ -180,6 +187,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_IN_JIRA, "Open in Jira"),
         (keys::OPEN_COMMIT_IN_BITBUCKET, "Open commit in Bitbucket"),
         (keys::OPEN_PR_IN_BITBUCKET, "Open pull request in Bitbucket"),
+        (
+            keys::OPEN_TEST_RESULTS_IN_JENKINS,
+            "Open test results in Jenkins",
+        ),
         (keys::OPEN_SETTINGS, "Open settings"),
         (keys::REFRESH_CACHED, "Refresh cached work items"),
         (keys::FORCE_PERIODIC_REFRESH, "Force periodic refresh"),
@@ -196,6 +207,27 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (
             keys::LIST_INPUT_HINT,
             "Comma, semicolon, or newline separated values",
+        ),
+        (keys::SETTINGS_ADD_ENTRY, "Add entry…"),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_WEEK,
+            "Choose a whole number from 16 to 42",
+        ),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_DAY,
+            "Choose a value from 4 to 9.5 in steps of 0.5",
+        ),
+        (
+            keys::SETTINGS_ERROR_NON_BILLABLE,
+            "Entry is not in active assigned project list",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_WORK_ITEMS,
+            "Entry must be active assigned work item in selected non-billable project(s)",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_UNIQUE,
+            "Entry can only appear in one of Meetings, Local holidays, Planned time off, or Study",
         ),
         (keys::REPORT_PERIOD, "Period"),
         (keys::REPORT_PERIOD_WEEK, "Month"),
@@ -309,6 +341,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
             keys::OPEN_PR_IN_BITBUCKET,
             "Ouvrir la demande de tirage dans Bitbucket",
         ),
+        (
+            keys::OPEN_TEST_RESULTS_IN_JENKINS,
+            "Ouvrir les résultats de test dans Jenkins",
+        ),
         (keys::OPEN_SETTINGS, "Ouvrir les paramètres"),
         (keys::REFRESH_CACHED, "Rafraîchir les éléments en cache"),
         (keys::FORCE_PERIODIC_REFRESH, "Forcer le rafraîchissement périodique"),
@@ -325,6 +361,27 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (
             keys::LIST_INPUT_HINT,
             "Valeurs séparées par virgule, point-virgule ou retour ligne",
+        ),
+        (keys::SETTINGS_ADD_ENTRY, "Ajouter une entrée…"),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_WEEK,
+            "Choisissez un nombre entier de 16 à 42",
+        ),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_DAY,
+            "Choisissez une valeur de 4 à 9,5 par pas de 0,5",
+        ),
+        (
+            keys::SETTINGS_ERROR_NON_BILLABLE,
+            "L’entrée n’est pas dans la liste des projets actifs assignés",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_WORK_ITEMS,
+            "L’entrée doit être un ticket actif assigné dans le(s) projet(s) non facturable(s) sélectionné(s)",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_UNIQUE,
+            "L’entrée ne peut apparaître que dans Réunions, Jours fériés locaux, Congé planifié ou Étude",
         ),
         (keys::REPORT_PERIOD, "Période"),
         (keys::REPORT_PERIOD_WEEK, "Mois"),
@@ -426,6 +483,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
             keys::OPEN_PR_IN_BITBUCKET,
             "Pull request openen in Bitbucket",
         ),
+        (
+            keys::OPEN_TEST_RESULTS_IN_JENKINS,
+            "Testresultaten openen in Jenkins",
+        ),
         (keys::OPEN_SETTINGS, "Instellingen openen"),
         (keys::REFRESH_CACHED, "Werkitems in cache vernieuwen"),
         (keys::FORCE_PERIODIC_REFRESH, "Periodieke verversing forceren"),
@@ -442,6 +503,27 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (
             keys::LIST_INPUT_HINT,
             "Waarden gescheiden door komma, puntkomma of nieuwe regel",
+        ),
+        (keys::SETTINGS_ADD_ENTRY, "Item toevoegen…"),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_WEEK,
+            "Kies een geheel getal van 16 tot 42",
+        ),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_DAY,
+            "Kies een waarde van 4 tot 9,5 in stappen van 0,5",
+        ),
+        (
+            keys::SETTINGS_ERROR_NON_BILLABLE,
+            "Item staat niet in lijst met actieve toegewezen projecten",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_WORK_ITEMS,
+            "Item moet actief toegewezen werkitem zijn in geselecteerde niet-factureerbare project(en)",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_UNIQUE,
+            "Item mag maar in één van Vergaderingen, Lokale feestdagen, Gepland verlof of Studie staan",
         ),
         (keys::REPORT_PERIOD, "Periode"),
         (keys::REPORT_PERIOD_WEEK, "Maand"),

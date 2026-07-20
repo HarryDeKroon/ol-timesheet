@@ -8,20 +8,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$ImageName = if ($env:IMAGE_NAME) { $env:IMAGE_NAME } else { "oltimesheet:0.9.1" }
+$ImageName     = if ($env:IMAGE_NAME)     { $env:IMAGE_NAME }     else { "oltimesheet:0.9.1" }
 $ContainerName = if ($env:CONTAINER_NAME) { $env:CONTAINER_NAME } else { "oltimesheet" }
-$ConfigVolume = if ($env:CONFIG_VOLUME) { $env:CONFIG_VOLUME } else { "oltimesheet-config" }
-$HostPort = if ($env:HOST_PORT) { $env:HOST_PORT } else { "8081" }
+$ConfigVolume  = if ($env:CONFIG_VOLUME)  { $env:CONFIG_VOLUME }  else { "oltimesheet-config" }
+$HostPort      = if ($env:HOST_PORT)      { $env:HOST_PORT }      else { "8081" }
 $ContainerPort = if ($env:CONTAINER_PORT) { $env:CONTAINER_PORT } else { "8081" }
 $XdgConfigHome = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { "/root/.config/Timesheet" }
-$AppConfigDir = if ($env:APP_CONFIG_DIR) { $env:APP_CONFIG_DIR } else { "$XdgConfigHome/timesheet" }
-$SessionsDir = "$AppConfigDir/sessions"
-$HelperImage = if ($env:HELPER_IMAGE) { $env:HELPER_IMAGE } else { "alpine:3.20" }
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$EnvFile = Join-Path $ScriptDir ".env"
+$AppConfigDir  = if ($env:APP_CONFIG_DIR)  { $env:APP_CONFIG_DIR }  else { "$XdgConfigHome/timesheet" }
+$SessionsDir   = "$AppConfigDir/sessions"
+$CacheFile     = "$AppConfigDir/cache.yaml"
+$HelperImage   = if ($env:HELPER_IMAGE) { $env:HELPER_IMAGE } else { "alpine:3.20" }
+$ScriptDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
+$EnvFile       = Join-Path $ScriptDir ".env"
 
 function Show-Usage {
-    Write-Error "Usage: .\oltimesheet.ps1 {start|stop|log|tail|users|sessions|rm <session_id...>}"
+    Write-Error "Usage: .\oltimesheet.ps1 {start|stop|log|tail|users|sessions|rm cache|rm <session_id...>}"
 }
 
 function Ensure-ImageExists {
@@ -91,6 +92,14 @@ function Get-Sessions {
     docker run --rm -v "$ConfigVolume`:$XdgConfigHome" $HelperImage sh -lc 'sessions_dir="$1"; [ -d "$sessions_dir" ] || exit 0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; basename "$f" .json; done | sort -u' sh $SessionsDir
 }
 
+function Remove-Cache {
+    docker run --rm -v "$ConfigVolume`:$XdgConfigHome" $HelperImage sh -lc 'f="$1"; if [ -f "$f" ]; then rm -f "$f"; echo "removed cache.yaml"; else echo "cache.yaml not found"; fi' sh $CacheFile
+}
+
+function Remove-AllSessions {
+    docker run --rm -v "$ConfigVolume`:$XdgConfigHome" $HelperImage sh -lc 'sessions_dir="$1"; [ -d "$sessions_dir" ] || { echo "sessions directory not found"; exit 0; }; count=0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; rm -f "$f"; count=$((count+1)); done; echo "removed $count session(s)"' sh $SessionsDir
+}
+
 function Remove-Sessions {
     param([string[]]$SessionIds)
 
@@ -107,12 +116,20 @@ function Remove-Sessions {
 }
 
 switch ($Command) {
-    "start" { Start-TimesheetContainer }
-    "stop" { Stop-TimesheetContainer }
-    "log" { docker logs $ContainerName }
-    "tail" { docker logs -f $ContainerName }
-    "users" { Get-Users }
+    "start"    { Start-TimesheetContainer }
+    "stop"     { Stop-TimesheetContainer }
+    "log"      { docker logs $ContainerName }
+    "tail"     { docker logs -f $ContainerName }
+    "users"    { Get-Users }
     "sessions" { Get-Sessions }
-    "rm" { Remove-Sessions -SessionIds $Arguments }
+    "rm" {
+        if ($Arguments.Count -gt 0 -and $Arguments[0] -eq "cache") {
+            Remove-Cache
+        } elseif ($Arguments.Count -gt 0 -and $Arguments[0] -eq "all") {
+            Remove-AllSessions
+        } else {
+            Remove-Sessions -SessionIds $Arguments
+        }
+    }
     default { Show-Usage }
 }

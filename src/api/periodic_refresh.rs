@@ -347,6 +347,10 @@ fn bitbucket_activity_cells_from_source(
         let entry = by_cell.entry(cell_key.clone()).or_default();
         entry.commit_links = commit_links.clone();
     }
+    for (cell_key, test_result_links) in &activity.test_result_links_by_cell {
+        let entry = by_cell.entry(cell_key.clone()).or_default();
+        entry.test_result_links = test_result_links.clone();
+    }
     for cell_key in &activity.pr_review_cells {
         if !show_merged_pr_activity && activity.pr_merged_cells.contains(cell_key) {
             continue;
@@ -469,6 +473,10 @@ async fn build_refresh_snapshot(
     for (cell_key, commit_links) in bitbucket_activity.commit_links_by_cell {
         let entry = bitbucket_activity_by_cell.entry(cell_key).or_default();
         entry.commit_links = commit_links;
+    }
+    for (cell_key, test_result_links) in bitbucket_activity.test_result_links_by_cell {
+        let entry = bitbucket_activity_by_cell.entry(cell_key).or_default();
+        entry.test_result_links = test_result_links;
     }
     let prefs = crate::auth::load_user_prefs(&creds.account_id);
     let filtered_pr_review: HashSet<String> = if prefs.show_merged_pr_activity {

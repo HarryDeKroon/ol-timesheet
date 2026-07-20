@@ -9,12 +9,13 @@ CONTAINER_PORT="${CONTAINER_PORT:-8081}"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/root/.config/Timesheet}"
 APP_CONFIG_DIR="${APP_CONFIG_DIR:-$XDG_CONFIG_HOME/timesheet}"
 SESSIONS_DIR="$APP_CONFIG_DIR/sessions"
+CACHE_FILE="$APP_CONFIG_DIR/cache.yaml"
 HELPER_IMAGE="${HELPER_IMAGE:-alpine:3.20}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 
 usage() {
-    echo "Usage: $0 {start|stop|log|tail|users|sessions|rm <session_id...>}" >&2
+    echo "Usage: echo "Usage: $0 {start|stop|log|tail|users|sessions|rm cache|rm <session_id...>}" >&2 {start|stop|log|tail|users|sessions|rm cache|rm all|rm <session_id...>}" >&2
     exit 1
 }
 
@@ -77,6 +78,18 @@ list_sessions() {
         sh "$SESSIONS_DIR"
 }
 
+remove_cache() {
+    docker run --rm -v "${CONFIG_VOLUME}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
+        'f="$1"; if [ -f "$f" ]; then rm -f "$f"; echo "removed cache.yaml"; else echo "cache.yaml not found"; fi' \
+        sh "$CACHE_FILE"
+}
+
+remove_all_sessions() {
+    docker run --rm -v "${CONFIG_VOLUME}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
+        'sessions_dir="$1"; [ -d "$sessions_dir" ] || { echo "sessions directory not found"; exit 0; }; count=0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; rm -f "$f"; count=$((count+1)); done; echo "removed $count session(s)"' \
+        sh "$SESSIONS_DIR"
+}
+
 remove_sessions() {
     if [[ $# -eq 0 ]]; then
         echo "rm requires at least one session id." >&2
@@ -115,7 +128,13 @@ case "$cmd" in
         ;;
     rm)
         shift
-        remove_sessions "$@"
+        if [[ "${1:-}" == "cache" ]]; then
+            remove_cache
+        elif [[ "${1:-}" == "all" ]]; then
+            remove_all_sessions
+        else
+            remove_sessions "$@"
+        fi
         ;;
     *)
         usage

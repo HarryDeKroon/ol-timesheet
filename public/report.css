@@ -1,50 +1,16 @@
-.report-overlay-backdrop {
-	position: fixed;
-	inset: 0;
-	background: rgba(0, 0, 0, 0.35);
+.report-view {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.report-ribbon-controls {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	z-index: 1500;
-}
-
-.report-overlay {
-	width: 100vw;
-	height: 100vh;
-	background: #fff;
-	border-radius: 0;
-	border: 0;
-	display: flex;
-	flex-direction: column;
-	padding: 0.75rem 1rem 1rem;
-	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
-}
-
-.report-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 0.75rem;
-}
-
-.report-header h2 {
-	margin: 0;
-	font-size: 1.15rem;
-	font-weight: 600;
-}
-
-.report-close {
-	padding: 0.3rem 0.65rem;
-	border: 1px solid #cbd5e1;
-	background: #f8fafc;
-	border-radius: 0.35rem;
-	cursor: pointer;
-}
-
-.report-toolbar {
-	display: flex;
-	justify-content: flex-start;
-	margin-top: 0.6rem;
+	gap: 1rem;
+	flex-wrap: wrap;
 }
 
 .report-filter-swatch {
@@ -60,8 +26,14 @@
 	gap: 0.5rem;
 }
 
+.report-controls label {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+}
+
 .report-controls select {
-	margin-left: 0.35rem;
+	margin-left: 0;
 }
 
 .report-content {
@@ -70,7 +42,6 @@
 	display: grid;
 	grid-template-rows: 6fr 4fr;
 	gap: 0.75rem;
-	margin-top: 0.7rem;
 }
 
 .report-chart-panel {
@@ -161,7 +132,6 @@
 	align-items: center;
 	justify-content: center;
 	gap: 0.75rem;
-	margin-bottom: 0.35rem;
 }
 
 .report-period-label {
