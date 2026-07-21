@@ -556,6 +556,13 @@ pub fn invalidate_worklogs_for_issue(account_id: &str, issue_key: &str) {
     // them might include this issue.
     let user_prefix = format!("{}:{}", account_id, TIMESHEET_DATA_PREFIX);
     cache::remove_by_prefix(&user_prefix);
+    // Invalidate week-level caches too.  Otherwise week-cache fast path can
+    // serve stale rows right after a worklog write (entry appears "gone"
+    // until a later refresh repopulates that week).
+    let week_prefix = format!("{}:week_cache:", account_id);
+    cache::remove_by_prefix(&week_prefix);
+    cache::remove(&cache::cached_weeks_index_key(account_id));
+    cache::remove(&cache::cached_bitbucket_weeks_index_key(account_id));
     // Also invalidate all JQL search caches for this user. The worklog
     // author query (worklogAuthor = "..." AND worklogDate >= ...) won't
     // include a newly-worklocked issue until its cached result is evicted.

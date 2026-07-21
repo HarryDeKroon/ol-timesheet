@@ -468,7 +468,7 @@ main {
 }
 
 .timesheet-report-open .timesheet-grid-container,
-.timesheet-report-open .refresh-toast,
+.timesheet-report-open .refresh-toast-stack,
 .timesheet-report-open .search-dropdown-backdrop,
 .timesheet-report-open .search-dropdown,
 .timesheet-settings-open .cell-popup,
@@ -1769,14 +1769,107 @@ a {
 	position: fixed;
 }
 
-.refresh-toast {
+.refresh-toast-stack {
 	position: fixed;
 	right: 1.5rem;
 	bottom: 1.5rem;
 	z-index: 5000;
-	padding: 0.75rem 1rem;
-	border-radius: 6px;
-	background: rgba(32, 90, 50, 0.95);
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+}
+
+.refresh-toast-card {
+	min-width: 340px;
+	max-width: min(42rem, calc(100vw - 2rem));
+	border-radius: 8px;
+	overflow: hidden;
+	background: rgba(27, 31, 39, 0.96);
 	color: #fff;
-	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.refresh-toast-titlebar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.5rem;
+	padding: 0.35rem 0.5rem;
+	background: rgba(0, 0, 0, 0.25);
+	cursor: move;
+	user-select: none;
+}
+
+.refresh-toast-time {
+	font-weight: 600;
+	font-size: 0.86rem;
+}
+
+.refresh-toast-close {
+	width: 1.35rem;
+	height: 1.35rem;
+	border: 0;
+	border-radius: 2px;
+	background: #c62828;
+	color: #fff;
+	font-size: 1rem;
+	line-height: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	padding: 0;
+}
+
+.refresh-toast-close:hover {
+	background: #e53935;
+}
+
+.refresh-toast-close:focus {
+	outline: 2px solid #90caf9;
+	outline-offset: 1px;
+}
+
+.refresh-toast-body {
+	padding: 0.75rem 1rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.refresh-toast-section-title {
+	font-weight: 600;
+	font-size: 0.86rem;
+	opacity: 0.95;
+	margin-bottom: 0.15rem;
+}
+
+.refresh-toast-keys {
+	word-break: break-word;
+}
+
+.refresh-toast-list {
+	margin: 0;
+	padding-left: 1.1rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.refresh-toast-key {
+	font-weight: 600;
+}
+
+.refresh-toast-links {
+	margin-top: 0.15rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.1rem;
+}
+
+.refresh-toast-links a {
+	color: #9bd1ff;
+	text-decoration: underline;
+	word-break: break-all;
 }

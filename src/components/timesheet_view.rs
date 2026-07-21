@@ -20,14 +20,13 @@ use leptos::prelude::*;
 use leptos::web_sys;
 use leptos_meta::Title;
 
+use std::collections::{HashMap, HashSet};
+
 #[cfg(feature = "ssr")]
 use crate::model::CellActivity;
 
 // Import flag SVGs from shared flags module
 use crate::flags::{FLAG_FR, FLAG_NL, FLAG_UK};
-
-#[cfg(feature = "ssr")]
-use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "ssr")]
 fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
@@ -236,6 +235,191 @@ fn cell_key_date(cell_key: &str) -> Option<NaiveDate> {
         .and_then(|(_, date)| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
 }
 
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn cell_key_issue_key(cell_key: &str) -> Option<String> {
+    cell_key
+        .split_once(':')
+        .map(|(issue_key, _)| issue_key.to_string())
+}
+
+#[derive(Clone, Debug, Default)]
+struct RefreshToastPrUpdate {
+    issue_key: String,
+    pr_links: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RefreshToastTestUpdate {
+    issue_key: String,
+    test_result_links: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RefreshToastInfo {
+    id: u64,
+    hhmm: String,
+    added_work_keys: Vec<String>,
+    pr_updates: Vec<RefreshToastPrUpdate>,
+    test_updates: Vec<RefreshToastTestUpdate>,
+}
+
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+static NEXT_REFRESH_TOAST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn hhmm_from_applied_at(applied_at: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(applied_at)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_else(|_| chrono::Local::now().format("%H:%M").to_string())
+}
+
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn build_refresh_toast_info(
+    diff: &crate::model::TimesheetRefreshDiff,
+    existing_keys: &HashSet<String>,
+    applied_at: &str,
+) -> Option<RefreshToastInfo> {
+    let mut added_work_keys = diff
+        .work_items_upserted
+        .iter()
+        .map(|w| w.key.trim().to_uppercase())
+        .filter(|key| !key.is_empty() && !existing_keys.contains(key))
+        .collect::<Vec<_>>();
+    added_work_keys.sort();
+    added_work_keys.dedup();
+
+    let mut pr_links_by_key = HashMap::<String, HashSet<String>>::new();
+    let mut pr_keys_without_links = HashSet::<String>::new();
+    let mut test_links_by_key = HashMap::<String, HashSet<String>>::new();
+
+    for update in &diff.bitbucket_activity_upserted {
+        let Some(issue_key) = cell_key_issue_key(&update.cell_key) else {
+            continue;
+        };
+        let issue_key = issue_key.trim().to_uppercase();
+        if issue_key.is_empty() {
+            continue;
+        }
+
+        if update.activity.has_pr_review || !update.activity.pr_links.is_empty() {
+            if update.activity.pr_links.is_empty() {
+                pr_keys_without_links.insert(issue_key.clone());
+            } else {
+                let bucket = pr_links_by_key.entry(issue_key.clone()).or_default();
+                for link in &update.activity.pr_links {
+                    if !link.trim().is_empty() {
+                        bucket.insert(link.clone());
+                    }
+                }
+            }
+        }
+
+        if !update.activity.test_result_links.is_empty() {
+            let bucket = test_links_by_key.entry(issue_key).or_default();
+            for link in &update.activity.test_result_links {
+                if !link.trim().is_empty() {
+                    bucket.insert(link.clone());
+                }
+            }
+        }
+    }
+
+    let mut pr_updates = pr_links_by_key
+        .into_iter()
+        .map(|(issue_key, links)| {
+            let mut pr_links = links.into_iter().collect::<Vec<_>>();
+            pr_links.sort();
+            RefreshToastPrUpdate {
+                issue_key,
+                pr_links,
+            }
+        })
+        .collect::<Vec<_>>();
+    for issue_key in pr_keys_without_links {
+        if !pr_updates.iter().any(|u| u.issue_key == issue_key) {
+            pr_updates.push(RefreshToastPrUpdate {
+                issue_key,
+                pr_links: Vec::new(),
+            });
+        }
+    }
+    pr_updates.sort_by(|a, b| a.issue_key.cmp(&b.issue_key));
+
+    let mut test_updates = test_links_by_key
+        .into_iter()
+        .map(|(issue_key, links)| {
+            let mut test_result_links = links.into_iter().collect::<Vec<_>>();
+            test_result_links.sort();
+            RefreshToastTestUpdate {
+                issue_key,
+                test_result_links,
+            }
+        })
+        .collect::<Vec<_>>();
+    test_updates.sort_by(|a, b| a.issue_key.cmp(&b.issue_key));
+
+    // Do not toast for commit-only or worklog-only refreshes.
+    if added_work_keys.is_empty() && pr_updates.is_empty() && test_updates.is_empty() {
+        return None;
+    }
+
+    Some(RefreshToastInfo {
+        id: NEXT_REFRESH_TOAST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        hhmm: hhmm_from_applied_at(applied_at),
+        added_work_keys,
+        pr_updates,
+        test_updates,
+    })
+}
+
+fn attach_toast_stack_drag(ev: leptos::ev::MouseEvent, toast_stack_offset: RwSignal<(f64, f64)>) {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
+
+        ev.prevent_default();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+
+        let start_x = ev.client_x() as f64;
+        let start_y = ev.client_y() as f64;
+        let (base_x, base_y) = toast_stack_offset.get_untracked();
+
+        let move_cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::wrap(Box::new({
+            let toast_stack_offset = toast_stack_offset;
+            move |mv: web_sys::MouseEvent| {
+                let dx = (mv.client_x() as f64) - start_x;
+                let dy = (mv.client_y() as f64) - start_y;
+                toast_stack_offset.set((base_x + dx, base_y + dy));
+            }
+        }));
+
+        let mouseup_cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::wrap(Box::new({
+            let window = window.clone();
+            let move_ref = move_cb.as_ref().clone();
+            move |_| {
+                let _ = window
+                    .remove_event_listener_with_callback("mousemove", move_ref.unchecked_ref());
+            }
+        }));
+
+        let _ =
+            window.add_event_listener_with_callback("mousemove", move_cb.as_ref().unchecked_ref());
+        let _ =
+            window.add_event_listener_with_callback("mouseup", mouseup_cb.as_ref().unchecked_ref());
+
+        move_cb.forget();
+        mouseup_cb.forget();
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = ev;
+        let _ = toast_stack_offset;
+    }
+}
+
 #[cfg(feature = "hydrate")]
 fn diff_affects_visible_range(
     diff: &TimesheetRefreshDiff,
@@ -282,33 +466,18 @@ fn start_timesheet_refresh_socket(
     selected_monday: RwSignal<NaiveDate>,
     num_weeks: RwSignal<usize>,
     today: RwSignal<NaiveDate>,
-    i18n: RwSignal<I18n>,
-    refresh_toast: RwSignal<Option<String>>,
+    refresh_toasts: RwSignal<Vec<RefreshToastInfo>>,
 ) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
-
-    fn schedule_toast_clear(refresh_toast: RwSignal<Option<String>>) {
-        let clear = Closure::wrap(Box::new(move || {
-            refresh_toast.set(None);
-        }) as Box<dyn FnMut()>);
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                clear.as_ref().unchecked_ref(),
-                4000,
-            );
-            clear.forget();
-        }
-    }
 
     fn schedule_reconnect(
         last_data: RwSignal<Option<TimesheetData>>,
         selected_monday: RwSignal<NaiveDate>,
         num_weeks: RwSignal<usize>,
         today: RwSignal<NaiveDate>,
-        i18n: RwSignal<I18n>,
-        refresh_toast: RwSignal<Option<String>>,
+        refresh_toasts: RwSignal<Vec<RefreshToastInfo>>,
     ) {
         let reconnect = Closure::wrap(Box::new(move || {
             start_timesheet_refresh_socket(
@@ -316,8 +485,7 @@ fn start_timesheet_refresh_socket(
                 selected_monday,
                 num_weeks,
                 today,
-                i18n,
-                refresh_toast,
+                refresh_toasts,
             );
         }) as Box<dyn FnMut()>);
         if let Some(window) = web_sys::window() {
@@ -338,14 +506,7 @@ fn start_timesheet_refresh_socket(
     let host = location.host().unwrap_or_else(|_| "localhost:8081".into());
     let url = format!("{}//{}/ws/timesheet", ws_protocol, host);
     let Ok(ws) = WebSocket::new(&url) else {
-        schedule_reconnect(
-            last_data,
-            selected_monday,
-            num_weeks,
-            today,
-            i18n,
-            refresh_toast,
-        );
+        schedule_reconnect(last_data, selected_monday, num_weeks, today, refresh_toasts);
         return;
     };
 
@@ -358,7 +519,7 @@ fn start_timesheet_refresh_socket(
                 return;
             };
             match message {
-                TimesheetWsMessage::RefreshDiff { diff, .. } => {
+                TimesheetWsMessage::RefreshDiff { diff, applied_at } => {
                     if diff.is_empty() {
                         return;
                     }
@@ -371,15 +532,26 @@ fn start_timesheet_refresh_socket(
                         return;
                     }
                     let mut applied = false;
+                    let mut toast_info = None;
                     last_data.update(|opt| {
                         if let Some(ts) = opt.as_mut() {
+                            let existing_keys = ts
+                                .work_items
+                                .iter()
+                                .map(|w| w.key.trim().to_uppercase())
+                                .collect::<HashSet<_>>();
+                            toast_info =
+                                build_refresh_toast_info(&diff, &existing_keys, &applied_at);
                             apply_refresh_diff_to_timesheet(ts, &diff);
                             applied = true;
                         }
                     });
                     if applied {
-                        refresh_toast.set(Some(i18n.get_untracked().t(keys::LIVE_REFRESH_APPLIED)));
-                        schedule_toast_clear(refresh_toast);
+                        if let Some(toast) = toast_info {
+                            refresh_toasts.update(|toasts| {
+                                toasts.insert(0, toast);
+                            });
+                        }
                     }
                 }
             }
@@ -390,14 +562,7 @@ fn start_timesheet_refresh_socket(
 
     {
         let onclose = Closure::<dyn Fn(CloseEvent)>::new(move |_: CloseEvent| {
-            schedule_reconnect(
-                last_data,
-                selected_monday,
-                num_weeks,
-                today,
-                i18n,
-                refresh_toast,
-            );
+            schedule_reconnect(last_data, selected_monday, num_weeks, today, refresh_toasts);
         });
         ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
         onclose.forget();
@@ -1229,17 +1394,11 @@ pub fn TimesheetView() -> impl IntoView {
     let last_data = RwSignal::new(Option::<TimesheetData>::None);
     let is_loading = RwSignal::new(true);
     let error_msg = RwSignal::new(Option::<String>::None);
-    let refresh_toast = RwSignal::new(Option::<String>::None);
+    let refresh_toasts = RwSignal::new(Vec::<RefreshToastInfo>::new());
+    let toast_stack_offset = RwSignal::new((0.0_f64, 0.0_f64));
 
     #[cfg(feature = "hydrate")]
-    start_timesheet_refresh_socket(
-        last_data,
-        selected_monday,
-        num_weeks,
-        today,
-        i18n,
-        refresh_toast,
-    );
+    start_timesheet_refresh_socket(last_data, selected_monday, num_weeks, today, refresh_toasts);
 
     // ── Work-item search state ──
     let search_query = RwSignal::new(String::new());
@@ -2876,9 +3035,111 @@ pub fn TimesheetView() -> impl IntoView {
                 }}
             </div>
 
-            {move || refresh_toast.get().map(|msg| view! {
-                <div class="refresh-toast" role="status" aria-live="polite">{msg}</div>
-            })}
+            {move || {
+                let toasts = refresh_toasts.get();
+                if toasts.is_empty() {
+                    return None;
+                }
+                let (offset_x, offset_y) = toast_stack_offset.get();
+                let stack_style = format!("transform: translate({:.0}px, {:.0}px);", offset_x, offset_y);
+                Some(view! {
+                    <div class="refresh-toast-stack" style={stack_style} role="status" aria-live="polite">
+                        {toasts.into_iter().map(|toast| {
+                            let toast_id = toast.id;
+                            let on_close = {
+                                let refresh_toasts = refresh_toasts;
+                                move |_| {
+                                    refresh_toasts.update(|items| {
+                                        items.retain(|item| item.id != toast_id);
+                                    });
+                                }
+                            };
+                            let on_drag_start = {
+                                let toast_stack_offset = toast_stack_offset;
+                                move |ev| attach_toast_stack_drag(ev, toast_stack_offset)
+                            };
+                            view! {
+                                <article class="refresh-toast-card">
+                                    <div class="refresh-toast-titlebar" on:mousedown=on_drag_start>
+                                        <span class="refresh-toast-time">{toast.hhmm.clone()}</span>
+                                        <button
+                                            type="button"
+                                            class="refresh-toast-close"
+                                            aria-label={move || i18n.get().t(keys::LIVE_REFRESH_TOAST_CLOSE)}
+                                            title={move || i18n.get().t(keys::LIVE_REFRESH_TOAST_CLOSE)}
+                                            on:click=on_close
+                                        >
+                                            "×"
+                                        </button>
+                                    </div>
+                                    <div class="refresh-toast-body">
+                                        {(!toast.added_work_keys.is_empty()).then(|| {
+                                            view! {
+                                                <div class="refresh-toast-section">
+                                                    <div class="refresh-toast-section-title">{move || i18n.get().t(keys::LIVE_REFRESH_WORK_KEYS_ADDED)}</div>
+                                                    <div class="refresh-toast-keys">{toast.added_work_keys.join(", ")}</div>
+                                                </div>
+                                            }
+                                        })}
+                                        {(!toast.pr_updates.is_empty()).then(|| {
+                                            view! {
+                                                <div class="refresh-toast-section">
+                                                    <div class="refresh-toast-section-title">{move || i18n.get().t(keys::LIVE_REFRESH_PR_UPDATES)}</div>
+                                                    <ul class="refresh-toast-list">
+                                                        {toast.pr_updates.iter().map(|update| {
+                                                            let links = update.pr_links.clone();
+                                                            view! {
+                                                                <li>
+                                                                    <span class="refresh-toast-key">{update.issue_key.clone()}</span>
+                                                                    {(!links.is_empty()).then(|| view! {
+                                                                        <div class="refresh-toast-links">
+                                                                            {links.into_iter().map(|link| {
+                                                                                view! {
+                                                                                    <a href={link.clone()} target="_blank" rel="noopener noreferrer">{link.clone()}</a>
+                                                                                }
+                                                                            }).collect_view()}
+                                                                        </div>
+                                                                    })}
+                                                                </li>
+                                                            }
+                                                        }).collect_view()}
+                                                    </ul>
+                                                </div>
+                                            }
+                                        })}
+                                        {(!toast.test_updates.is_empty()).then(|| {
+                                            view! {
+                                                <div class="refresh-toast-section">
+                                                    <div class="refresh-toast-section-title">{move || i18n.get().t(keys::LIVE_REFRESH_TEST_UPDATES)}</div>
+                                                    <ul class="refresh-toast-list">
+                                                        {toast.test_updates.iter().map(|update| {
+                                                            let links = update.test_result_links.clone();
+                                                            view! {
+                                                                <li>
+                                                                    <span class="refresh-toast-key">{update.issue_key.clone()}</span>
+                                                                    {(!links.is_empty()).then(|| view! {
+                                                                        <div class="refresh-toast-links">
+                                                                            {links.into_iter().map(|link| {
+                                                                                view! {
+                                                                                    <a href={link.clone()} target="_blank" rel="noopener noreferrer">{link.clone()}</a>
+                                                                                }
+                                                                            }).collect_view()}
+                                                                        </div>
+                                                                    })}
+                                                                </li>
+                                                            }
+                                                        }).collect_view()}
+                                                    </ul>
+                                                </div>
+                                            }
+                                        })}
+                                    </div>
+                                </article>
+                            }
+                        }).collect_view()}
+                    </div>
+                })
+            }}
 
             // ── Search dropdown rendered outside the table so it is never
             // clipped by overflow:hidden / sticky headers / stacking contexts.

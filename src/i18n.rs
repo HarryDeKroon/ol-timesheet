@@ -110,6 +110,10 @@ pub mod keys {
     pub const REPORT_YEAR_SCOPE: &str = "report_year_scope";
     pub const REPORT_PTO_TOTAL: &str = "report_pto_total";
     pub const LIVE_REFRESH_APPLIED: &str = "live_refresh_applied";
+    pub const LIVE_REFRESH_TOAST_CLOSE: &str = "live_refresh_toast_close";
+    pub const LIVE_REFRESH_WORK_KEYS_ADDED: &str = "live_refresh_work_keys_added";
+    pub const LIVE_REFRESH_PR_UPDATES: &str = "live_refresh_pr_updates";
+    pub const LIVE_REFRESH_TEST_UPDATES: &str = "live_refresh_test_updates";
     pub const DURATIONS: &str = "durations";
     pub const PULL_REQUESTS: &str = "pull_requests";
     pub const LANGUAGE: &str = "language";
@@ -244,6 +248,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Year"),
         (keys::REPORT_PTO_TOTAL, "PTO"),
         (keys::LIVE_REFRESH_APPLIED, "Timesheet updated"),
+        (keys::LIVE_REFRESH_TOAST_CLOSE, "Close notification"),
+        (keys::LIVE_REFRESH_WORK_KEYS_ADDED, "New work keys"),
+        (keys::LIVE_REFRESH_PR_UPDATES, "PR updates"),
+        (keys::LIVE_REFRESH_TEST_UPDATES, "Jenkins test updates"),
         (keys::DURATIONS, "Durations"),
         (keys::PULL_REQUESTS, "Pull requests"),
         (keys::LANGUAGE, "Language"),
@@ -401,6 +409,13 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Année"),
         (keys::REPORT_PTO_TOTAL, "CP"),
         (keys::LIVE_REFRESH_APPLIED, "Feuille de temps mise à jour"),
+        (keys::LIVE_REFRESH_TOAST_CLOSE, "Fermer la notification"),
+        (keys::LIVE_REFRESH_WORK_KEYS_ADDED, "Nouvelles clés de ticket"),
+        (keys::LIVE_REFRESH_PR_UPDATES, "Mises à jour de PR"),
+        (
+            keys::LIVE_REFRESH_TEST_UPDATES,
+            "Mises à jour des tests Jenkins",
+        ),
         (keys::DURATIONS, "Dur\u{00E9}es"),
         (keys::PULL_REQUESTS, "Demandes de tirage"),
         (keys::LANGUAGE, "Langue"),
@@ -543,6 +558,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Jaar"),
         (keys::REPORT_PTO_TOTAL, "Verlof"),
         (keys::LIVE_REFRESH_APPLIED, "Urenstaat bijgewerkt"),
+        (keys::LIVE_REFRESH_TOAST_CLOSE, "Melding sluiten"),
+        (keys::LIVE_REFRESH_WORK_KEYS_ADDED, "Nieuwe werksleutels"),
+        (keys::LIVE_REFRESH_PR_UPDATES, "PR-updates"),
+        (keys::LIVE_REFRESH_TEST_UPDATES, "Jenkins-testupdates"),
         (keys::DURATIONS, "Duraties"),
         (keys::PULL_REQUESTS, "Pull requests"),
         (keys::LANGUAGE, "Taal"),
