@@ -108,7 +108,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 }
 
 async fn url_exists(config: &JenkinsConfig, url: &str) -> Result<bool, String> {
-    let mut request = HTTP.get(url);
+    let mut request = HTTP.head(url);
     if let Some(auth) = &config.auth_header {
         request = request.header("Authorization", auth);
     }
