@@ -570,6 +570,94 @@ pub fn invalidate_worklogs_for_issue(account_id: &str, issue_key: &str) {
     cache::remove_by_prefix(&search_prefix);
 }
 
+fn parse_timesheet_range_from_key(key: &str) -> Option<(NaiveDate, NaiveDate)> {
+    let mut parts = key.split(':');
+    let _account_id = parts.next()?;
+    let kind = parts.next()?;
+    if kind != "timesheet_data" {
+        return None;
+    }
+    let start = NaiveDate::parse_from_str(parts.next()?, "%Y-%m-%d").ok()?;
+    let end = NaiveDate::parse_from_str(parts.next()?, "%Y-%m-%d").ok()?;
+    Some((start, end))
+}
+
+fn parse_week_monday_from_key(key: &str) -> Option<NaiveDate> {
+    let mut parts = key.split(':');
+    let _account_id = parts.next()?;
+    let kind = parts.next()?;
+    if kind != "week_cache" {
+        return None;
+    }
+    NaiveDate::parse_from_str(parts.next()?, "%Y-%m-%d").ok()
+}
+
+async fn refresh_caches_after_worklog_write(
+    creds: &JiraCredentials,
+    issue_key: &str,
+) -> Result<(), String> {
+    // Fetch all user worklogs for this issue from Jira and refresh per-issue cache.
+    // `fetch_worklogs_fresh` stores unfiltered entries in jira_worklogs:{key}.
+    let full_start =
+        NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_else(|| chrono::Local::now().date_naive());
+    let full_end = NaiveDate::from_ymd_opt(2100, 1, 1).unwrap_or(full_start);
+    let (all_entries, ytd_total) =
+        fetch_worklogs_fresh(creds, issue_key, full_start, full_end).await?;
+
+    let fetched_item = fetch_work_items_by_keys(creds, &[issue_key.to_string()])
+        .await
+        .ok()
+        .and_then(|mut items| items.drain(..).next());
+    let issue_key_upper = issue_key.trim().to_uppercase();
+
+    cache::update_user_entries(&creds.account_id, |key, raw| {
+        let (start, end) = if let Some(range) = parse_timesheet_range_from_key(key) {
+            range
+        } else if let Some(monday) = parse_week_monday_from_key(key) {
+            (monday, monday + chrono::Duration::days(6))
+        } else {
+            return None;
+        };
+
+        let mut ts = serde_json::from_str::<crate::model::TimesheetData>(raw).ok()?;
+        ts.worklogs
+            .retain(|entry| entry.issue_key.trim().to_uppercase() != issue_key_upper);
+        ts.worklogs.extend(
+            all_entries
+                .iter()
+                .filter(|entry| entry.date >= start && entry.date <= end)
+                .cloned(),
+        );
+
+        if ytd_total > 0.0 {
+            ts.ytd_hours.insert(issue_key.to_string(), ytd_total);
+        } else {
+            ts.ytd_hours.remove(issue_key);
+        }
+
+        if let Some(item) = &fetched_item {
+            if let Some(existing) = ts
+                .work_items
+                .iter_mut()
+                .find(|work_item| work_item.key.eq_ignore_ascii_case(issue_key))
+            {
+                *existing = item.clone();
+            } else {
+                ts.work_items.push(item.clone());
+            }
+        }
+
+        crate::model::sort_work_items_for_timesheet(
+            &mut ts.work_items,
+            &ts.worklogs,
+            &ts.bitbucket_activity,
+        );
+        serde_json::to_string(&ts).ok()
+    });
+
+    Ok(())
+}
+
 // ─── Cached worklog entry (serialised into the cache) ───────────────────────
 
 /// Intermediate type stored in the per-issue worklog cache.
@@ -1194,12 +1282,17 @@ pub async fn add_worklog(
         return Err(msg);
     }
 
-    // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
-
-    // Return the new worklog ID
     let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(val["id"].as_str().unwrap_or("").to_string())
+    let new_id = val["id"].as_str().unwrap_or("").to_string();
+    if let Err(err) = refresh_caches_after_worklog_write(creds, issue_key).await {
+        log::warn!(
+            "[add_worklog] cache refresh failed for issue {}: {}; falling back to invalidate",
+            issue_key,
+            err
+        );
+        invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    }
+    Ok(new_id)
 }
 
 /// Update an existing worklog entry.
@@ -1254,8 +1347,14 @@ pub async fn update_worklog(
         return Err(format!("Failed to update worklog: {}", body));
     }
 
-    // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    if let Err(err) = refresh_caches_after_worklog_write(creds, issue_key).await {
+        log::warn!(
+            "[update_worklog] cache refresh failed for issue {}: {}; falling back to invalidate",
+            issue_key,
+            err
+        );
+        invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    }
 
     Ok(())
 }
@@ -1284,8 +1383,14 @@ pub async fn delete_worklog(
         return Err(format!("Failed to delete worklog: {}", body));
     }
 
-    // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    if let Err(err) = refresh_caches_after_worklog_write(creds, issue_key).await {
+        log::warn!(
+            "[delete_worklog] cache refresh failed for issue {}: {}; falling back to invalidate",
+            issue_key,
+            err
+        );
+        invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    }
 
     Ok(())
 }

@@ -874,8 +874,6 @@ pub async fn get_issue_worklogs(
 ) -> Result<(Vec<WorklogEntry>, f64), ServerFnError> {
     let (_, session) = crate::auth::current_user_session().await?;
     let creds = session.jira_credentials();
-    // Invalidate the per-issue worklog cache and the assembled timesheet cache.
-    crate::api::jira::invalidate_worklogs_for_issue(&creds.account_id, &issue_key);
     let (entries, ytd) = crate::api::jira::fetch_worklogs(&creds, &issue_key, start, end)
         .await
         .map_err(ServerFnError::new)?;
@@ -2050,7 +2048,8 @@ pub fn TimesheetView() -> impl IntoView {
                 .collect::<Vec<_>>()
         };
         let trimmed_description = action.description.trim().to_string();
-        let matching_index = find_most_recent_matching_worklog(&target_entries, &trimmed_description);
+        let matching_index =
+            find_most_recent_matching_worklog(&target_entries, &trimmed_description);
         let matching_entry = matching_index.and_then(|idx| target_entries.get(idx).cloned());
         let matching_has_duration = matching_entry
             .as_ref()
@@ -2083,8 +2082,7 @@ pub fn TimesheetView() -> impl IntoView {
         let _ = (action_has_duration, target_is_today);
 
         if let Some(hours) = action_duration_hours
-            && (!matching_has_duration
-                || matching_entry.is_none())
+            && (!matching_has_duration || matching_entry.is_none())
         {
             let issue_key = target_issue.clone();
             let description = matching_entry
@@ -2168,8 +2166,11 @@ pub fn TimesheetView() -> impl IntoView {
             } else {
                 today.get_untracked() == target_date
             };
-            let pos_style =
-                compute_popup_style(&target_issue, &target_date.to_string(), target_entries.len());
+            let pos_style = compute_popup_style(
+                &target_issue,
+                &target_date.to_string(),
+                target_entries.len(),
+            );
             let popup = PopupInfo {
                 popup_id,
                 issue_key: target_issue.clone(),

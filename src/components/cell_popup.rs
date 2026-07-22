@@ -647,7 +647,8 @@ pub fn CellPopup(
         let description_required_error = i18n.get().t(keys::POPUP_ERROR_DESCRIPTION_REQUIRED);
         let description_unique_error = i18n.get().t(keys::POPUP_ERROR_DESCRIPTION_UNIQUE);
 
-        let mut existing_validations = vec![PopupRowValidation::default(); existing_for_validation.len()];
+        let mut existing_validations =
+            vec![PopupRowValidation::default(); existing_for_validation.len()];
         let rows = new_entries.get();
         let mut new_validations = vec![PopupRowValidation::default(); rows.len()];
         let mut duration_rows: Vec<(bool, usize, String)> = Vec::new();
