@@ -18,6 +18,25 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 /// Generate a replay-protection nonce in `{unix_secs}:{random_hex}` format.
 /// On WASM uses `js_sys`; on the server side (SSR compilation stub) uses chrono.
+
+/// Monotonically increasing counter used to assign z-index to popups when they
+/// gain focus, so the most recently focused popup is always on top.
+static POPUP_Z_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+
+/// Parse `"left:Xpx;top:Ypx[;...]"` into `(left, top)` in pixels.
+fn parse_popup_pos(style: &str) -> (f64, f64) {
+    let mut left = 0.0_f64;
+    let mut top = 0.0_f64;
+    for part in style.split(';') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix("left:") {
+            left = v.trim_end_matches("px").parse().unwrap_or(0.0);
+        } else if let Some(v) = part.strip_prefix("top:") {
+            top = v.trim_end_matches("px").parse().unwrap_or(0.0);
+        }
+    }
+    (left, top)
+}
 fn new_request_nonce() -> String {
     cfg_if::cfg_if! {
         if #[cfg(feature = "ssr")] {
@@ -97,6 +116,48 @@ fn worklog_url(site_url: &str, issue_key: &str, worklog_id: &str) -> String {
     )
 }
 
+#[cfg(feature = "hydrate")]
+fn schedule_initial_digit_fill(popup_id: u32, digit: char) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let inputs = popup_node.get_elements_by_class_name("popup-hours");
+        for idx in 0..inputs.length() {
+            let Some(node) = inputs.item(idx) else {
+                continue;
+            };
+            let Some(input) = node.dyn_ref::<web_sys::HtmlInputElement>() else {
+                continue;
+            };
+            if input.value().trim().is_empty() {
+                let value = digit.to_string();
+                input.set_value(&value);
+                if let Ok(ev) = web_sys::Event::new("input") {
+                    let _ = input.dispatch_event(&ev);
+                }
+                let _ = input.focus();
+                break;
+            }
+        }
+    });
+
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
 /// Data kept per existing worklog entry in the popup.
 #[derive(Clone)]
 struct ExistingEntry {
@@ -120,6 +181,25 @@ struct ExistingEntry {
     deleted: RwSignal<bool>,
 }
 
+#[derive(Clone, Default, PartialEq)]
+struct PopupRowValidation {
+    hours_error: Option<String>,
+    description_error: Option<String>,
+}
+
+impl PopupRowValidation {
+    fn is_valid(&self) -> bool {
+        self.hours_error.is_none() && self.description_error.is_none()
+    }
+}
+
+fn normalize_popup_description(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 #[component]
 pub fn CellPopup(
     popup_id: u32,
@@ -134,6 +214,7 @@ pub fn CellPopup(
     suggested_comment: Option<String>,
     #[prop(default = Vec::new())] commit_messages: Vec<String>,
     #[prop(default = Vec::new())] commit_links: Vec<String>,
+    #[prop(default = Vec::new())] test_result_links: Vec<String>,
     #[prop(default = Vec::new())] pr_links: Vec<String>,
     is_git_log: bool,
     #[prop(default = false)] is_weekend: bool,
@@ -144,6 +225,7 @@ pub fn CellPopup(
     on_close: Callback<()>,
     on_changed: Callback<String>,
     #[prop(default = String::new())] site_url: String,
+    #[prop(default = None)] initial_digit: Option<char>,
 ) -> impl IntoView {
     let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| {
         log::error!("I18n context not provided in CellPopup, using English fallback");
@@ -155,6 +237,13 @@ pub fn CellPopup(
 
     let issue_key_for_close = issue_key.clone();
     let date_for_close = date;
+
+    #[cfg(feature = "hydrate")]
+    if let Some(digit) = initial_digit {
+        schedule_initial_digit_fill(popup_id, digit);
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = initial_digit;
 
     let restored_popup = restored_timer_popup.filter(|popup| {
         popup.issue_key == issue_key && popup.date == date && !popup.rows.is_empty()
@@ -256,6 +345,10 @@ pub fn CellPopup(
     pr_links_unique.sort();
     pr_links_unique.dedup();
     let popup_pr_link = pr_links_unique.into_iter().next();
+    let mut test_links_unique = test_result_links;
+    test_links_unique.sort();
+    test_links_unique.dedup();
+    let popup_test_link = test_links_unique.into_iter().next();
     let suggested_row_links: Vec<Option<(String, String)>> = prefills_for_links
         .iter()
         .map(|comment| {
@@ -543,74 +636,144 @@ pub fn CellPopup(
 
     // ── Validation (Save enablement) ────────────────────────────────────
     let existing_for_validation = existing.clone();
-    let save_enabled = Memo::new(move |_| {
+    let popup_validations = Memo::new(move |_| {
         let w = i18n.get();
         let dec_sep = w.decimal_separator;
         let wl = w.t(keys::WEEK_ABBR);
         let dl = w.t(keys::DAY_ABBR);
         let hl = w.t(keys::HOUR_ABBR);
         let ml = w.t(keys::MINUTE_ABBR);
+        let duration_positive_error = i18n.get().t(keys::POPUP_ERROR_DURATION_POSITIVE);
+        let description_required_error = i18n.get().t(keys::POPUP_ERROR_DESCRIPTION_REQUIRED);
+        let description_unique_error = i18n.get().t(keys::POPUP_ERROR_DESCRIPTION_UNIQUE);
 
-        let mut entry_hours: Vec<String> = Vec::new();
-        let mut entry_comments: Vec<String> = Vec::new();
+        let mut existing_validations =
+            vec![PopupRowValidation::default(); existing_for_validation.len()];
+        let rows = new_entries.get();
+        let mut new_validations = vec![PopupRowValidation::default(); rows.len()];
+        let mut duration_rows: Vec<(bool, usize, String)> = Vec::new();
+        let mut has_non_blank_row = false;
+        let has_deletes = existing_for_validation.iter().any(|e| e.deleted.get());
 
-        for entry in existing_for_validation.iter() {
+        for (idx, entry) in existing_for_validation.iter().enumerate() {
             if entry.deleted.get() {
                 continue;
             }
-            entry_hours.push(entry.hours_sig.get());
-            let comment = if !entry.comment_html.is_empty() {
+            let hours = entry.hours_sig.get();
+            let description = if !entry.comment_html.is_empty() {
                 entry.display_comment.clone()
             } else {
                 entry.comment_sig.get()
             };
-            entry_comments.push(comment);
-        }
-
-        let rows = new_entries.get();
-        for (idx, (h_sig, c_sig)) in rows.iter().enumerate() {
-            let h = h_sig.get();
-            let c = c_sig.get();
-            let is_last = idx == rows.len() - 1;
-            if is_last && h.is_empty() && c.is_empty() {
+            let blank_row = hours.trim().is_empty() && description.trim().is_empty();
+            if blank_row {
                 continue;
             }
-            entry_hours.push(h);
-            entry_comments.push(c);
+            has_non_blank_row = true;
+            let parsed = parse_hours(
+                &hours,
+                hours_per_day,
+                hours_per_week,
+                dec_sep,
+                &wl,
+                &dl,
+                &hl,
+                &ml,
+            );
+            if let Some(parsed_hours) = parsed {
+                if parsed_hours > 0.0 {
+                    duration_rows.push((true, idx, description));
+                } else {
+                    existing_validations[idx].hours_error = Some(duration_positive_error.clone());
+                }
+            } else {
+                existing_validations[idx].hours_error = Some(duration_positive_error.clone());
+            }
         }
 
-        let entry_count = entry_hours.len();
-
-        let has_deletes = existing_for_validation.iter().any(|e| e.deleted.get());
-
-        if entry_count == 0 {
-            return has_deletes;
+        for (idx, (hours_sig, comment_sig)) in rows.iter().enumerate() {
+            let hours = hours_sig.get();
+            let description = comment_sig.get();
+            let blank_row = hours.trim().is_empty() && description.trim().is_empty();
+            if blank_row {
+                continue;
+            }
+            has_non_blank_row = true;
+            let parsed = parse_hours(
+                &hours,
+                hours_per_day,
+                hours_per_week,
+                dec_sep,
+                &wl,
+                &dl,
+                &hl,
+                &ml,
+            );
+            if let Some(parsed_hours) = parsed {
+                if parsed_hours > 0.0 {
+                    duration_rows.push((false, idx, description));
+                } else {
+                    new_validations[idx].hours_error = Some(duration_positive_error.clone());
+                }
+            } else {
+                new_validations[idx].hours_error = Some(duration_positive_error.clone());
+            }
         }
 
-        let all_hours_valid = entry_hours.iter().all(|h| {
-            !h.is_empty()
-                && parse_hours(
-                    h,
-                    hours_per_day,
-                    hours_per_week,
-                    dec_sep,
-                    &wl,
-                    &dl,
-                    &hl,
-                    &ml,
-                )
-                .is_some()
-        });
-        if !all_hours_valid {
-            return false;
+        if duration_rows.len() > 1 {
+            let mut seen: HashMap<String, (bool, usize)> = HashMap::new();
+            for (is_existing, row_idx, description) in &duration_rows {
+                let trimmed = description.trim();
+                if trimmed.is_empty() {
+                    if *is_existing {
+                        existing_validations[*row_idx].description_error =
+                            Some(description_required_error.clone());
+                    } else {
+                        new_validations[*row_idx].description_error =
+                            Some(description_required_error.clone());
+                    }
+                    continue;
+                }
+                let normalized = normalize_popup_description(trimmed);
+                if let Some((prior_existing, prior_idx)) = seen.get(&normalized) {
+                    if *is_existing {
+                        existing_validations[*row_idx].description_error =
+                            Some(description_unique_error.clone());
+                    } else {
+                        new_validations[*row_idx].description_error =
+                            Some(description_unique_error.clone());
+                    }
+                    if *prior_existing {
+                        existing_validations[*prior_idx].description_error =
+                            Some(description_unique_error.clone());
+                    } else {
+                        new_validations[*prior_idx].description_error =
+                            Some(description_unique_error.clone());
+                    }
+                } else {
+                    seen.insert(normalized, (*is_existing, *row_idx));
+                }
+            }
         }
 
-        if entry_count > 1 && entry_comments.iter().any(|c| c.trim().is_empty()) {
-            return false;
-        }
+        let has_errors = existing_validations.iter().any(|v| !v.is_valid())
+            || new_validations.iter().any(|v| !v.is_valid());
+        let can_save = if has_errors {
+            false
+        } else if has_non_blank_row {
+            true
+        } else {
+            has_deletes
+        };
 
-        true
+        (can_save, existing_validations, new_validations)
     });
+
+    let popup_validations_for_save = popup_validations.clone();
+    let save_enabled = Memo::new(move |_| popup_validations_for_save.get().0);
+    let popup_validations_for_existing = popup_validations.clone();
+    let existing_row_validations = Memo::new(move |_| popup_validations_for_existing.get().1);
+    let new_row_validations = Memo::new(move |_| popup_validations.get().2);
 
     // ── Save handler ────────────────────────────────────────────────────
     let existing_for_save = existing.clone();
@@ -817,17 +980,49 @@ pub fn CellPopup(
     let on_keydown = {
         let on_save = on_save.clone();
         let on_close_with_timers = on_close_with_timers.clone();
-        move |ev: leptos::ev::KeyboardEvent| match ev.key().as_str() {
-            "Enter" => {
-                if save_enabled.get() && conn.is_available() {
-                    on_save(None);
+        move |ev: leptos::ev::KeyboardEvent| {
+            let key = ev.key();
+            // Ctrl+Arrow: move popup. Ctrl+Alt+Arrow: 1px; Ctrl+Arrow: 1 char/line.
+            if ev.ctrl_key() {
+                let delta: f64 = match key.as_str() {
+                    "ArrowLeft" | "ArrowRight" if ev.alt_key() => 1.0,
+                    "ArrowUp" | "ArrowDown" if ev.alt_key() => 1.0,
+                    "ArrowLeft" | "ArrowRight" => 8.0,
+                    "ArrowUp" | "ArrowDown" => 20.0,
+                    _ => 0.0,
+                };
+                if delta > 0.0 {
+                    ev.prevent_default();
+                    ev.stop_propagation();
+                    let cur = pos_sig.get_untracked();
+                    let (mut left, mut top) = parse_popup_pos(&cur);
+                    match key.as_str() {
+                        "ArrowLeft" => left -= delta,
+                        "ArrowRight" => left += delta,
+                        "ArrowUp" => top -= delta,
+                        "ArrowDown" => top += delta,
+                        _ => {}
+                    }
+                    pos_sig.set(format!("left:{:.0}px;top:{:.0}px", left, top));
+                    return;
                 }
             }
-            "Escape" => {
-                on_close_with_timers();
-            }
-            _ => {}
-        }
+            match key.as_str() {
+                "Enter" if ev.ctrl_key() => {
+                    if save_enabled.get() && conn.is_available() {
+                        ev.prevent_default();
+                        ev.stop_propagation();
+                        on_save(None);
+                    }
+                }
+                "Escape" => {
+                    ev.prevent_default();
+                    ev.stop_propagation();
+                    on_close_with_timers();
+                }
+                _ => {}
+            } // match key
+        } // closure
     };
 
     // ── Blur handler for dynamic new rows ───────────────────────────────
@@ -997,6 +1192,9 @@ pub fn CellPopup(
     };
 
     let on_close_with_timers_for_btn = on_close_with_timers.clone();
+    let on_title_action_mousedown = move |ev: leptos::ev::MouseEvent| {
+        ev.stop_propagation();
+    };
 
     // ── Drag support ──
     #[cfg(feature = "hydrate")]
@@ -1048,6 +1246,36 @@ pub fn CellPopup(
 
     let popup_ref: NodeRef<leptos::html::Div> = NodeRef::new();
 
+    // Focus the first input after the popup mounts. We defer via
+    // requestAnimationFrame so that child components (inputs) are in the DOM.
+    // Restored timer popups open automatically on page load; skip stealing
+    // focus from the grid in that case.
+    #[cfg(feature = "hydrate")]
+    if restored_popup.is_none() {
+        use leptos::wasm_bindgen::JsCast;
+        use leptos::wasm_bindgen::closure::Closure;
+        let popup_ref_focus = popup_ref;
+        Effect::new(move |_| {
+            if let Some(el) = popup_ref_focus.get() {
+                let root_html: web_sys::HtmlElement =
+                    el.unchecked_ref::<web_sys::HtmlElement>().clone();
+                let cb = Closure::once(move || {
+                    if let Ok(Some(node)) =
+                        root_html.query_selector("input:not([disabled]),textarea:not([disabled])")
+                    {
+                        if let Ok(input) = node.dyn_into::<web_sys::HtmlElement>() {
+                            let _ = input.focus();
+                        }
+                    }
+                });
+                if let Some(window) = web_sys::window() {
+                    let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
+                }
+                cb.forget();
+            }
+        });
+    }
+
     let dragging_md = is_dragging.clone();
     let sx_md = drag_start_x.clone();
     let sy_md = drag_start_y.clone();
@@ -1070,20 +1298,49 @@ pub fn CellPopup(
         ev.prevent_default();
     };
 
+    let z_index =
+        RwSignal::new(POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
+
+    let on_focusin = move |_: leptos::ev::FocusEvent| {
+        let next = POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        z_index.set(next);
+    };
+
     //
     view! {
          <div
             class="cell-popup"
             node_ref=popup_ref
             data-popup-id={popup_id.to_string()}
-            style=move || pos_sig.get()
+            style=move || format!("{};z-index:{}", pos_sig.get(), z_index.get())
+            on:keydown=on_keydown
+            on:focusin=on_focusin
          >
             <div class="popup-draggable-title" on:mousedown=on_header_mousedown>
-            <span class="popup-key">{issue_key}</span>
-            <span class="popup-summary" title={issue_summary}>{issue_summary.clone()}</span>
-            <span class="popup-date">{i18n.get_untracked().format_date(&date)}</span>
-        </div>
-        <div class="cell-popup-content" on:keydown=on_keydown tabindex="0">
+                <span class="popup-key">{issue_key}</span>
+                <span class="popup-summary" title={issue_summary}>{issue_summary.clone()}</span>
+                <span class="popup-date">{i18n.get_untracked().format_date(&date)}</span>
+                <span class="popup-title-actions" on:mousedown=on_title_action_mousedown>
+                    <button
+                        class="popup-title-action popup-title-save"
+                        tabindex="-1"
+                        on:click=move |_| on_save(None)
+                        disabled=move || !save_enabled.get() || !conn.is_available()
+                        title=move || i18n.get().t(keys::SAVE)
+                    >
+                        {"✓"}
+                    </button>
+                    <button
+                        class="popup-title-action popup-title-close"
+                        tabindex="-1"
+                        on:click=move |_| on_close_with_timers_for_btn()
+                        title=move || i18n.get().t(keys::CLOSE)
+                    >
+                        {"×"}
+                    </button>
+                </span>
+            </div>
+        <div class="cell-popup-content" tabindex="0">
             <div class="popup-entries">
                 // ── Existing entry rows ─────────────────────────────────
                 {existing
@@ -1122,11 +1379,27 @@ pub fn CellPopup(
                                         <input
                                             type="text"
                                             class="popup-hours"
+                                            class:popup-field-invalid=move || {
+                                                existing_row_validations
+                                                    .get()
+                                                    .get(row_idx)
+                                                    .and_then(|row| row.hours_error.as_ref())
+                                                    .is_some()
+                                            }
                                             prop:value={move || hours_sig.get()}
                                             on:input=move |ev| hours_sig.set(event_target_value(&ev))
                                             placeholder={move || i18n.get().t(keys::HOURS)}
                                             disabled=move || !conn.is_available() || timer_mgr.is_active(&tid_for_disabled)
                                         />
+                                        {move || {
+                                            existing_row_validations
+                                                .get()
+                                                .get(row_idx)
+                                                .and_then(|row| row.hours_error.clone())
+                                                .map(|message| {
+                                                    view! { <span class="popup-error-indicator" title={message}>!</span> }
+                                                })
+                                        }}
                                         {move || {
                                             let tid = tid_for_progress.clone();
                                             if let Some(ProgressInfo { is_first_interval, offset_ms, running, generation }) = timer_mgr.progress_info(&tid) {
@@ -1147,18 +1420,57 @@ pub fn CellPopup(
                                     </div>
                                     {if has_html {
                                         view! {
-                                            <div class="adf-preview" inner_html={comment_html.clone()}></div>
+                                            <div class="popup-comment-container">
+                                                <div
+                                                    class="adf-preview"
+                                                    class:popup-field-invalid=move || {
+                                                        existing_row_validations
+                                                            .get()
+                                                            .get(row_idx)
+                                                            .and_then(|row| row.description_error.as_ref())
+                                                            .is_some()
+                                                    }
+                                                    inner_html={comment_html.clone()}
+                                                ></div>
+                                                {move || {
+                                                    existing_row_validations
+                                                        .get()
+                                                        .get(row_idx)
+                                                        .and_then(|row| row.description_error.clone())
+                                                        .map(|message| {
+                                                            view! { <span class="popup-error-indicator" title={message}>!</span> }
+                                                        })
+                                                }}
+                                            </div>
                                         }.into_any()
                                     } else {
                                         view! {
-                                            <textarea
-                                                class="popup-comment"
-                                                prop:value={move || comment_sig.get()}
-                                                on:input=move |ev| comment_sig.set(event_target_value(&ev))
-                                                placeholder={move || i18n.get().t(keys::DESCRIPTION)}
-                                                disabled=move || !conn.is_available()
-                                                rows="1"
-                                            />
+                                            <div class="popup-comment-container">
+                                                <textarea
+                                                    class="popup-comment"
+                                                    class:popup-field-invalid=move || {
+                                                        existing_row_validations
+                                                            .get()
+                                                            .get(row_idx)
+                                                            .and_then(|row| row.description_error.as_ref())
+                                                            .is_some()
+                                                    }
+                                                    prop:value={move || comment_sig.get()}
+                                                    on:input=move |ev| comment_sig.set(event_target_value(&ev))
+                                                    placeholder={move || i18n.get().t(keys::DESCRIPTION)}
+                                                    disabled=move || !conn.is_available()
+                                                    rows="1"
+                                                />
+                                                {move || {
+                                                    existing_row_validations
+                                                        .get()
+                                                        .get(row_idx)
+                                                        .and_then(|row| row.description_error.clone())
+                                                        .map(|message| {
+                                                            view! { <span class="popup-error-indicator" title={message}>!</span> }
+                                                        })
+                                                }}
+                                            </div>
                                         }.into_any()
                                     }}
                                     <span class="popup-actions">
@@ -1207,12 +1519,28 @@ pub fn CellPopup(
                                     <input
                                         type="text"
                                         class="popup-hours"
+                                        class:popup-field-invalid=move || {
+                                            new_row_validations
+                                                .get()
+                                                .get(idx)
+                                                .and_then(|row| row.hours_error.as_ref())
+                                                .is_some()
+                                        }
                                         prop:value={move || hours_sig.get()}
                                         on:input=move |ev| hours_sig.set(event_target_value(&ev))
                                         on:blur=move |_| on_blur(idx)
                                         placeholder={move || i18n.get().t(keys::HOURS)}
                                         disabled=move || !conn.is_available() || timer_mgr.is_active(&tid_for_disabled)
                                     />
+                                    {move || {
+                                        new_row_validations
+                                            .get()
+                                            .get(idx)
+                                            .and_then(|row| row.hours_error.clone())
+                                            .map(|message| {
+                                                view! { <span class="popup-error-indicator" title={message}>!</span> }
+                                            })
+                                    }}
                                     {move || {
                                         let tid = tid_for_progress.clone();
                                         if let Some(ProgressInfo { is_first_interval, offset_ms, running, generation }) = timer_mgr.progress_info(&tid) {
@@ -1231,14 +1559,32 @@ pub fn CellPopup(
                                         }
                                     }}
                                 </div>
-                                <textarea
-                                    class="popup-comment popup-comment-new"
-                                    prop:value={move || comment_sig.get()}
-                                    on:input=move |ev| comment_sig.set(event_target_value(&ev))
-                                    placeholder={move || i18n.get().t(keys::DESCRIPTION)}
-                                    disabled=move || !conn.is_available()
-                                    rows="1"
-                                />
+                                <div class="popup-comment-container">
+                                    <textarea
+                                        class="popup-comment popup-comment-new"
+                                        class:popup-field-invalid=move || {
+                                            new_row_validations
+                                                .get()
+                                                .get(idx)
+                                                .and_then(|row| row.description_error.as_ref())
+                                                .is_some()
+                                        }
+                                        prop:value={move || comment_sig.get()}
+                                        on:input=move |ev| comment_sig.set(event_target_value(&ev))
+                                        placeholder={move || i18n.get().t(keys::DESCRIPTION)}
+                                        disabled=move || !conn.is_available()
+                                        rows="1"
+                                    />
+                                    {move || {
+                                        new_row_validations
+                                            .get()
+                                            .get(idx)
+                                            .and_then(|row| row.description_error.clone())
+                                            .map(|message| {
+                                                view! { <span class="popup-error-indicator" title={message}>!</span> }
+                                            })
+                                    }}
+                                </div>
                                 <span class="popup-actions">
                                     {timer_buttons}
                                     {if let Some((href, message)) = row_link {
@@ -1307,18 +1653,20 @@ pub fn CellPopup(
                             </a>
                         }
                     })}
-                </span>
-                <span class="popup-buttons-right">
-                    <button
-                        class="btn-ok"
-                        on:click=move |_| on_save(None)
-                        disabled=move || !save_enabled.get() || !conn.is_available()
-                    >
-                        {move || i18n.get().t(keys::SAVE)}
-                    </button>
-                    <button class="btn-cancel" on:click=move |_| on_close_with_timers_for_btn()>
-                        {move || i18n.get().t(keys::CLOSE)}
-                    </button>
+                    {popup_test_link.clone().map(|href| {
+                        view! {
+                            <a
+                                class="popup-link popup-link--test"
+                                href={href}
+                                target="_blank"
+                                rel="noopener"
+                                title=move || i18n.get().t(keys::OPEN_TEST_RESULTS_IN_JENKINS)
+                            >
+                                <span class="popup-link-base">"\u{1F517}"</span>
+                                <span class="popup-link-badge">"T"</span>
+                            </a>
+                        }
+                    })}
                 </span>
             </div>
         </div>

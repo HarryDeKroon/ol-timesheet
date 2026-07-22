@@ -45,6 +45,22 @@ While webhooks are operational, polling is demoted to a safety-net cadence (`PER
 
 **Not covered:** Jira worklog changes still rely on polling (Jira webhooks require site-admin rights).
 
+## Jenkins test-result links (optional)
+
+You can enable per-cell Jenkins test-result links (with a blue `T` badge) for Bitbucket commit activity.
+
+Required environment variables:
+
+- `JENKINS_BASE_URL` (example: `https://windows-jenkins.upland-dev.com`)
+- `JENKINS_ROOT_PATH` (optional, default: `/job/ObjectifLune/job`)
+
+Optional (for private Jenkins instances):
+
+- `JENKINS_API_USER`
+- `JENKINS_API_TOKEN`
+
+When enabled, the server tries to resolve each matching commit to a finished Jenkins build and links to its `testReport` page when available.
+
 ## TO DO
 
 - CSV/Excel export

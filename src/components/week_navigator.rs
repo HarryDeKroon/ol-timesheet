@@ -12,6 +12,9 @@ pub fn week_monday(date: NaiveDate) -> NaiveDate {
 pub fn WeekNavigator(
     /// The currently selected Monday (start of selected week).
     selected_monday: RwSignal<NaiveDate>,
+    /// Positive tab index priority for period navigation controls.
+    #[prop(default = 3)]
+    tab_index_base: i32,
 ) -> impl IntoView {
     let i18n = use_context::<RwSignal<I18n>>().unwrap_or_else(|| {
         log::error!("I18n context not provided in WeekNavigator, using English fallback");
@@ -59,18 +62,29 @@ pub fn WeekNavigator(
 
     view! {
         <div class="week-navigator">
-            <button class="nav-btn" on:click=go_prev title=move || i18n.get().t(keys::PREVIOUS_WEEK)>
+            <button
+                class="nav-btn"
+                tabindex={tab_index_base}
+                on:click=go_prev
+                title=move || i18n.get().t(keys::PREVIOUS_WEEK)
+            >
                 "\u{25C0}"
             </button>
 
             <input
                 type="date"
                 class="nav-date"
+                tabindex={tab_index_base}
                 prop:value={move || selected_monday.get().format("%Y-%m-%d").to_string()}
                 on:change=on_date_change
             />
 
-            <button class="nav-btn" on:click=go_next title=move || i18n.get().t(keys::NEXT_WEEK)>
+            <button
+                class="nav-btn"
+                tabindex={tab_index_base}
+                on:click=go_next
+                title=move || i18n.get().t(keys::NEXT_WEEK)
+            >
                 "\u{25B6}"
             </button>
 
@@ -83,7 +97,7 @@ pub fn WeekNavigator(
                         });
                     };
                     view! {
-                        <button class="nav-btn nav-today" on:click=go_today>
+                        <button class="nav-btn nav-today" tabindex={tab_index_base} on:click=go_today>
                             {move || i18n.get().t(keys::TODAY)}
                         </button>
                     }

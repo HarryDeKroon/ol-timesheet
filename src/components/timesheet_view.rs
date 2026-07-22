@@ -1,30 +1,34 @@
 use crate::components::cell_popup::CellPopup;
 use crate::components::popup_flush::{provide_popup_flush_context, use_popup_flush};
-use crate::components::report_overlay::ReportOverlay;
+use crate::components::report_overlay::{ReportRibbonControls, ReportView, create_report_state};
 use crate::components::settings_dialog::SettingsDialog;
+#[cfg(feature = "hydrate")]
+use crate::components::settings_dialog::get_settings;
 use crate::components::timer::{
     PersistedTimerPopup, load_persisted_timer_popups, provide_timer_context,
 };
 use crate::components::week_navigator::{WeekNavigator, week_monday};
 use crate::connection::use_connection;
-use crate::formatting::{format_hours_long, format_hours_short};
+use crate::formatting::{format_hours_long, format_hours_short, parse_hours};
 use crate::i18n::{I18n, keys};
 #[cfg(feature = "hydrate")]
 use crate::model::TimesheetRefreshDiff;
 #[cfg(feature = "hydrate")]
 use crate::model::TimesheetWsMessage;
-use crate::model::{ConnectionStatus, TimesheetData, WorkItem, WorklogEntry};
+use crate::model::{ConnectionStatus, CustomAction, TimesheetData, WorkItem, WorklogEntry};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use leptos::prelude::*;
+#[cfg(feature = "hydrate")]
+use leptos::web_sys;
+use leptos_meta::Title;
+
+use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "ssr")]
 use crate::model::CellActivity;
 
 // Import flag SVGs from shared flags module
 use crate::flags::{FLAG_FR, FLAG_NL, FLAG_UK};
-
-#[cfg(feature = "ssr")]
-use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "ssr")]
 fn requested_week_mondays(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
@@ -123,7 +127,7 @@ fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
     }
 
     let mut work_items = by_key.into_values().collect::<Vec<_>>();
-    work_items.sort_by(|a, b| a.key.cmp(&b.key));
+    crate::model::sort_work_items_for_timesheet(&mut work_items, &worklogs, &bitbucket_activity);
 
     TimesheetData {
         work_items,
@@ -204,6 +208,12 @@ fn apply_refresh_diff_to_timesheet(ts: &mut TimesheetData, diff: &TimesheetRefre
             ts.ytd_hours.remove(issue_key);
         }
     }
+
+    crate::model::sort_work_items_for_timesheet(
+        &mut ts.work_items,
+        &ts.worklogs,
+        &ts.bitbucket_activity,
+    );
 }
 
 #[cfg(feature = "hydrate")]
@@ -225,6 +235,195 @@ fn cell_key_date(cell_key: &str) -> Option<NaiveDate> {
     cell_key
         .rsplit_once(':')
         .and_then(|(_, date)| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+}
+
+fn pr_number(url: &str) -> Option<&str> {
+    url.rsplit('/').next().filter(|s| !s.is_empty())
+}
+
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn cell_key_issue_key(cell_key: &str) -> Option<String> {
+    cell_key
+        .split_once(':')
+        .map(|(issue_key, _)| issue_key.to_string())
+}
+
+#[derive(Clone, Debug, Default)]
+struct RefreshToastPrUpdate {
+    issue_key: String,
+    pr_links: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RefreshToastTestUpdate {
+    issue_key: String,
+    test_result_links: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RefreshToastInfo {
+    id: u64,
+    hhmm: String,
+    added_work_keys: Vec<String>,
+    pr_updates: Vec<RefreshToastPrUpdate>,
+    test_updates: Vec<RefreshToastTestUpdate>,
+}
+
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+static NEXT_REFRESH_TOAST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn hhmm_from_applied_at(applied_at: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(applied_at)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_else(|_| chrono::Local::now().format("%H:%M").to_string())
+}
+
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+fn build_refresh_toast_info(
+    diff: &crate::model::TimesheetRefreshDiff,
+    existing_keys: &HashSet<String>,
+    applied_at: &str,
+) -> Option<RefreshToastInfo> {
+    let mut added_work_keys = diff
+        .work_items_upserted
+        .iter()
+        .map(|w| w.key.trim().to_uppercase())
+        .filter(|key| !key.is_empty() && !existing_keys.contains(key))
+        .collect::<Vec<_>>();
+    added_work_keys.sort();
+    added_work_keys.dedup();
+
+    let mut pr_links_by_key = HashMap::<String, HashSet<String>>::new();
+    let mut pr_keys_without_links = HashSet::<String>::new();
+    let mut test_links_by_key = HashMap::<String, HashSet<String>>::new();
+
+    for update in &diff.bitbucket_activity_upserted {
+        let Some(issue_key) = cell_key_issue_key(&update.cell_key) else {
+            continue;
+        };
+        let issue_key = issue_key.trim().to_uppercase();
+        if issue_key.is_empty() {
+            continue;
+        }
+
+        if update.activity.has_pr_review || !update.activity.pr_links.is_empty() {
+            if update.activity.pr_links.is_empty() {
+                pr_keys_without_links.insert(issue_key.clone());
+            } else {
+                let bucket = pr_links_by_key.entry(issue_key.clone()).or_default();
+                for link in &update.activity.pr_links {
+                    if !link.trim().is_empty() {
+                        bucket.insert(link.clone());
+                    }
+                }
+            }
+        }
+
+        if !update.activity.test_result_links.is_empty() {
+            let bucket = test_links_by_key.entry(issue_key).or_default();
+            for link in &update.activity.test_result_links {
+                if !link.trim().is_empty() {
+                    bucket.insert(link.clone());
+                }
+            }
+        }
+    }
+
+    let mut pr_updates = pr_links_by_key
+        .into_iter()
+        .map(|(issue_key, links)| {
+            let mut pr_links = links.into_iter().collect::<Vec<_>>();
+            pr_links.sort();
+            RefreshToastPrUpdate {
+                issue_key,
+                pr_links,
+            }
+        })
+        .collect::<Vec<_>>();
+    for issue_key in pr_keys_without_links {
+        if !pr_updates.iter().any(|u| u.issue_key == issue_key) {
+            pr_updates.push(RefreshToastPrUpdate {
+                issue_key,
+                pr_links: Vec::new(),
+            });
+        }
+    }
+    pr_updates.sort_by(|a, b| a.issue_key.cmp(&b.issue_key));
+
+    let mut test_updates = test_links_by_key
+        .into_iter()
+        .map(|(issue_key, links)| {
+            let mut test_result_links = links.into_iter().collect::<Vec<_>>();
+            test_result_links.sort();
+            RefreshToastTestUpdate {
+                issue_key,
+                test_result_links,
+            }
+        })
+        .collect::<Vec<_>>();
+    test_updates.sort_by(|a, b| a.issue_key.cmp(&b.issue_key));
+
+    // Do not toast for commit-only or worklog-only refreshes.
+    if added_work_keys.is_empty() && pr_updates.is_empty() && test_updates.is_empty() {
+        return None;
+    }
+
+    Some(RefreshToastInfo {
+        id: NEXT_REFRESH_TOAST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        hhmm: hhmm_from_applied_at(applied_at),
+        added_work_keys,
+        pr_updates,
+        test_updates,
+    })
+}
+
+fn attach_toast_stack_drag(ev: leptos::ev::MouseEvent, toast_stack_offset: RwSignal<(f64, f64)>) {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
+
+        ev.prevent_default();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+
+        let start_x = ev.client_x() as f64;
+        let start_y = ev.client_y() as f64;
+        let (base_x, base_y) = toast_stack_offset.get_untracked();
+
+        let move_cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::wrap(Box::new({
+            let toast_stack_offset = toast_stack_offset;
+            move |mv: web_sys::MouseEvent| {
+                let dx = (mv.client_x() as f64) - start_x;
+                let dy = (mv.client_y() as f64) - start_y;
+                toast_stack_offset.set((base_x + dx, base_y + dy));
+            }
+        }));
+
+        let mouseup_cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::wrap(Box::new({
+            let window = window.clone();
+            let move_ref = move_cb.as_ref().clone();
+            move |_| {
+                let _ = window
+                    .remove_event_listener_with_callback("mousemove", move_ref.unchecked_ref());
+            }
+        }));
+
+        let _ =
+            window.add_event_listener_with_callback("mousemove", move_cb.as_ref().unchecked_ref());
+        let _ =
+            window.add_event_listener_with_callback("mouseup", mouseup_cb.as_ref().unchecked_ref());
+
+        move_cb.forget();
+        mouseup_cb.forget();
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = ev;
+        let _ = toast_stack_offset;
+    }
 }
 
 #[cfg(feature = "hydrate")]
@@ -273,33 +472,18 @@ fn start_timesheet_refresh_socket(
     selected_monday: RwSignal<NaiveDate>,
     num_weeks: RwSignal<usize>,
     today: RwSignal<NaiveDate>,
-    i18n: RwSignal<I18n>,
-    refresh_toast: RwSignal<Option<String>>,
+    refresh_toasts: RwSignal<Vec<RefreshToastInfo>>,
 ) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
-
-    fn schedule_toast_clear(refresh_toast: RwSignal<Option<String>>) {
-        let clear = Closure::wrap(Box::new(move || {
-            refresh_toast.set(None);
-        }) as Box<dyn FnMut()>);
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                clear.as_ref().unchecked_ref(),
-                4000,
-            );
-            clear.forget();
-        }
-    }
 
     fn schedule_reconnect(
         last_data: RwSignal<Option<TimesheetData>>,
         selected_monday: RwSignal<NaiveDate>,
         num_weeks: RwSignal<usize>,
         today: RwSignal<NaiveDate>,
-        i18n: RwSignal<I18n>,
-        refresh_toast: RwSignal<Option<String>>,
+        refresh_toasts: RwSignal<Vec<RefreshToastInfo>>,
     ) {
         let reconnect = Closure::wrap(Box::new(move || {
             start_timesheet_refresh_socket(
@@ -307,8 +491,7 @@ fn start_timesheet_refresh_socket(
                 selected_monday,
                 num_weeks,
                 today,
-                i18n,
-                refresh_toast,
+                refresh_toasts,
             );
         }) as Box<dyn FnMut()>);
         if let Some(window) = web_sys::window() {
@@ -329,14 +512,7 @@ fn start_timesheet_refresh_socket(
     let host = location.host().unwrap_or_else(|_| "localhost:8081".into());
     let url = format!("{}//{}/ws/timesheet", ws_protocol, host);
     let Ok(ws) = WebSocket::new(&url) else {
-        schedule_reconnect(
-            last_data,
-            selected_monday,
-            num_weeks,
-            today,
-            i18n,
-            refresh_toast,
-        );
+        schedule_reconnect(last_data, selected_monday, num_weeks, today, refresh_toasts);
         return;
     };
 
@@ -349,7 +525,7 @@ fn start_timesheet_refresh_socket(
                 return;
             };
             match message {
-                TimesheetWsMessage::RefreshDiff { diff, .. } => {
+                TimesheetWsMessage::RefreshDiff { diff, applied_at } => {
                     if diff.is_empty() {
                         return;
                     }
@@ -362,15 +538,26 @@ fn start_timesheet_refresh_socket(
                         return;
                     }
                     let mut applied = false;
+                    let mut toast_info = None;
                     last_data.update(|opt| {
                         if let Some(ts) = opt.as_mut() {
+                            let existing_keys = ts
+                                .work_items
+                                .iter()
+                                .map(|w| w.key.trim().to_uppercase())
+                                .collect::<HashSet<_>>();
+                            toast_info =
+                                build_refresh_toast_info(&diff, &existing_keys, &applied_at);
                             apply_refresh_diff_to_timesheet(ts, &diff);
                             applied = true;
                         }
                     });
                     if applied {
-                        refresh_toast.set(Some(i18n.get_untracked().t(keys::LIVE_REFRESH_APPLIED)));
-                        schedule_toast_clear(refresh_toast);
+                        if let Some(toast) = toast_info {
+                            refresh_toasts.update(|toasts| {
+                                toasts.insert(0, toast);
+                            });
+                        }
                     }
                 }
             }
@@ -381,14 +568,7 @@ fn start_timesheet_refresh_socket(
 
     {
         let onclose = Closure::<dyn Fn(CloseEvent)>::new(move |_: CloseEvent| {
-            schedule_reconnect(
-                last_data,
-                selected_monday,
-                num_weeks,
-                today,
-                i18n,
-                refresh_toast,
-            );
+            schedule_reconnect(last_data, selected_monday, num_weeks, today, refresh_toasts);
         });
         ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
         onclose.forget();
@@ -444,11 +624,12 @@ pub async fn get_timesheet_data(
             break;
         }
     }
-    let mut bitbucket_cached_mondays = crate::api::cache::get_cached_bitbucket_weeks(&creds.account_id)
-        .weeks
-        .into_iter()
-        .map(|week| week.monday)
-        .collect::<HashSet<_>>();
+    let mut bitbucket_cached_mondays =
+        crate::api::cache::get_cached_bitbucket_weeks(&creds.account_id)
+            .weeks
+            .into_iter()
+            .map(|week| week.monday)
+            .collect::<HashSet<_>>();
     let recovered_bitbucket_cached_mondays = cached_week_chunks
         .iter()
         .filter(|(_, chunk)| !chunk.bitbucket_activity.is_empty())
@@ -487,6 +668,18 @@ pub async fn get_timesheet_data(
             selected_monday,
             num_weeks,
         ));
+        if log::log_enabled!(log::Level::Debug) {
+            let verify_creds = creds.clone();
+            let verify_display_name = session.display_name.clone();
+            let verify_ts = merged.clone();
+            tokio::spawn(crate::api::jira::verify_cache_completeness(
+                verify_creds,
+                verify_display_name,
+                verify_ts,
+                start,
+                end,
+            ));
+        }
         return Ok((merged, user_profile));
     }
 
@@ -511,6 +704,18 @@ pub async fn get_timesheet_data(
                 selected_monday,
                 num_weeks,
             ));
+            if log::log_enabled!(log::Level::Debug) {
+                let verify_creds = creds.clone();
+                let verify_display_name = session.display_name.clone();
+                let verify_ts = ts.clone();
+                tokio::spawn(crate::api::jira::verify_cache_completeness(
+                    verify_creds,
+                    verify_display_name,
+                    verify_ts,
+                    start,
+                    end,
+                ));
+            }
             return Ok((ts, user_profile));
         }
     }
@@ -575,18 +780,7 @@ pub async fn get_timesheet_data(
         jira_started_at.elapsed().as_millis()
     );
 
-    // Sort work items by key only (natural order).
-    all_items.sort_by(|a, b| {
-        fn parse_jira_key(key: &str) -> (&str, u64) {
-            match key.rsplit_once('-') {
-                Some((prefix, num)) => (prefix, num.parse().unwrap_or(0)),
-                None => (key, 0),
-            }
-        }
-        let (ap, an) = parse_jira_key(&a.key);
-        let (bp, bn) = parse_jira_key(&b.key);
-        ap.cmp(bp).then_with(|| an.cmp(&bn))
-    });
+    crate::model::sort_work_items_for_timesheet(&mut all_items, &all_worklogs, &bitbucket_activity);
 
     let ts = TimesheetData {
         work_items: all_items,
@@ -680,8 +874,6 @@ pub async fn get_issue_worklogs(
 ) -> Result<(Vec<WorklogEntry>, f64), ServerFnError> {
     let (_, session) = crate::auth::current_user_session().await?;
     let creds = session.jira_credentials();
-    // Invalidate the per-issue worklog cache and the assembled timesheet cache.
-    crate::api::jira::invalidate_worklogs_for_issue(&creds.account_id, &issue_key);
     let (entries, ytd) = crate::api::jira::fetch_worklogs(&creds, &issue_key, start, end)
         .await
         .map_err(ServerFnError::new)?;
@@ -727,6 +919,7 @@ struct PopupInfo {
     suggested_comment: Option<String>,
     commit_messages: Vec<String>,
     commit_links: Vec<String>,
+    test_result_links: Vec<String>,
     pr_links: Vec<String>,
     is_git_log: bool,
     is_weekend: bool,
@@ -738,6 +931,32 @@ struct PopupInfo {
     site_url: String,
     /// Optional timer draft restored from local storage.
     restored_timer_popup: Option<PersistedTimerPopup>,
+    /// Optional digit key that should seed first empty duration input.
+    initial_digit: Option<char>,
+}
+
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum PopupSeed {
+    Hours(char),
+    Description(char),
+}
+
+fn normalize_action_description(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn find_most_recent_matching_worklog(entries: &[WorklogEntry], description: &str) -> Option<usize> {
+    let target = normalize_action_description(description);
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| normalize_action_description(&entry.comment) == target)
+        .map(|(idx, _)| idx)
+        .last()
 }
 
 impl Clone for PopupInfo {
@@ -754,6 +973,7 @@ impl Clone for PopupInfo {
             suggested_comment: self.suggested_comment.clone(),
             commit_messages: self.commit_messages.clone(),
             commit_links: self.commit_links.clone(),
+            test_result_links: self.test_result_links.clone(),
             pr_links: self.pr_links.clone(),
             is_git_log: self.is_git_log,
             is_weekend: self.is_weekend,
@@ -761,6 +981,7 @@ impl Clone for PopupInfo {
             is_today: self.is_today,
             position_style: self.position_style.clone(),
             restored_timer_popup: self.restored_timer_popup.clone(),
+            initial_digit: self.initial_digit,
         }
     }
 }
@@ -888,6 +1109,305 @@ fn compute_num_weeks(viewport_width: f64) -> usize {
     if w > 1000 { 1 + (w - 701) / 300 } else { 1 }
 }
 
+#[cfg(feature = "hydrate")]
+fn today_col_index(
+    selected_monday: NaiveDate,
+    num_weeks: usize,
+    today: NaiveDate,
+) -> Option<usize> {
+    let nw = num_weeks.max(1);
+    let start_monday = selected_monday - Duration::weeks((nw as i64) - 1);
+    for wi in 0..nw {
+        let monday = start_monday + Duration::weeks(wi as i64);
+        let friday = monday + Duration::days(4);
+        let sunday = monday + Duration::days(6);
+        if today >= monday && today <= friday {
+            let weekday = (today - monday).num_days() as usize;
+            return Some(wi * 6 + weekday);
+        }
+        if today > friday && today <= sunday {
+            return Some(wi * 6 + 5);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "hydrate")]
+fn focus_grid_cell(row: usize, col: usize) {
+    use wasm_bindgen::JsCast;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let selector = format!(r#"[data-nav-row="{}"][data-nav-col="{}"]"#, row, col);
+    let Some(node) = document.query_selector(&selector).ok().flatten() else {
+        return;
+    };
+    let Some(el) = node.dyn_ref::<web_sys::HtmlElement>() else {
+        return;
+    };
+    let _ = el.focus();
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_digit_fill_for_popup(popup_id: u32, digit: char) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let inputs = popup_node.get_elements_by_class_name("popup-hours");
+        for idx in 0..inputs.length() {
+            let Some(node) = inputs.item(idx) else {
+                continue;
+            };
+            let Some(input) = node.dyn_ref::<web_sys::HtmlInputElement>() else {
+                continue;
+            };
+            if input.value().trim().is_empty() {
+                let value = digit.to_string();
+                input.set_value(&value);
+                if let Ok(ev) = web_sys::Event::new("input") {
+                    let _ = input.dispatch_event(&ev);
+                }
+                let _ = input.focus();
+                break;
+            }
+        }
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_description_fill_for_popup(popup_id: u32, letter: char) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        for class_name in ["popup-comment", "popup-comment-new"] {
+            let nodes = popup_node.get_elements_by_class_name(class_name);
+            for idx in 0..nodes.length() {
+                let Some(node) = nodes.item(idx) else {
+                    continue;
+                };
+                let Some(input) = node.dyn_ref::<web_sys::HtmlTextAreaElement>() else {
+                    continue;
+                };
+                if input.value().trim().is_empty() {
+                    let value = letter.to_string();
+                    input.set_value(&value);
+                    if let Ok(ev) = web_sys::Event::new("input") {
+                        let _ = input.dispatch_event(&ev);
+                    }
+                    let _ = input.focus();
+                    return;
+                }
+            }
+        }
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+#[cfg(feature = "hydrate")]
+fn new_request_nonce() -> String {
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "ssr")] {
+            format!("{}:{}", chrono::Utc::now().timestamp(), uuid::Uuid::new_v4())
+        } else {
+            let ts = (js_sys::Date::now() / 1000.0) as i64;
+            let r1 = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+            let r2 = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+            format!("{}:{:08x}{:08x}", ts, r1, r2)
+        }
+    }
+}
+
+fn custom_action_title(action: &CustomAction) -> String {
+    let key = action.work_item_key.trim();
+    let description = action.description.trim();
+    let duration = action.duration.trim();
+    let details = [description, duration]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !key.is_empty() && !details.is_empty() {
+        format!("{}: {}", key, details)
+    } else if !key.is_empty() {
+        key.to_string()
+    } else {
+        details
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_custom_action_focus_existing_duration(popup_id: u32, existing_index: usize) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let rows = popup_node.get_elements_by_class_name("popup-entry-group");
+        let Some(row) = rows.item(existing_index as u32) else {
+            return;
+        };
+        let Some(hours_node) = row
+            .dyn_ref::<web_sys::Element>()
+            .and_then(|el| el.query_selector(".popup-hours").ok().flatten())
+        else {
+            return;
+        };
+        let Some(input) = hours_node.dyn_ref::<web_sys::HtmlInputElement>() else {
+            return;
+        };
+        let _ = input.focus();
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_custom_action_toggle_existing_timer(popup_id: u32, existing_index: usize) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let rows = popup_node.get_elements_by_class_name("popup-entry-group");
+        let Some(row) = rows.item(existing_index as u32) else {
+            return;
+        };
+        let Some(button_node) = row
+            .dyn_ref::<web_sys::Element>()
+            .and_then(|el| el.query_selector(".timer-play-pause").ok().flatten())
+        else {
+            return;
+        };
+        let Some(button) = button_node.dyn_ref::<web_sys::HtmlElement>() else {
+            return;
+        };
+        let _ = button.click();
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_custom_action_focus_new_duration(popup_id: u32, description: String) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let rows = popup_node.get_elements_by_class_name("popup-new");
+        for idx in 0..rows.length() {
+            let Some(row) = rows.item(idx) else {
+                continue;
+            };
+            let Some(comment_node) = row
+                .dyn_ref::<web_sys::Element>()
+                .and_then(|el| el.query_selector(".popup-comment-new").ok().flatten())
+            else {
+                continue;
+            };
+            let Some(comment_input) = comment_node.dyn_ref::<web_sys::HtmlTextAreaElement>() else {
+                continue;
+            };
+            let existing_comment = comment_input.value();
+            if existing_comment.trim().is_empty() || existing_comment.trim() == description {
+                comment_input.set_value(&description);
+                if let Ok(ev) = web_sys::Event::new("input") {
+                    let _ = comment_input.dispatch_event(&ev);
+                }
+                if let Some(hours_input) = row
+                    .dyn_ref::<web_sys::Element>()
+                    .and_then(|el| el.query_selector(".popup-hours").ok().flatten())
+                    .and_then(|node| node.dyn_ref::<web_sys::HtmlInputElement>().cloned())
+                {
+                    let _ = hours_input.focus();
+                }
+                break;
+            }
+        }
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+fn refresh_custom_actions(custom_actions: RwSignal<Vec<CustomAction>>) {
+    #[cfg(feature = "hydrate")]
+    leptos::task::spawn_local(async move {
+        if let Ok(settings) = get_settings().await {
+            custom_actions.set(
+                settings
+                    .custom_actions
+                    .into_iter()
+                    .filter(|action| !action.description.trim().is_empty())
+                    .take(5)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    });
+    #[cfg(not(feature = "hydrate"))]
+    let _ = custom_actions;
+}
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 #[component]
@@ -907,7 +1427,9 @@ pub fn TimesheetView() -> impl IntoView {
     // Signals for user avatar and name
     let user_avatar = RwSignal::new(String::new());
     let user_name = RwSignal::new(String::new());
+    let custom_actions = RwSignal::new(Vec::<CustomAction>::new());
     let conn = use_connection();
+    refresh_custom_actions(custom_actions);
 
     // ── Language selection logic ──
     use std::sync::Arc;
@@ -918,7 +1440,7 @@ pub fn TimesheetView() -> impl IntoView {
     ]);
     let lang_signal = RwSignal::new("".to_string());
 
-    #[cfg(not(feature = "ssr"))]
+    #[cfg(feature = "hydrate")]
     {
         if let Some(window) = web_sys::window() {
             let storage = window.local_storage().ok().flatten();
@@ -944,7 +1466,7 @@ pub fn TimesheetView() -> impl IntoView {
         let i18n = i18n.clone();
         let flush_mgr = flush_mgr.clone();
         move |new_lang: String| {
-            #[cfg(not(feature = "ssr"))]
+            #[cfg(feature = "hydrate")]
             {
                 if let Some(window) = web_sys::window() {
                     if let Some(storage) = window.local_storage().ok().flatten() {
@@ -962,7 +1484,7 @@ pub fn TimesheetView() -> impl IntoView {
             let did_flush = flush_mgr.flush_all_then(move || {
                 lang_signal.set(new_lang_inner.clone());
                 i18n_inner.set(I18n::new(&new_lang_inner));
-                #[cfg(not(feature = "ssr"))]
+                #[cfg(feature = "hydrate")]
                 {
                     web_sys::window().map(|w| w.location().reload().ok());
                 }
@@ -997,12 +1519,12 @@ pub fn TimesheetView() -> impl IntoView {
         }
     };
 
-    let lang_dropdown = || {
+    let _lang_dropdown = || {
         let langs1 = supported_langs.clone();
         let langs3 = supported_langs.clone();
         view! {
             <div class="lang-dropdown">
-                <button class="lang-btn" on:click=on_lang_btn_click tabindex="0">
+                <button class="lang-btn" on:click=on_lang_btn_click tabindex="4">
                     <span inner_html={move || {
                         let current_lang = lang_signal.get();
                         langs1.iter().find(|(code, _, _)| *code == current_lang)
@@ -1118,17 +1640,11 @@ pub fn TimesheetView() -> impl IntoView {
     let last_data = RwSignal::new(Option::<TimesheetData>::None);
     let is_loading = RwSignal::new(true);
     let error_msg = RwSignal::new(Option::<String>::None);
-    let refresh_toast = RwSignal::new(Option::<String>::None);
+    let refresh_toasts = RwSignal::new(Vec::<RefreshToastInfo>::new());
+    let toast_stack_offset = RwSignal::new((0.0_f64, 0.0_f64));
 
     #[cfg(feature = "hydrate")]
-    start_timesheet_refresh_socket(
-        last_data,
-        selected_monday,
-        num_weeks,
-        today,
-        i18n,
-        refresh_toast,
-    );
+    start_timesheet_refresh_socket(last_data, selected_monday, num_weeks, today, refresh_toasts);
 
     // ── Work-item search state ──
     let search_query = RwSignal::new(String::new());
@@ -1258,6 +1774,7 @@ pub fn TimesheetView() -> impl IntoView {
                     suggested_comment: draft.suggested_comment.clone(),
                     commit_messages: Vec::new(),
                     commit_links: Vec::new(),
+                    test_result_links: Vec::new(),
                     pr_links: row_pr_links,
                     is_git_log: draft.is_git_log,
                     is_weekend: draft.is_weekend,
@@ -1273,6 +1790,7 @@ pub fn TimesheetView() -> impl IntoView {
                         )
                     }),
                     restored_timer_popup: Some(draft),
+                    initial_digit: None,
                 });
             }
         });
@@ -1281,6 +1799,47 @@ pub fn TimesheetView() -> impl IntoView {
     // State for showing the settings dialog
     let show_settings = RwSignal::new(false);
     let show_report = RwSignal::new(false);
+    let report_state = create_report_state();
+    let user_menu_open = RwSignal::new(false);
+    let focused_cell = RwSignal::new(Option::<(usize, usize)>::None);
+    #[cfg(feature = "hydrate")]
+    let initial_grid_focus_applied = RwSignal::new(false);
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let nw = num_weeks.get().max(1);
+        let today_date = today.get();
+        let monday = selected_monday.get();
+        let Some(ts) = last_data.get() else {
+            focused_cell.set(None);
+            return;
+        };
+        let row_count = ts.work_items.len();
+        if row_count == 0 {
+            focused_cell.set(None);
+            return;
+        }
+        let col_count = nw * 6;
+        let preferred_col =
+            today_col_index(monday, nw, today_date).unwrap_or(col_count.saturating_sub(1));
+        let middle_row = row_count / 2;
+        focused_cell.update(|cur| match *cur {
+            Some((r, c)) if r < row_count && c < col_count => {}
+            _ => *cur = Some((middle_row, preferred_col)),
+        });
+    });
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some((row, col)) = focused_cell.get() else {
+            return;
+        };
+        if initial_grid_focus_applied.get() {
+            return;
+        }
+        focus_grid_cell(row, col);
+        initial_grid_focus_applied.set(true);
+    });
 
     // Detect date changes on window focus (for overnight transitions)
     #[cfg(feature = "hydrate")]
@@ -1414,24 +1973,6 @@ pub fn TimesheetView() -> impl IntoView {
         });
     };
 
-    // ── Refresh handler: clear server cache then refetch ──
-    let on_refresh = {
-        let flush_mgr = flush_mgr.clone();
-        move |_| {
-            is_refreshing.set(true);
-            flush_mgr.flush_all_then(move || {
-                #[cfg(feature = "hydrate")]
-                leptos::task::spawn_local(async move {
-                    conn.request_started();
-                    let _ = clear_cache().await;
-                    conn.request_finished();
-                    data.refetch();
-                    is_refreshing.set(false);
-                });
-            });
-        }
-    };
-
     let on_force_periodic_refresh = move |_| {
         if !conn.is_available() {
             return;
@@ -1444,22 +1985,251 @@ pub fn TimesheetView() -> impl IntoView {
         });
     };
 
-    let on_open_settings = {
-        let flush_mgr = flush_mgr.clone();
-        move |_| {
-            flush_mgr.flush_all();
-            show_settings.set(true);
+    let component_owner_for_action = component_owner.clone();
+    let trigger_custom_action = Callback::new(move |index: usize| {
+        if !conn.is_available() {
+            return;
         }
-    };
+        let Some(action) = custom_actions.get_untracked().get(index).cloned() else {
+            return;
+        };
+        let Some(ts) = last_data.get_untracked() else {
+            return;
+        };
+        if ts.work_items.is_empty() {
+            return;
+        }
+
+        let focused_context = focused_cell.get_untracked().and_then(|(row, col)| {
+            let nw = num_weeks.get_untracked().max(1);
+            let col_count = nw * 6;
+            if row >= ts.work_items.len() || col >= col_count {
+                return None;
+            }
+            let week_idx = col / 6;
+            let day_idx = col % 6;
+            let start_monday =
+                selected_monday.get_untracked() - Duration::weeks((nw.saturating_sub(1)) as i64);
+            let monday = start_monday + Duration::weeks(week_idx as i64);
+            let date = if day_idx == 5 {
+                monday + Duration::days(5)
+            } else {
+                monday + Duration::days(day_idx as i64)
+            };
+            Some((ts.work_items[row].key.clone(), date, day_idx == 5))
+        });
+
+        let target_issue = {
+            let explicit = action.work_item_key.trim().to_uppercase();
+            if !explicit.is_empty() {
+                explicit
+            } else if let Some((issue_key, _, _)) = &focused_context {
+                issue_key.clone()
+            } else {
+                ts.work_items[0].key.clone()
+            }
+        };
+        let (target_date, is_weekend_cell) = if let Some((_, date, weekend)) = focused_context {
+            (date, weekend)
+        } else {
+            (today.get_untracked(), false)
+        };
+
+        let target_entries = if is_weekend_cell {
+            ts.cell_worklogs(&target_issue, target_date)
+                .into_iter()
+                .chain(ts.cell_worklogs(&target_issue, target_date + Duration::days(1)))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            ts.cell_worklogs(&target_issue, target_date)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let trimmed_description = action.description.trim().to_string();
+        let matching_index =
+            find_most_recent_matching_worklog(&target_entries, &trimmed_description);
+        let matching_entry = matching_index.and_then(|idx| target_entries.get(idx).cloned());
+        let matching_has_duration = matching_entry
+            .as_ref()
+            .map(|entry| entry.hours > 0.0)
+            .unwrap_or(false);
+
+        let i = i18n.get_untracked();
+        let action_duration_hours = if action.duration.trim().is_empty() {
+            None
+        } else {
+            parse_hours(
+                action.duration.trim(),
+                ts.hours_per_day,
+                ts.hours_per_week,
+                i.decimal_separator,
+                &i.t(keys::WEEK_ABBR),
+                &i.t(keys::DAY_ABBR),
+                &i.t(keys::HOUR_ABBR),
+                &i.t(keys::MINUTE_ABBR),
+            )
+        };
+        let action_has_duration = action_duration_hours.is_some();
+        let target_is_today = if is_weekend_cell {
+            let today_date = today.get_untracked();
+            today_date == target_date || today_date == target_date + Duration::days(1)
+        } else {
+            today.get_untracked() == target_date
+        };
+        #[cfg(not(feature = "hydrate"))]
+        let _ = (action_has_duration, target_is_today);
+
+        if let Some(hours) = action_duration_hours
+            && (!matching_has_duration || matching_entry.is_none())
+        {
+            let issue_key = target_issue.clone();
+            let description = matching_entry
+                .as_ref()
+                .map(|entry| entry.comment.clone())
+                .unwrap_or_else(|| trimmed_description.clone());
+            let existing_id = matching_entry
+                .as_ref()
+                .map(|entry| entry.id.clone())
+                .unwrap_or_default();
+            let existing_adf = matching_entry.and_then(|entry| entry.comment_adf.clone());
+            #[cfg(feature = "hydrate")]
+            leptos::task::spawn_local(async move {
+                conn.request_started();
+                let result = if existing_id.is_empty() {
+                    crate::components::cell_popup::server_add_worklog(
+                        issue_key.clone(),
+                        target_date,
+                        hours,
+                        description,
+                        new_request_nonce(),
+                    )
+                    .await
+                } else {
+                    crate::components::cell_popup::server_update_worklog(
+                        issue_key.clone(),
+                        existing_id,
+                        hours,
+                        description,
+                        existing_adf,
+                        new_request_nonce(),
+                    )
+                    .await
+                };
+                conn.request_finished();
+                if result.is_ok() {
+                    on_popup_changed.run(issue_key);
+                }
+            });
+            #[cfg(not(feature = "hydrate"))]
+            {
+                let _ = hours;
+                let _ = issue_key;
+                let _ = matching_has_duration;
+                let _ = description;
+                let _ = existing_id;
+                let _ = existing_adf;
+            }
+            return;
+        }
+
+        let popup_id = if let Some(existing_id) = open_popups.with_untracked(|ps| {
+            ps.iter()
+                .find(|popup| popup.issue_key == target_issue && popup.date == target_date)
+                .map(|popup| popup.popup_id)
+        }) {
+            existing_id
+        } else {
+            let issue_summary = ts
+                .work_items
+                .iter()
+                .find(|item| item.key == target_issue)
+                .map(|item| item.summary.clone())
+                .unwrap_or_default();
+            let mut pr_links = ts
+                .bitbucket_activity
+                .iter()
+                .filter_map(|(cell_key, activity)| {
+                    cell_key
+                        .strip_prefix(&format!("{}:", target_issue))
+                        .map(|_| activity.pr_links.clone())
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            pr_links.sort();
+            pr_links.dedup();
+            let popup_id = NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let is_today = if is_weekend_cell {
+                let today_date = today.get_untracked();
+                today_date == target_date || today_date == target_date + Duration::days(1)
+            } else {
+                today.get_untracked() == target_date
+            };
+            let pos_style = compute_popup_style(
+                &target_issue,
+                &target_date.to_string(),
+                target_entries.len(),
+            );
+            let popup = PopupInfo {
+                popup_id,
+                issue_key: target_issue.clone(),
+                issue_summary,
+                date: target_date,
+                entries: target_entries.clone(),
+                hours_per_day: ts.hours_per_day,
+                hours_per_week: ts.hours_per_week,
+                suggested_comments: Vec::new(),
+                suggested_comment: None,
+                commit_messages: Vec::new(),
+                commit_links: Vec::new(),
+                test_result_links: Vec::new(),
+                pr_links,
+                is_git_log: false,
+                is_weekend: is_weekend_cell,
+                is_today,
+                position_style: component_owner_for_action.with(|| RwSignal::new(pos_style)),
+                site_url: ts.site_url.clone(),
+                restored_timer_popup: None,
+                initial_digit: None,
+            };
+            open_popups.update(|ps| ps.push(popup));
+            popup_id
+        };
+
+        #[cfg(feature = "hydrate")]
+        match (action_has_duration, matching_index, target_is_today) {
+            (true, Some(existing_index), true) => {
+                schedule_custom_action_toggle_existing_timer(popup_id, existing_index);
+            }
+            (true, Some(existing_index), false) => {
+                schedule_custom_action_focus_existing_duration(popup_id, existing_index);
+            }
+            (false, Some(existing_index), true) => {
+                schedule_custom_action_toggle_existing_timer(popup_id, existing_index);
+            }
+            (false, Some(existing_index), false) => {
+                schedule_custom_action_focus_existing_duration(popup_id, existing_index);
+            }
+            (false, None, _) => {
+                schedule_custom_action_focus_new_duration(popup_id, trimmed_description.clone());
+            }
+            _ => {}
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = popup_id;
+    });
+
+    let on_settings_saved = Callback::new(move |_: ()| {
+        refresh_custom_actions(custom_actions);
+        show_settings.set(false);
+    });
     let on_close_settings = Callback::new(move |_: ()| {
         show_settings.set(false);
     });
     let on_open_report = move |_| {
         show_report.set(true);
     };
-    let on_close_report = Callback::new(move |_: ()| {
-        show_report.set(false);
-    });
 
     // ── beforeunload listener: flush open popups on page leave ──
     #[cfg(feature = "hydrate")]
@@ -1488,24 +2258,378 @@ pub fn TimesheetView() -> impl IntoView {
         beforeunload_cb.forget();
     }
 
+    let flush_mgr_for_left = flush_mgr.clone();
+    let flush_mgr_for_right = flush_mgr.clone();
+    let report_state_for_ribbon = report_state.clone();
+    let report_state_for_view = report_state.clone();
+
+    // ── Global hotkey: Alt+L focuses last selected worklog cell ──
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+
+        let focused_cell_for_hotkey = focused_cell;
+        let selected_monday_for_hotkey = selected_monday;
+        let today_for_hotkey = today;
+        let show_report_for_hotkey = show_report;
+        let report_state_for_hotkey = report_state.clone();
+        let flush_mgr_for_hotkey = flush_mgr.clone();
+        let conn_for_hotkey = conn.clone();
+        let trigger_custom_action_for_hotkey = trigger_custom_action;
+        let focus_last_cell_cb =
+            wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
+                move |ev: web_sys::KeyboardEvent| {
+                    let key = ev.key();
+                    if !ev.alt_key() || ev.ctrl_key() || ev.meta_key() {
+                        return;
+                    }
+
+                    if show_report_for_hotkey.get_untracked() {
+                        match key.to_ascii_lowercase().as_str() {
+                            "p" => {
+                                ev.prevent_default();
+                                if report_state_for_hotkey.period.get_untracked()
+                                    == crate::components::report_overlay::ReportPeriod::Week
+                                {
+                                    report_state_for_hotkey.selected_month.update(|m| {
+                                        *m = crate::components::report_overlay::previous_month(*m)
+                                    });
+                                } else {
+                                    report_state_for_hotkey.selected_year.update(|y| *y -= 1);
+                                }
+                            }
+                            "n" => {
+                                ev.prevent_default();
+                                if report_state_for_hotkey.period.get_untracked()
+                                    == crate::components::report_overlay::ReportPeriod::Week
+                                {
+                                    report_state_for_hotkey.selected_month.update(|m| {
+                                        *m = crate::components::report_overlay::next_month(*m)
+                                    });
+                                } else {
+                                    report_state_for_hotkey.selected_year.update(|y| *y += 1);
+                                }
+                            }
+                            "d" => {
+                                ev.prevent_default();
+                                if let Some(window) = web_sys::window() {
+                                    if let Some(document) = window.document() {
+                                        if let Some(node) = document
+                                            .query_selector(".report-controls select")
+                                            .ok()
+                                            .flatten()
+                                        {
+                                            if let Some(el) = node.dyn_ref::<web_sys::HtmlElement>()
+                                            {
+                                                let _ = el.click();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            "t" => {
+                                ev.prevent_default();
+                                let today_date = Local::now().date_naive();
+                                report_state_for_hotkey.selected_month.set(
+                                    crate::components::report_overlay::default_report_month(
+                                        today_date,
+                                    ),
+                                );
+                                report_state_for_hotkey.selected_year.set(today_date.year());
+                            }
+                            "s" => {
+                                ev.prevent_default();
+                                flush_mgr_for_hotkey.flush_all();
+                                show_settings.set(true);
+                            }
+                            "w" => {
+                                ev.prevent_default();
+                                show_report.set(false);
+                            }
+                            "x" => {
+                                ev.prevent_default();
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_href("/auth/logout");
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        let key_lower = key.to_ascii_lowercase();
+                        if key_lower.len() == 1 {
+                            if let Some(digit) =
+                                key_lower.chars().next().filter(|c| ('1'..='5').contains(c))
+                            {
+                                ev.prevent_default();
+                                let idx = (digit as u8 - b'1') as usize;
+                                trigger_custom_action_for_hotkey.run(idx);
+                                return;
+                            }
+                        }
+                        match key_lower.as_str() {
+                            "l" => {
+                                ev.prevent_default();
+                                if let Some((row, col)) = focused_cell_for_hotkey.get_untracked() {
+                                    focus_grid_cell(row, col);
+                                }
+                            }
+                            "p" => {
+                                ev.prevent_default();
+                                flush_mgr_for_hotkey.flush_all_then(move || {
+                                    selected_monday_for_hotkey.set(
+                                        selected_monday_for_hotkey.get_untracked()
+                                            - Duration::weeks(1),
+                                    );
+                                });
+                            }
+                            "n" => {
+                                ev.prevent_default();
+                                flush_mgr_for_hotkey.flush_all_then(move || {
+                                    selected_monday_for_hotkey.set(
+                                        selected_monday_for_hotkey.get_untracked()
+                                            + Duration::weeks(1),
+                                    );
+                                });
+                            }
+                            "d" => {
+                                ev.prevent_default();
+                                if let Some(window) = web_sys::window() {
+                                    if let Some(document) = window.document() {
+                                        if let Some(node) =
+                                            document.query_selector(".nav-date").ok().flatten()
+                                        {
+                                            if let Some(el) = node.dyn_ref::<web_sys::HtmlElement>()
+                                            {
+                                                let _ = el.click();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            "t" => {
+                                ev.prevent_default();
+                                let today_monday = week_monday(today_for_hotkey.get_untracked());
+                                if !today_is_visible(
+                                    selected_monday_for_hotkey.get_untracked(),
+                                    num_weeks.get_untracked(),
+                                    today_for_hotkey.get_untracked(),
+                                ) {
+                                    flush_mgr_for_hotkey.flush_all_then(move || {
+                                        selected_monday_for_hotkey.set(today_monday);
+                                    });
+                                }
+                            }
+                            "s" => {
+                                ev.prevent_default();
+                                flush_mgr_for_hotkey.flush_all();
+                                show_settings.set(true);
+                            }
+                            "x" => {
+                                ev.prevent_default();
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_href("/auth/logout");
+                                }
+                            }
+                            "r" => {
+                                ev.prevent_default();
+                                show_report.set(true);
+                            }
+                            "f" => {
+                                ev.prevent_default();
+                                is_refreshing.set(true);
+                                let flush_mgr = flush_mgr_for_hotkey.clone();
+                                let data = data.clone();
+                                let is_refreshing = is_refreshing.clone();
+                                #[cfg(feature = "hydrate")]
+                                leptos::task::spawn_local(async move {
+                                    conn_for_hotkey.request_started();
+                                    let _ = clear_cache().await;
+                                    conn_for_hotkey.request_finished();
+                                    flush_mgr.flush_all();
+                                    data.refetch();
+                                    is_refreshing.set(false);
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                },
+            );
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback(
+                "keydown",
+                focus_last_cell_cb.as_ref().unchecked_ref(),
+            );
+        }
+        focus_last_cell_cb.forget();
+    }
+
     view! {
-        <div class="timesheet">
+    <div class=move || {
+        match (show_report.get(), show_settings.get()) {
+            (true, true) => "timesheet timesheet-report-open timesheet-settings-open",
+            (true, false) => "timesheet timesheet-report-open",
+            (false, true) => "timesheet timesheet-settings-open",
+            (false, false) => "timesheet",
+        }
+    }>
+        <Title text=move || {
+            let name = user_name.get();
+            let first_name = name.split_whitespace().next().unwrap_or("").to_string();
+            format!("{} {}", i18n.get().t(keys::TIMESHEET_TITLE), first_name)
+        } />
 
-            // Timesheet title at the top, showing only user's first name
-            {move || {
-                let name = user_name.get();
-                let first_name = name.split_whitespace().next().unwrap_or("").to_string();
-                view! {
-                    <h1>
-                        {i18n.get().t(keys::TIMESHEET_TITLE)}
-                        " "
-                        {first_name}
-                    </h1>
-                }
-            }}
+        <div class="ribbon">
+            <div class="ribbon-section ribbon-left">
+                {move || {
+                    if show_report.get() {
+                        let on_back = {
+                            let show_report = show_report.clone();
+                            move |_| show_report.set(false)
+                        };
+                        view! {
+                            <button class="nav-btn nav-icon-btn nav-view-btn" on:click=on_back title=move || i18n.get().t(keys::TIMESHEET_TITLE)>
+                                <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                    <rect x="3" y="4" width="18" height="16" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"></rect>
+                                    <path d="M3 9h18M3 13.5h18M9 4v16M15 4v16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"></path>
+                                    <rect x="9.8" y="10.2" width="4.4" height="2.2" rx="0.5" fill="currentColor" opacity="0.35"></rect>
+                                </svg>
+                            </button>
+                        }
+                        .into_any()
+                    } else {
+                        view! {
+                            <>
+                                <button class="nav-btn nav-icon-btn nav-view-btn" on:click=on_open_report title=move || i18n.get().t(keys::USER_REPORT)>
+                                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                        <rect class="report-icon-bar report-icon-bar-left" x="4" y="10" width="4" height="10" rx="1"></rect>
+                                        <rect class="report-icon-bar report-icon-bar-middle" x="10" y="6" width="4" height="14" rx="1"></rect>
+                                        <rect class="report-icon-bar report-icon-bar-right" x="16" y="12" width="4" height="8" rx="1"></rect>
+                                    </svg>
+                                </button>
+                                <button class="nav-btn nav-icon-btn nav-force-refresh" on:click=on_force_periodic_refresh title=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH) aria-label=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)>
+                                    <span class="icon-force-refresh">{"⟳"}</span>
+                                </button>
+                                <button class="nav-btn nav-icon-btn nav-refresh" on:click={
+                                    let flush_mgr = flush_mgr_for_left.clone();
+                                    let _conn = conn.clone();
+                                    let _data = data.clone();
+                                    let is_refreshing = is_refreshing.clone();
+                                    move |_| {
+                                        is_refreshing.set(true);
+                                        flush_mgr.flush_all_then(move || {
+                                            #[cfg(feature = "hydrate")]
+                                            leptos::task::spawn_local(async move {
+                                                conn.request_started();
+                                                let _ = clear_cache().await;
+                                                conn.request_finished();
+                                                data.refetch();
+                                                is_refreshing.set(false);
+                                            });
+                                        });
+                                    }
+                                } disabled=move || is_refreshing.get() title=move || i18n.get().t(keys::REFRESH_CACHED)>
+                                    <span class="icon-refresh">{"🔄"}</span>
+                                </button>
+                                {move || {
+                                    let actions = custom_actions.get();
+                                    if actions.is_empty() {
+                                        return view! { <></> }.into_any();
+                                    }
+                                    view! {
+                                        <>
+                                            <span class="custom-action-separator" aria-hidden="true"></span>
+                                            {actions
+                                                .into_iter()
+                                                .enumerate()
+                                                .map(|(idx, action)| {
+                                                    let title = custom_action_title(&action);
+                                                    let on_click = {
+                                                        let trigger_custom_action = trigger_custom_action;
+                                                        move |_| trigger_custom_action.run(idx)
+                                                    };
+                                                    view! {
+                                                        <button
+                                                            class="nav-btn nav-icon-btn nav-custom-action"
+                                                            on:click=on_click
+                                                            title={title}
+                                                            disabled=move || !conn.is_available()
+                                                        >
+                                                            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                                                <rect x="4" y="3.5" width="13.5" height="17" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+                                                                <path d="M7 8h8M7 12h8M7 16h6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"></path>
+                                                                <path d="M17.5 16.5l1.3 3.5 1.8-1.4 1.4 1.9 1.2-.9-1.4-1.9 2.2-.5-2.8-2.4z" fill="currentColor"></path>
+                                                            </svg>
+                                                            <span class="custom-action-index">{idx + 1}</span>
+                                                        </button>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </>
+                                    }
+                                    .into_any()
+                                }}
+                            </>
+                        }
+                        .into_any()
+                    }
+                }}
+            </div>
 
-            // Error banner (if any)
-            {move || error_msg.get().map(|e| view! { <p class="error">{e}</p> })}
+            <div class="ribbon-section ribbon-center">
+                {move || {
+                    if show_report.get() {
+                        view! { <ReportRibbonControls state=report_state_for_ribbon.clone() /> }.into_any()
+                    } else {
+                        view! { <WeekNavigator selected_monday=selected_monday tab_index_base=3 /> }.into_any()
+                    }
+                }}
+            </div>
+
+            <div class="ribbon-section ribbon-right">
+                <div class="avatar-dropdown">
+                    <button
+                        class="avatar-btn"
+                        on:click={
+                            let user_menu_open = user_menu_open.clone();
+                            move |_| user_menu_open.update(|open| *open = !*open)
+                        }
+                        aria-label=move || user_name.get()
+                    >
+                        <img src={move || user_avatar.get()} class="avatar-img" alt={move || user_name.get()} />
+                    </button>
+                    <div class=move || if user_menu_open.get() { "avatar-menu avatar-menu-open" } else { "avatar-menu" }>
+                        <button class="avatar-menu-item" title=move || i18n.get().t(keys::OPEN_SETTINGS) on:click={
+                            let flush_mgr = flush_mgr_for_right.clone();
+                            move |_| {
+                                flush_mgr.flush_all();
+                                user_menu_open.set(false);
+                                show_settings.set(true);
+                            }
+                        }>
+                            <span aria-hidden="true">{"⚙"}</span>
+                        </button>
+                        <a class="avatar-menu-item" href="/auth/logout" title=move || i18n.get().t(keys::LOGOUT) on:click=move |_| user_menu_open.set(false)>
+                            <span aria-hidden="true">{"🚪"}</span>
+                        </a>
+                    </div>
+                </div>
+                <span
+                    class={move || match conn.status() {
+                        ConnectionStatus::Online => "circle green",
+                        ConnectionStatus::Waiting => "circle orange",
+                        ConnectionStatus::Offline => "circle red",
+                    }}
+                    title={move || match conn.status() {
+                        ConnectionStatus::Online => i18n.get().t(keys::CONNECTION_CONNECTED),
+                        ConnectionStatus::Waiting => i18n.get().t(keys::CONNECTION_SYNCING),
+                        ConnectionStatus::Offline => i18n.get().t(keys::CONNECTION_DISCONNECTED),
+                    }}
+                ></span>
+            </div>
+        </div>
+
+        {move || (!show_report.get()).then(|| error_msg.get().map(|e| view! { <p class="error">{e}</p> })).flatten()}
 
             // Main grid — rendered from last_data so the previous week stays
             // visible while the next week is loading.
@@ -1541,6 +2665,8 @@ pub fn TimesheetView() -> impl IntoView {
                     let h_l = i.t(keys::HOUR_ABBR);
                     let m_l = i.t(keys::MINUTE_ABBR);
                     let multi = nw > 1;
+                    let nav_row_count = ts.work_items.len();
+                    let nav_col_count = nw * 6;
 
                     // ── Build header columns for every week group ──
                     let mut header_cols: Vec<AnyView> = Vec::new();
@@ -1604,7 +2730,8 @@ pub fn TimesheetView() -> impl IntoView {
                     // ── Build body rows ──
                     let body_rows: Vec<AnyView> = ts.work_items
                         .iter()
-                        .map(|item| {
+                        .enumerate()
+                        .map(|(row_idx, item)| {
                             let key = item.key.clone();
                             let item_ytd = ts.item_ytd_total(&key);
 
@@ -1650,15 +2777,23 @@ pub fn TimesheetView() -> impl IntoView {
                                         .unwrap_or_default();
                                     let commit_messages = cell_activity.commit_messages.clone();
                                     let has_pr_review = cell_activity.has_pr_review;
+                                    let has_test_results = !cell_activity.test_result_links.is_empty();
 
                                     let has_commit_associations = !cell_activity.commit_messages.is_empty()
                                         || !cell_activity.commit_links.is_empty();
+                                    let has_worklogs = !worklogs.is_empty();
                                     let show_corner_commit_overlay =
-                                        !worklogs.is_empty() && has_commit_associations;
+                                        has_worklogs && has_commit_associations;
+                                    let show_corner_pr_overlay = has_worklogs && has_pr_review;
+                                    let show_corner_test_overlay = has_worklogs && has_test_results;
+                                    let show_center_dual_overlay =
+                                        !has_worklogs && has_commit_associations && has_pr_review;
                                     let show_center_commit_overlay =
-                                        worklogs.is_empty() && has_commit_associations;
+                                        !has_worklogs && has_commit_associations && !has_pr_review;
                                     let show_center_pr_overlay =
-                                        worklogs.is_empty() && !has_commit_associations && has_pr_review;
+                                        !has_worklogs && !has_commit_associations && has_pr_review;
+                                    let show_center_test_overlay =
+                                        !has_worklogs && has_test_results;
                                     let (cell_display, title) = if !worklogs.is_empty() {
                                         // Normal worklog cell
                                         let title = if worklogs.len() > 1 {
@@ -1708,87 +2843,232 @@ pub fn TimesheetView() -> impl IntoView {
                                     };
 
                                     let cell_is_today = is_today;
+                                    let nav_col = wi * 6 + di;
                                     let cell_summary = summary.clone();
                                     let site_url_for_cell = site_url.clone();
                                     let owner_for_cell_popup = component_owner.clone();
                                     let row_pr_links_for_cell = row_pr_links.clone();
+                                    let open_weekday_popup: std::rc::Rc<dyn Fn(Option<PopupSeed>)> = std::rc::Rc::new({
+                                        let ck2 = ck2.clone();
+                                        let entries2 = entries2.clone();
+                                        let bb_activity_for_closure = bb_activity_for_closure.clone();
+                                        let cell_summary = cell_summary.clone();
+                                        let row_pr_links_for_cell = row_pr_links_for_cell.clone();
+                                        let site_url_for_cell = site_url_for_cell.clone();
+                                        let owner_for_cell_popup = owner_for_cell_popup.clone();
+                                        move |seed: Option<PopupSeed>| {
+                                            let existing_popup_id = open_popups.with(|ps| {
+                                                ps.iter()
+                                                    .find(|p| p.issue_key == ck2 && p.date == cell_date)
+                                                    .map(|p| p.popup_id)
+                                            });
+                                            if let Some(popup_id) = existing_popup_id {
+                                                #[cfg(feature = "hydrate")]
+                                                if let Some(seed) = seed {
+                                                    match seed {
+                                                        PopupSeed::Hours(d) => schedule_digit_fill_for_popup(popup_id, d),
+                                                        PopupSeed::Description(ch) => schedule_description_fill_for_popup(popup_id, ch),
+                                                    }
+                                                }
+                                                #[cfg(not(feature = "hydrate"))]
+                                                let _ = popup_id;
+                                                return;
+                                            }
+                                            let (suggested_comments, is_git_log) = if entries2.is_empty() {
+                                                let activity = bb_activity_for_closure
+                                                    .get(&format!("{}:{}", ck2, cell_date))
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                if !activity.commit_messages.is_empty() {
+                                                    (activity.commit_messages, true)
+                                                } else if activity.has_pr_review {
+                                                    (vec!["review".to_string()], false)
+                                                } else {
+                                                    (vec![], false)
+                                                }
+                                            } else {
+                                                (vec![], false)
+                                            };
+                                            let suggested_comment = if is_git_log {
+                                                suggested_comments.first().cloned()
+                                            } else {
+                                                None
+                                            };
+                                            let activity_links = bb_activity_for_closure
+                                                .get(&format!("{}:{}", ck2, cell_date))
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            let pos_style = compute_popup_style(
+                                                &ck2,
+                                                &cell_date.to_string(),
+                                                entries2.len(),
+                                            );
+                                            let issue_summary = cell_summary.clone();
+                                            let popup = PopupInfo {
+                                                popup_id: NEXT_POPUP_ID.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                ),
+                                                issue_key: ck2.clone(),
+                                                issue_summary,
+                                                date: cell_date,
+                                                entries: entries2.clone(),
+                                                hours_per_day: hpd,
+                                                hours_per_week: hpw,
+                                                suggested_comments,
+                                                suggested_comment: suggested_comment.clone(),
+                                                commit_messages: activity_links.commit_messages.clone(),
+                                                commit_links: activity_links.commit_links,
+                                                test_result_links: activity_links.test_result_links,
+                                                pr_links: row_pr_links_for_cell.clone(),
+                                                is_git_log,
+                                                is_weekend: false,
+                                                is_today: cell_is_today,
+                                                position_style: owner_for_cell_popup
+                                                    .with(|| RwSignal::new(pos_style)),
+                                                site_url: site_url_for_cell.clone(),
+                                                restored_timer_popup: None,
+                                                initial_digit: match seed {
+                                                    Some(PopupSeed::Hours(d)) => Some(d),
+                                                    _ => None,
+                                                },
+                                            };
+                                            let popup_id = popup.popup_id;
+                                            open_popups.update(|ps| ps.push(popup));
+                                            #[cfg(feature = "hydrate")]
+                                            if let Some(PopupSeed::Description(ch)) = seed {
+                                                schedule_description_fill_for_popup(popup_id, ch);
+                                            }
+                                            #[cfg(not(feature = "hydrate"))]
+                                            let _ = popup_id;
+                                        }
+                                    });
+                                    let open_weekday_popup_click = open_weekday_popup.clone();
+                                    let open_weekday_popup_keydown = open_weekday_popup.clone();
+                                    let focused_cell_for_focus = focused_cell;
+                                    let focused_cell_for_tabindex = focused_cell;
+                                    let focused_cell_for_keydown = focused_cell;
                                     week_cells.push(view! {
                                         <td class={cls} title={title}>
                                             <span
-                                                class={if show_corner_commit_overlay {
-                                                    "cell-value cell-value-with-commit-overlay-corner"
-                                                } else if show_center_commit_overlay {
+                                                class={if show_corner_commit_overlay
+                                                    || show_corner_pr_overlay
+                                                    || show_corner_test_overlay
+                                                {
+                                                    "cell-value cell-value-with-overlay-corners"
+                                                } else if show_center_dual_overlay {
+                                                    "cell-value cell-value-with-overlay-center-pair"
+                                                } else if show_center_commit_overlay || show_center_test_overlay {
                                                     "cell-value cell-value-with-commit-overlay-center"
                                                 } else {
                                                     "cell-value"
                                                 }}
                                                 data-cell-key={cell_key}
                                                 data-cell-date={cell_date_str}
-                                                on:click=move |_| {
-                                                    // Don't open a duplicate popup for the same cell.
-                                                    let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == ck2 && p.date == cell_date));
-                                                    if already_open {
-                                                        return;
+                                                data-nav-row={row_idx.to_string()}
+                                                data-nav-col={nav_col.to_string()}
+                                                role="button"
+                                                tabindex={move || {
+                                                    if focused_cell_for_tabindex.get() == Some((row_idx, nav_col)) {
+                                                        1
+                                                    } else {
+                                                        -1
                                                     }
-                                                    let (suggested_comments, is_git_log) = if entries2.is_empty() {
-                                                        let activity = bb_activity_for_closure
-                                                            .get(&format!("{}:{}", ck2, cell_date))
-                                                            .cloned()
-                                                            .unwrap_or_default();
-                                                        if !activity.commit_messages.is_empty() {
-                                                            (activity.commit_messages, true)
-                                                        } else if activity.has_pr_review {
-                                                            (vec!["review".to_string()], false)
-                                                        } else {
-                                                            (vec![], false)
+                                                }}
+                                                on:focus=move |_| {
+                                                    focused_cell_for_focus.set(Some((row_idx, nav_col)));
+                                                }
+                                                on:click=move |_| {
+                                                    open_weekday_popup_click(None);
+                                                }
+                                                on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                                                    let key = ev.key();
+                                                    match key.as_str() {
+                                                        "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" => {
+                                                            ev.prevent_default();
+                                                            let row_count = nav_row_count;
+                                                            let col_count = nav_col_count;
+                                                            if row_count == 0 || col_count == 0 {
+                                                                return;
+                                                            }
+                                                            let mut next_row = row_idx;
+                                                            let mut next_col = nav_col;
+                                                            match key.as_str() {
+                                                                "ArrowUp" => {
+                                                                    next_row = next_row.saturating_sub(1);
+                                                                }
+                                                                "ArrowDown" => {
+                                                                    next_row = (next_row + 1).min(row_count - 1);
+                                                                }
+                                                                "ArrowLeft" => {
+                                                                    next_col = next_col.saturating_sub(1);
+                                                                }
+                                                                "ArrowRight" => {
+                                                                    next_col = (next_col + 1).min(col_count - 1);
+                                                                }
+                                                                _ => {}
+                                                            }
+                                                            focused_cell_for_keydown.set(Some((next_row, next_col)));
+                                                            #[cfg(feature = "hydrate")]
+                                                            focus_grid_cell(next_row, next_col);
                                                         }
-                                                    } else {
-                                                        (vec![], false)
-                                                    };
-                                                    let suggested_comment = if is_git_log {
-                                                        suggested_comments.first().cloned()
-                                                    } else {
-                                                        None
-                                                    };
-                                                    let activity_links = bb_activity_for_closure
-                                                        .get(&format!("{}:{}", ck2, cell_date))
-                                                        .cloned()
-                                                        .unwrap_or_default();
-                                                    let pos_style = compute_popup_style(
-                                                        &ck2,
-                                                        &cell_date.to_string(),
-                                                        entries2.len(),
-                                                    );
-                                                    let issue_summary = cell_summary.clone();
-                                                    let popup = PopupInfo {
-                                                        popup_id: NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                                        issue_key: ck2.clone(),
-                                                        issue_summary,
-                                                        date: cell_date,
-                                                        entries: entries2.clone(),
-                                                        hours_per_day: hpd,
-                                                        hours_per_week: hpw,
-                                                        suggested_comments,
-                                                        suggested_comment: suggested_comment.clone(),
-                                                        commit_messages: activity_links.commit_messages.clone(),
-                                                        commit_links: activity_links.commit_links,
-                                                        pr_links: row_pr_links_for_cell.clone(),
-                                                        is_git_log,
-                                                        is_weekend: false,
-                                                        is_today: cell_is_today,
-                                                        position_style: owner_for_cell_popup
-                                                            .with(|| RwSignal::new(pos_style)),
-                                                        site_url: site_url_for_cell.clone(),
-                                                        restored_timer_popup: None,
-                                                    };
-                                                    open_popups.update(|ps| ps.push(popup));
+                                                        "Enter" => {
+                                                            ev.prevent_default();
+                                                            open_weekday_popup_keydown(None);
+                                                        }
+                                                        _ => {
+                                                            if key.len() == 1 {
+                                                                if let Some(digit) = key.chars().next().filter(|c| {
+                                                                    c.is_ascii_digit()
+                                                                        && !ev.alt_key()
+                                                                        && !ev.ctrl_key()
+                                                                        && !ev.meta_key()
+                                                                        && !ev.shift_key()
+                                                                }) {
+                                                                    ev.prevent_default();
+                                                                    open_weekday_popup_keydown(Some(PopupSeed::Hours(digit)));
+                                                                } else if let Some(letter) = key.chars().next().filter(|c| {
+                                                                    c.is_ascii_alphabetic()
+                                                                        && !ev.alt_key()
+                                                                        && !ev.ctrl_key()
+                                                                        && !ev.meta_key()
+                                                                }) {
+                                                                    ev.prevent_default();
+                                                                    open_weekday_popup_keydown(Some(PopupSeed::Description(letter)));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             >
-                                                {if show_corner_commit_overlay {
+                                                {if show_corner_commit_overlay
+                                                    || show_corner_pr_overlay
+                                                    || show_corner_test_overlay
+                                                {
                                                     view! {
                                                         <>
-                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner">{"c"}</span>
+                                                            {show_corner_commit_overlay.then(|| view! {
+                                                                <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner-left">{"c"}</span>
+                                                            })}
+                                                            {show_corner_pr_overlay.then(|| view! {
+                                                                <span class="cell-commit-overlay-mark cell-pr-overlay-mark--corner-right">{"p"}</span>
+                                                            })}
+                                                            {show_corner_test_overlay.then(|| view! {
+                                                                <span class="cell-commit-overlay-mark cell-test-overlay-mark--corner-center">{"T"}</span>
+                                                            })}
                                                             <span class="cell-value-text">{cell_display.clone()}</span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else if show_center_dual_overlay {
+                                                    view! {
+                                                        <>
+                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--pair-left">{"c"}</span>
+                                                            <span class="cell-commit-overlay-mark cell-pr-overlay-mark--pair-right">{"p"}</span>
+                                                            {show_center_test_overlay.then(|| view! {
+                                                                <span class="cell-commit-overlay-mark cell-test-overlay-mark--pair-center">{"T"}</span>
+                                                            })}
+                                                            <span class="cell-value-text"></span>
                                                         </>
                                                     }
                                                         .into_any()
@@ -1796,6 +3076,9 @@ pub fn TimesheetView() -> impl IntoView {
                                                     view! {
                                                         <>
                                                             <span class="cell-commit-overlay-mark cell-commit-overlay-mark--center">{"c"}</span>
+                                                            {show_center_test_overlay.then(|| view! {
+                                                                <span class="cell-commit-overlay-mark cell-test-overlay-mark--pair-center">{"T"}</span>
+                                                            })}
                                                             <span class="cell-value-text"></span>
                                                         </>
                                                     }
@@ -1804,6 +3087,17 @@ pub fn TimesheetView() -> impl IntoView {
                                                     view! {
                                                         <>
                                                             <span class="cell-commit-overlay-mark cell-pr-overlay-mark--center">{"p"}</span>
+                                                            {show_center_test_overlay.then(|| view! {
+                                                                <span class="cell-commit-overlay-mark cell-test-overlay-mark--pair-center">{"T"}</span>
+                                                            })}
+                                                            <span class="cell-value-text"></span>
+                                                        </>
+                                                    }
+                                                        .into_any()
+                                                } else if show_center_test_overlay {
+                                                    view! {
+                                                        <>
+                                                            <span class="cell-commit-overlay-mark cell-test-overlay-mark--center">{"T"}</span>
                                                             <span class="cell-value-text"></span>
                                                         </>
                                                     }
@@ -1877,16 +3171,31 @@ pub fn TimesheetView() -> impl IntoView {
                                 weekend_commit_messages.extend(weekend_activity_sun.commit_messages);
                                 let weekend_has_pr_review =
                                     weekend_activity_sat.has_pr_review || weekend_activity_sun.has_pr_review;
+                                let weekend_has_test_results = !weekend_activity_sat
+                                    .test_result_links
+                                    .is_empty()
+                                    || !weekend_activity_sun.test_result_links.is_empty();
                                 let weekend_has_commit_associations = !weekend_commit_messages.is_empty()
                                     || !weekend_activity_sat.commit_links.is_empty()
                                     || !weekend_activity_sun.commit_links.is_empty();
+                                let weekend_has_worklogs = !we_entries.is_empty();
                                 let show_corner_commit_overlay_weekend =
-                                    !we_entries.is_empty() && weekend_has_commit_associations;
-                                let show_center_commit_overlay_weekend =
-                                    we_entries.is_empty() && weekend_has_commit_associations;
-                                let show_center_pr_overlay_weekend = we_entries.is_empty()
+                                    weekend_has_worklogs && weekend_has_commit_associations;
+                                let show_corner_pr_overlay_weekend =
+                                    weekend_has_worklogs && weekend_has_pr_review;
+                                let show_corner_test_overlay_weekend =
+                                    weekend_has_worklogs && weekend_has_test_results;
+                                let show_center_dual_overlay_weekend = !weekend_has_worklogs
+                                    && weekend_has_commit_associations
+                                    && weekend_has_pr_review;
+                                let show_center_commit_overlay_weekend = !weekend_has_worklogs
+                                    && weekend_has_commit_associations
+                                    && !weekend_has_pr_review;
+                                let show_center_pr_overlay_weekend = !weekend_has_worklogs
                                     && !weekend_has_commit_associations
                                     && weekend_has_pr_review;
+                                let show_center_test_overlay_weekend =
+                                    !weekend_has_worklogs && weekend_has_test_results;
                                 let (we_display, we_tooltip) = if !we_entries.is_empty() {
                                     (we_text.clone(), we_title.clone())
                                 } else if !weekend_commit_messages.is_empty() {
@@ -1915,105 +3224,261 @@ pub fn TimesheetView() -> impl IntoView {
                                     "col-weekend timesheet-cell"
                                 };
                                 let we_cell_is_today = is_today_weekend;
+                                let weekend_nav_col = wi * 6 + 5;
                                 let we_summary = summary.clone();
                                 let site_url_for_we = site_url.clone();
                                 let owner_for_weekend_popup = component_owner.clone();
                                 let row_pr_links_for_weekend = row_pr_links.clone();
+                                let open_weekend_popup: std::rc::Rc<dyn Fn(Option<PopupSeed>)> = std::rc::Rc::new({
+                                    let we_key2 = we_key2.clone();
+                                    let we_entries2 = we_entries2.clone();
+                                    let bb_activity_for_closure = bb_activity_for_closure.clone();
+                                    let we_summary = we_summary.clone();
+                                    let row_pr_links_for_weekend = row_pr_links_for_weekend.clone();
+                                    let site_url_for_we = site_url_for_we.clone();
+                                    let owner_for_weekend_popup = owner_for_weekend_popup.clone();
+                                    move |seed: Option<PopupSeed>| {
+                                        let existing_popup_id = open_popups.with(|ps| {
+                                            ps.iter()
+                                                .find(|p| p.issue_key == we_key2 && p.date == sat)
+                                                .map(|p| p.popup_id)
+                                        });
+                                        if let Some(popup_id) = existing_popup_id {
+                                            #[cfg(feature = "hydrate")]
+                                            if let Some(seed) = seed {
+                                                match seed {
+                                                    PopupSeed::Hours(d) => schedule_digit_fill_for_popup(popup_id, d),
+                                                    PopupSeed::Description(ch) => schedule_description_fill_for_popup(popup_id, ch),
+                                                }
+                                            }
+                                            #[cfg(not(feature = "hydrate"))]
+                                            let _ = popup_id;
+                                            return;
+                                        }
+                                        let (suggested_comments, is_git_log) = if we_entries2.is_empty() {
+                                            let sat_activity = bb_activity_for_closure
+                                                .get(&format!("{}:{}", we_key2, sat))
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            let sun_activity = bb_activity_for_closure
+                                                .get(&format!("{}:{}", we_key2, sun))
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            let mut commit_messages = sat_activity.commit_messages;
+                                            commit_messages.extend(sun_activity.commit_messages);
+                                            if !commit_messages.is_empty() {
+                                                (commit_messages, true)
+                                            } else if sat_activity.has_pr_review || sun_activity.has_pr_review {
+                                                (vec!["review".to_string()], false)
+                                            } else {
+                                                (vec![], false)
+                                            }
+                                        } else {
+                                            (vec![], false)
+                                        };
+                                        let suggested_comment = if is_git_log {
+                                            suggested_comments.first().cloned()
+                                        } else {
+                                            None
+                                        };
+                                        let sat_links = bb_activity_for_closure
+                                            .get(&format!("{}:{}", we_key2, sat))
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        let sun_links = bb_activity_for_closure
+                                            .get(&format!("{}:{}", we_key2, sun))
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        let mut weekend_commit_messages = sat_links.commit_messages.clone();
+                                        weekend_commit_messages.extend(sun_links.commit_messages.clone());
+                                        let mut weekend_commit_links = sat_links.commit_links;
+                                        weekend_commit_links.extend(sun_links.commit_links);
+                                        let mut seen_weekend_links = std::collections::HashSet::new();
+                                        weekend_commit_links
+                                            .retain(|link| seen_weekend_links.insert(link.clone()));
+                                        let pos_style = compute_popup_style(
+                                            &we_key2,
+                                            &sat.to_string(),
+                                            we_entries2.len(),
+                                        );
+                                        let issue_summary = we_summary.clone();
+                                        let popup = PopupInfo {
+                                            popup_id: NEXT_POPUP_ID
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                            issue_key: we_key2.clone(),
+                                            issue_summary,
+                                            date: sat,
+                                            entries: we_entries2.clone(),
+                                            hours_per_day: hpd,
+                                            hours_per_week: hpw,
+                                            suggested_comments,
+                                            suggested_comment: suggested_comment.clone(),
+                                            commit_messages: weekend_commit_messages,
+                                            commit_links: weekend_commit_links,
+                                            test_result_links: {
+                                                let mut links = sat_links.test_result_links;
+                                                links.extend(sun_links.test_result_links);
+                                                let mut seen = std::collections::HashSet::new();
+                                                links.retain(|link| seen.insert(link.clone()));
+                                                links
+                                            },
+                                            pr_links: row_pr_links_for_weekend.clone(),
+                                            is_git_log,
+                                            is_weekend: true,
+                                            is_today: we_cell_is_today,
+                                            position_style: owner_for_weekend_popup
+                                                .with(|| RwSignal::new(pos_style)),
+                                            site_url: site_url_for_we.clone(),
+                                            restored_timer_popup: None,
+                                            initial_digit: match seed {
+                                                Some(PopupSeed::Hours(d)) => Some(d),
+                                                _ => None,
+                                            },
+                                        };
+                                        let popup_id = popup.popup_id;
+                                        open_popups.update(|ps| ps.push(popup));
+                                        #[cfg(feature = "hydrate")]
+                                        if let Some(PopupSeed::Description(ch)) = seed {
+                                            schedule_description_fill_for_popup(popup_id, ch);
+                                        }
+                                        #[cfg(not(feature = "hydrate"))]
+                                        let _ = popup_id;
+                                    }
+                                });
+                                let open_weekend_popup_click = open_weekend_popup.clone();
+                                let open_weekend_popup_keydown = open_weekend_popup.clone();
+                                let focused_cell_for_weekend_focus = focused_cell;
+                                let focused_cell_for_weekend_tabindex = focused_cell;
+                                let focused_cell_for_weekend_keydown = focused_cell;
                                 week_cells.push(view! {
                                     <td class={weekend_cls} title={we_tooltip}>
                                         <span
-                                            class={if show_corner_commit_overlay_weekend {
-                                                "cell-value cell-value-with-commit-overlay-corner"
-                                            } else if show_center_commit_overlay_weekend || show_center_pr_overlay_weekend {
+                                            class={if show_corner_commit_overlay_weekend
+                                                || show_corner_pr_overlay_weekend
+                                                || show_corner_test_overlay_weekend
+                                            {
+                                                "cell-value cell-value-with-overlay-corners"
+                                            } else if show_center_dual_overlay_weekend {
+                                                "cell-value cell-value-with-overlay-center-pair"
+                                            } else if show_center_commit_overlay_weekend
+                                                || show_center_pr_overlay_weekend
+                                                || show_center_test_overlay_weekend
+                                            {
                                                 "cell-value cell-value-with-commit-overlay-center"
                                             } else {
                                                 "cell-value"
                                             }}
                                             data-cell-key={we_key}
                                             data-cell-date={we_sat_str}
-
-                                            on:click=move |_| {
-                                                let already_open = open_popups.with(|ps| ps.iter().any(|p| p.issue_key == we_key2 && p.date == sat));
-                                                if already_open {
-                                                    return;
+                                            data-nav-row={row_idx.to_string()}
+                                            data-nav-col={weekend_nav_col.to_string()}
+                                            role="button"
+                                            tabindex={move || {
+                                                if focused_cell_for_weekend_tabindex.get()
+                                                    == Some((row_idx, weekend_nav_col))
+                                                {
+                                                    1
+                                                } else {
+                                                    -1
                                                 }
-                                                let (suggested_comments, is_git_log) = if we_entries2.is_empty() {
-                                                    let sat_activity = bb_activity_for_closure
-                                                        .get(&format!("{}:{}", we_key2, sat))
-                                                        .cloned()
-                                                        .unwrap_or_default();
-                                                    let sun_activity = bb_activity_for_closure
-                                                        .get(&format!("{}:{}", we_key2, sun))
-                                                        .cloned()
-                                                        .unwrap_or_default();
-                                                    let mut commit_messages = sat_activity.commit_messages;
-                                                    commit_messages.extend(sun_activity.commit_messages);
-                                                    if !commit_messages.is_empty() {
-                                                        (commit_messages, true)
-                                                    } else if sat_activity.has_pr_review || sun_activity.has_pr_review {
-                                                        (vec!["review".to_string()], false)
-                                                    } else {
-                                                        (vec![], false)
+                                            }}
+                                            on:focus=move |_| {
+                                                focused_cell_for_weekend_focus
+                                                    .set(Some((row_idx, weekend_nav_col)));
+                                            }
+                                            on:click=move |_| {
+                                                open_weekend_popup_click(None);
+                                            }
+                                            on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                                                let key = ev.key();
+                                                match key.as_str() {
+                                                    "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" => {
+                                                        ev.prevent_default();
+                                                        let row_count = nav_row_count;
+                                                        let col_count = nav_col_count;
+                                                        if row_count == 0 || col_count == 0 {
+                                                            return;
+                                                        }
+                                                        let mut next_row = row_idx;
+                                                        let mut next_col = weekend_nav_col;
+                                                        match key.as_str() {
+                                                            "ArrowUp" => {
+                                                                next_row = next_row.saturating_sub(1);
+                                                            }
+                                                            "ArrowDown" => {
+                                                                next_row = (next_row + 1).min(row_count - 1);
+                                                            }
+                                                            "ArrowLeft" => {
+                                                                next_col = next_col.saturating_sub(1);
+                                                            }
+                                                            "ArrowRight" => {
+                                                                next_col = (next_col + 1).min(col_count - 1);
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        focused_cell_for_weekend_keydown
+                                                            .set(Some((next_row, next_col)));
+                                                        #[cfg(feature = "hydrate")]
+                                                        focus_grid_cell(next_row, next_col);
                                                     }
-                                                } else {
-                                                    (vec![], false)
-                                                };
-                                                let suggested_comment = if is_git_log {
-                                                    suggested_comments.first().cloned()
-                                                } else {
-                                                    None
-                                                };
-                                                let sat_links = bb_activity_for_closure
-                                                    .get(&format!("{}:{}", we_key2, sat))
-                                                    .cloned()
-                                                    .unwrap_or_default();
-                                                let sun_links = bb_activity_for_closure
-                                                    .get(&format!("{}:{}", we_key2, sun))
-                                                    .cloned()
-                                                    .unwrap_or_default();
-                                                let mut weekend_commit_messages = sat_links.commit_messages.clone();
-                                                weekend_commit_messages.extend(sun_links.commit_messages.clone());
-                                                let mut weekend_commit_links = sat_links.commit_links;
-                                                weekend_commit_links.extend(sun_links.commit_links);
-                                                let mut seen_weekend_links = std::collections::HashSet::new();
-                                                weekend_commit_links
-                                                    .retain(|link| seen_weekend_links.insert(link.clone()));
-                                                let pos_style = compute_popup_style(
-                                                    &we_key2,
-                                                    &sat.to_string(),
-                                                    we_entries2.len(),
-                                                );
-                                                let issue_summary = we_summary.clone();
-                                                let popup = PopupInfo {
-                                                    popup_id: NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                                    issue_key: we_key2.clone(),
-                                                    issue_summary,
-                                                    date: sat,
-                                                    entries: we_entries2.clone(),
-                                                    hours_per_day: hpd,
-                                                    hours_per_week: hpw,
-                                                    suggested_comments,
-                                                    suggested_comment: suggested_comment.clone(),
-                                                    commit_messages: weekend_commit_messages,
-                                                    commit_links: weekend_commit_links,
-                                                    pr_links: row_pr_links_for_weekend.clone(),
-                                                    is_git_log,
-                                                    is_weekend: true,
-                                                    is_today: we_cell_is_today,
-                                                    position_style: owner_for_weekend_popup
-                                                        .with(|| RwSignal::new(pos_style)),
-                                                    site_url: site_url_for_we.clone(),
-                                                    restored_timer_popup: None,
-                                                };
-                                                open_popups.update(|ps| ps.push(popup));
+                                                    "Enter" => {
+                                                        ev.prevent_default();
+                                                        open_weekend_popup_keydown(None);
+                                                    }
+                                                    _ => {
+                                                        if key.len() == 1 {
+                                                            if let Some(digit) = key.chars().next().filter(|c| {
+                                                                c.is_ascii_digit()
+                                                                    && !ev.alt_key()
+                                                                    && !ev.ctrl_key()
+                                                                    && !ev.meta_key()
+                                                                    && !ev.shift_key()
+                                                            }) {
+                                                                ev.prevent_default();
+                                                                open_weekend_popup_keydown(Some(PopupSeed::Hours(digit)));
+                                                            } else if let Some(letter) = key.chars().next().filter(|c| {
+                                                                c.is_ascii_alphabetic()
+                                                                    && !ev.alt_key()
+                                                                    && !ev.ctrl_key()
+                                                                    && !ev.meta_key()
+                                                            }) {
+                                                                ev.prevent_default();
+                                                                open_weekend_popup_keydown(Some(PopupSeed::Description(letter)));
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
 
                                         >
-                                            {if show_corner_commit_overlay_weekend {
+                                            {if show_corner_commit_overlay_weekend
+                                                || show_corner_pr_overlay_weekend
+                                                || show_corner_test_overlay_weekend
+                                            {
                                                 view! {
                                                     <>
-                                                        <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner">{"c"}</span>
+                                                        {show_corner_commit_overlay_weekend.then(|| view! {
+                                                            <span class="cell-commit-overlay-mark cell-commit-overlay-mark--corner-left">{"c"}</span>
+                                                        })}
+                                                        {show_corner_pr_overlay_weekend.then(|| view! {
+                                                            <span class="cell-commit-overlay-mark cell-pr-overlay-mark--corner-right">{"p"}</span>
+                                                        })}
+                                                        {show_corner_test_overlay_weekend.then(|| view! {
+                                                            <span class="cell-commit-overlay-mark cell-test-overlay-mark--corner-center">{"T"}</span>
+                                                        })}
                                                         <span class="cell-value-text">{we_display.clone()}</span>
+                                                    </>
+                                                }
+                                                    .into_any()
+                                            } else if show_center_dual_overlay_weekend {
+                                                view! {
+                                                    <>
+                                                        <span class="cell-commit-overlay-mark cell-commit-overlay-mark--pair-left">{"c"}</span>
+                                                        <span class="cell-commit-overlay-mark cell-pr-overlay-mark--pair-right">{"p"}</span>
+                                                        {show_center_test_overlay_weekend.then(|| view! {
+                                                            <span class="cell-commit-overlay-mark cell-test-overlay-mark--pair-center">{"T"}</span>
+                                                        })}
+                                                        <span class="cell-value-text"></span>
                                                     </>
                                                 }
                                                     .into_any()
@@ -2021,6 +3486,9 @@ pub fn TimesheetView() -> impl IntoView {
                                                 view! {
                                                     <>
                                                         <span class="cell-commit-overlay-mark cell-commit-overlay-mark--center">{"c"}</span>
+                                                        {show_center_test_overlay_weekend.then(|| view! {
+                                                            <span class="cell-commit-overlay-mark cell-test-overlay-mark--pair-center">{"T"}</span>
+                                                        })}
                                                         <span class="cell-value-text"></span>
                                                     </>
                                                 }
@@ -2029,6 +3497,17 @@ pub fn TimesheetView() -> impl IntoView {
                                                 view! {
                                                     <>
                                                         <span class="cell-commit-overlay-mark cell-pr-overlay-mark--center">{"p"}</span>
+                                                        {show_center_test_overlay_weekend.then(|| view! {
+                                                            <span class="cell-commit-overlay-mark cell-test-overlay-mark--pair-center">{"T"}</span>
+                                                        })}
+                                                        <span class="cell-value-text"></span>
+                                                    </>
+                                                }
+                                                    .into_any()
+                                            } else if show_center_test_overlay_weekend {
+                                                view! {
+                                                    <>
+                                                        <span class="cell-commit-overlay-mark cell-test-overlay-mark--center">{"T"}</span>
                                                         <span class="cell-value-text"></span>
                                                     </>
                                                 }
@@ -2073,6 +3552,7 @@ pub fn TimesheetView() -> impl IntoView {
                                             href={format!("https://uplandsoftware.atlassian.net/browse/{}", key_display)}
                                             target="_blank"
                                             class="issue-key"
+                                            tabindex="2"
                                         >
                                             {key_display.clone()}
                                         </a>
@@ -2142,66 +3622,111 @@ pub fn TimesheetView() -> impl IntoView {
                 }}
             </div>
 
-            <div class="bottom-nav">
-                <WeekNavigator selected_monday=selected_monday />
-                <div class="nav-btn-group-right">
-                    <button
-                        class="nav-btn nav-report"
-                        on:click=on_open_report
-                        title=move || i18n.get().t(keys::USER_REPORT)
-                        aria-label=move || i18n.get().t(keys::USER_REPORT)
-                    >
-                    </button>
-                    <button
-                        class="nav-btn nav-force-refresh"
-                        on:click=on_force_periodic_refresh
-                        title=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
-                        aria-label=move || i18n.get().t(keys::FORCE_PERIODIC_REFRESH)
->
-                        <span class="icon-force-refresh">{"⟳"}</span>
-                    </button>
-                    <button
-                        class="nav-btn nav-refresh"
-                        on:click=on_refresh
-                        disabled=move || is_refreshing.get()
-                        title=move || i18n.get().t(keys::REFRESH_CACHED)
-                    >
-                        <span class="icon-refresh">{"🔄"}</span>
-                    </button>
-                    <button
-                        class="nav-btn nav-settings"
-                        on:click=on_open_settings
-                        title=move || i18n.get().t(keys::OPEN_SETTINGS)
-                    >
-                        <span class="icon-settings">{"⚙️"}</span>
-                    </button>
-                    <a
-                        class="nav-btn nav-logout"
-                        href="/auth/logout"
-                        title=move || i18n.get().t(keys::LOGOUT)
-                    >
-                        <span class="icon-logout">{"🚪"}</span>
-                    </a>
-                    {lang_dropdown()}
-                    <span
-                        class={move || match conn.status() {
-                            ConnectionStatus::Online => "circle green",
-                            ConnectionStatus::Waiting => "circle orange",
-                            ConnectionStatus::Offline => "circle red",
-                        }}
-                        title={move || match conn.status() {
-                            ConnectionStatus::Online => i18n.get().t(keys::CONNECTION_CONNECTED),
-                            ConnectionStatus::Waiting => i18n.get().t(keys::CONNECTION_SYNCING),
-                            ConnectionStatus::Offline => i18n.get().t(keys::CONNECTION_DISCONNECTED),
-                        }}
-                    ></span>
-                </div>
-            </div>
-
-
-            {move || refresh_toast.get().map(|msg| view! {
-                <div class="refresh-toast" role="status" aria-live="polite">{msg}</div>
-            })}
+            {move || {
+                let toasts = refresh_toasts.get();
+                if toasts.is_empty() {
+                    return None;
+                }
+                let (offset_x, offset_y) = toast_stack_offset.get();
+                let stack_style = format!("transform: translate({:.0}px, {:.0}px);", offset_x, offset_y);
+                Some(view! {
+                    <div class="refresh-toast-stack" style={stack_style} role="status" aria-live="polite">
+                        {toasts.into_iter().map(|toast| {
+                            let toast_id = toast.id;
+                            let on_close = {
+                                let refresh_toasts = refresh_toasts;
+                                move |_| {
+                                    refresh_toasts.update(|items| {
+                                        items.retain(|item| item.id != toast_id);
+                                    });
+                                }
+                            };
+                            let on_drag_start = {
+                                let toast_stack_offset = toast_stack_offset;
+                                move |ev| attach_toast_stack_drag(ev, toast_stack_offset)
+                            };
+                            view! {
+                                <article class="refresh-toast-card">
+                                    <div class="refresh-toast-titlebar" on:mousedown=on_drag_start>
+                                        <span class="refresh-toast-time">{toast.hhmm.clone()}</span>
+                                        <button
+                                            type="button"
+                                            class="refresh-toast-close"
+                                            aria-label={move || i18n.get().t(keys::LIVE_REFRESH_TOAST_CLOSE)}
+                                            title={move || i18n.get().t(keys::LIVE_REFRESH_TOAST_CLOSE)}
+                                            on:click=on_close
+                                        >
+                                            "×"
+                                        </button>
+                                    </div>
+                                    <div class="refresh-toast-body">
+                                        {(!toast.added_work_keys.is_empty()).then(|| {
+                                            view! {
+                                                <div class="refresh-toast-section">
+                                                    <div class="refresh-toast-section-title">{move || i18n.get().t(keys::LIVE_REFRESH_WORK_KEYS_ADDED)}</div>
+                                                    <div class="refresh-toast-keys">{toast.added_work_keys.join(", ")}</div>
+                                                </div>
+                                            }
+                                        })}
+                                        {(!toast.pr_updates.is_empty()).then(|| {
+                                            view! {
+                                                <div class="refresh-toast-section">
+                                                    <div class="refresh-toast-section-title">{move || i18n.get().t(keys::LIVE_REFRESH_PR_UPDATES)}</div>
+                                                    <ul class="refresh-toast-list">
+                                                        {toast.pr_updates.iter().map(|update| {
+                                                            let links = update.pr_links.clone();
+                                                            view! {
+                                                                <li>
+                                                                    <span class="refresh-toast-key">{update.issue_key.clone()}</span>
+                                                                    {(!links.is_empty()).then(|| view! {
+                                                                        <div class="refresh-toast-links">
+                                                                            {links.into_iter().map(|link| {
+                                                                                view! {
+                                                                                    <a href={link.clone()} target="_blank" rel="noopener noreferrer">{pr_number(link.as_str()).unwrap_or_default().to_string()}</a>
+                                                                                }
+                                                                            }).collect_view()}
+                                                                        </div>
+                                                                    })}
+                                                                </li>
+                                                            }
+                                                        }).collect_view()}
+                                                    </ul>
+                                                </div>
+                                            }
+                                        })}
+                                        {(!toast.test_updates.is_empty()).then(|| {
+                                            view! {
+                                                <div class="refresh-toast-section">
+                                                    <div class="refresh-toast-section-title">{move || i18n.get().t(keys::LIVE_REFRESH_TEST_UPDATES)}</div>
+                                                    <ul class="refresh-toast-list">
+                                                        {toast.test_updates.iter().map(|update| {
+                                                            let links = update.test_result_links.clone();
+                                                            view! {
+                                                                <li>
+                                                                    <span class="refresh-toast-key">{update.issue_key.clone()}</span>
+                                                                    {(!links.is_empty()).then(|| view! {
+                                                                        <div class="refresh-toast-links">
+                                                                            {links.into_iter().map(|link| {
+                                                                                view! {
+                                                                                    <a href={link.clone()} target="_blank" rel="noopener noreferrer">{link.clone()}</a>
+                                                                                }
+                                                                            }).collect_view()}
+                                                                        </div>
+                                                                    })}
+                                                                </li>
+                                                            }
+                                                        }).collect_view()}
+                                                    </ul>
+                                                </div>
+                                            }
+                                        })}
+                                    </div>
+                                </article>
+                            }
+                        }).collect_view()}
+                    </div>
+                })
+            }}
 
             // ── Search dropdown rendered outside the table so it is never
             // clipped by overflow:hidden / sticky headers / stacking contexts.
@@ -2248,6 +3773,10 @@ pub fn TimesheetView() -> impl IntoView {
                     let pos_sig = info.position_style;
                     let on_close_popup = Callback::new(move |_: ()| {
                         open_popups.update(|ps| ps.retain(|p| p.popup_id != pid));
+                        #[cfg(feature = "hydrate")]
+                        if let Some((row, col)) = focused_cell.get_untracked() {
+                            focus_grid_cell(row, col);
+                        }
                     });
 
                     view! {
@@ -2264,6 +3793,7 @@ pub fn TimesheetView() -> impl IntoView {
                            suggested_comment={info.suggested_comment.clone()}
                            commit_messages={info.commit_messages.clone()}
                            commit_links={info.commit_links.clone()}
+                           test_result_links={info.test_result_links.clone()}
                            pr_links={info.pr_links.clone()}
                            is_git_log={info.is_git_log}
                            is_weekend={info.is_weekend}
@@ -2272,19 +3802,20 @@ pub fn TimesheetView() -> impl IntoView {
                            on_close=on_close_popup
                            on_changed=on_popup_changed
                            site_url={info.site_url}
+                           initial_digit={info.initial_digit}
                         />
                     }
                 }}
             />
             // Settings dialog modal
             {move || show_settings.get().then(|| view! {
-                <SettingsDialog on_ok=on_close_settings on_cancel=on_close_settings />
+                <SettingsDialog on_ok=on_settings_saved on_cancel=on_close_settings />
             })}
             {move || show_report.get().then(|| view! {
-                <ReportOverlay
+                <ReportView
+                    state={report_state_for_view.clone()}
                     hours_per_day={last_data.get().map(|d| d.hours_per_day).unwrap_or(8.0)}
                     hours_per_week={last_data.get().map(|d| d.hours_per_week).unwrap_or(40.0)}
-                    on_close=on_close_report
                 />
             })}
         </div>

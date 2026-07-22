@@ -38,7 +38,7 @@ impl ConnectionState {
     /// Whether the connection is available (socket open). Use this to
     /// guard user interactions.
     pub fn is_available(&self) -> bool {
-        self.socket_open.get()
+        self.socket_open.get_untracked()
     }
 
     /// Increment in-flight request counter. Call before issuing an API

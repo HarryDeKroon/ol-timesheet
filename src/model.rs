@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -24,6 +25,24 @@ pub struct Settings {
     pub planned_time_off_keys: Vec<String>,
     #[serde(default)]
     pub study_keys: Vec<String>,
+    #[serde(default = "default_show_merged_pr_activity")]
+    pub show_merged_pr_activity: bool,
+    #[serde(default)]
+    pub custom_actions: Vec<CustomAction>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CustomAction {
+    #[serde(default)]
+    pub work_item_key: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub duration: String,
+}
+
+fn default_show_merged_pr_activity() -> bool {
+    true
 }
 
 fn default_hours_per_week() -> f64 {
@@ -106,6 +125,8 @@ pub struct CellActivity {
     pub commit_messages: Vec<String>,
     #[serde(default)]
     pub commit_links: Vec<String>,
+    #[serde(default)]
+    pub test_result_links: Vec<String>,
     #[serde(default)]
     pub has_pr_review: bool,
     #[serde(default)]
@@ -202,6 +223,28 @@ impl TimesheetData {
             .map(|i| self.cell_hours(key, monday + chrono::Duration::days(i)))
             .sum()
     }
+}
+
+fn parse_jira_issue_key(key: &str) -> (&str, u64) {
+    match key.rsplit_once('-') {
+        Some((prefix, num)) => (prefix, num.parse().unwrap_or(0)),
+        None => (key, 0),
+    }
+}
+
+pub fn compare_jira_issue_keys(a: &str, b: &str) -> Ordering {
+    let (ap, an) = parse_jira_issue_key(a);
+    let (bp, bn) = parse_jira_issue_key(b);
+    ap.cmp(bp).then_with(|| an.cmp(&bn))
+}
+
+pub fn sort_work_items_for_timesheet(
+    work_items: &mut [WorkItem],
+    worklogs: &[WorklogEntry],
+    bitbucket_activity: &HashMap<String, CellActivity>,
+) {
+    let _ = (worklogs, bitbucket_activity);
+    work_items.sort_by(|a, b| compare_jira_issue_keys(&a.key, &b.key));
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {

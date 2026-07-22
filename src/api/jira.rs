@@ -5,6 +5,7 @@ use crate::api::cache;
 use crate::model::{CellActivity, WorkItem, WorklogEntry};
 use chrono::{Datelike, NaiveDate};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use log;
@@ -555,11 +556,106 @@ pub fn invalidate_worklogs_for_issue(account_id: &str, issue_key: &str) {
     // them might include this issue.
     let user_prefix = format!("{}:{}", account_id, TIMESHEET_DATA_PREFIX);
     cache::remove_by_prefix(&user_prefix);
+    // Invalidate week-level caches too.  Otherwise week-cache fast path can
+    // serve stale rows right after a worklog write (entry appears "gone"
+    // until a later refresh repopulates that week).
+    let week_prefix = format!("{}:week_cache:", account_id);
+    cache::remove_by_prefix(&week_prefix);
+    cache::remove(&cache::cached_weeks_index_key(account_id));
+    cache::remove(&cache::cached_bitbucket_weeks_index_key(account_id));
     // Also invalidate all JQL search caches for this user. The worklog
     // author query (worklogAuthor = "..." AND worklogDate >= ...) won't
     // include a newly-worklocked issue until its cached result is evicted.
     let search_prefix = format!("{}:jira_search:", account_id);
     cache::remove_by_prefix(&search_prefix);
+}
+
+fn parse_timesheet_range_from_key(key: &str) -> Option<(NaiveDate, NaiveDate)> {
+    let mut parts = key.split(':');
+    let _account_id = parts.next()?;
+    let kind = parts.next()?;
+    if kind != "timesheet_data" {
+        return None;
+    }
+    let start = NaiveDate::parse_from_str(parts.next()?, "%Y-%m-%d").ok()?;
+    let end = NaiveDate::parse_from_str(parts.next()?, "%Y-%m-%d").ok()?;
+    Some((start, end))
+}
+
+fn parse_week_monday_from_key(key: &str) -> Option<NaiveDate> {
+    let mut parts = key.split(':');
+    let _account_id = parts.next()?;
+    let kind = parts.next()?;
+    if kind != "week_cache" {
+        return None;
+    }
+    NaiveDate::parse_from_str(parts.next()?, "%Y-%m-%d").ok()
+}
+
+async fn refresh_caches_after_worklog_write(
+    creds: &JiraCredentials,
+    issue_key: &str,
+) -> Result<(), String> {
+    // Fetch all user worklogs for this issue from Jira and refresh per-issue cache.
+    // `fetch_worklogs_fresh` stores unfiltered entries in jira_worklogs:{key}.
+    let full_start =
+        NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_else(|| chrono::Local::now().date_naive());
+    let full_end = NaiveDate::from_ymd_opt(2100, 1, 1).unwrap_or(full_start);
+    let (all_entries, ytd_total) =
+        fetch_worklogs_fresh(creds, issue_key, full_start, full_end).await?;
+
+    let fetched_item = fetch_work_items_by_keys(creds, &[issue_key.to_string()])
+        .await
+        .ok()
+        .and_then(|mut items| items.drain(..).next());
+    let issue_key_upper = issue_key.trim().to_uppercase();
+
+    cache::update_user_entries(&creds.account_id, |key, raw| {
+        let (start, end) = if let Some(range) = parse_timesheet_range_from_key(key) {
+            range
+        } else if let Some(monday) = parse_week_monday_from_key(key) {
+            (monday, monday + chrono::Duration::days(6))
+        } else {
+            return None;
+        };
+
+        let mut ts = serde_json::from_str::<crate::model::TimesheetData>(raw).ok()?;
+        ts.worklogs
+            .retain(|entry| entry.issue_key.trim().to_uppercase() != issue_key_upper);
+        ts.worklogs.extend(
+            all_entries
+                .iter()
+                .filter(|entry| entry.date >= start && entry.date <= end)
+                .cloned(),
+        );
+
+        if ytd_total > 0.0 {
+            ts.ytd_hours.insert(issue_key.to_string(), ytd_total);
+        } else {
+            ts.ytd_hours.remove(issue_key);
+        }
+
+        if let Some(item) = &fetched_item {
+            if let Some(existing) = ts
+                .work_items
+                .iter_mut()
+                .find(|work_item| work_item.key.eq_ignore_ascii_case(issue_key))
+            {
+                *existing = item.clone();
+            } else {
+                ts.work_items.push(item.clone());
+            }
+        }
+
+        crate::model::sort_work_items_for_timesheet(
+            &mut ts.work_items,
+            &ts.worklogs,
+            &ts.bitbucket_activity,
+        );
+        serde_json::to_string(&ts).ok()
+    });
+
+    Ok(())
 }
 
 // ─── Cached worklog entry (serialised into the cache) ───────────────────────
@@ -630,6 +726,18 @@ pub async fn fetch_work_items(
     fetch_work_items_with_cache_policy(creds, start, end, true).await
 }
 
+/// Fetch active work items assigned to current user, oldest first.
+pub async fn fetch_assigned_active_work_items_oldest(
+    creds: &JiraCredentials,
+    use_cache: bool,
+) -> Result<Vec<WorkItem>, String> {
+    let jql = format!(
+        "assignee = \"{}\" AND statusCategory = \"In Progress\" ORDER BY created ASC",
+        creds.email
+    );
+    fetch_work_items_by_jql(creds, &jql, use_cache).await
+}
+
 pub async fn fetch_work_items_fresh(
     creds: &JiraCredentials,
     start: NaiveDate,
@@ -665,7 +773,7 @@ fn slice_timesheet_week(
     source: &crate::model::TimesheetData,
     monday: NaiveDate,
 ) -> crate::model::TimesheetData {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     let sunday = monday + chrono::Duration::days(6);
     let in_week = |d: NaiveDate| d >= monday && d <= sunday;
 
@@ -675,36 +783,10 @@ fn slice_timesheet_week(
         .filter(|w| in_week(w.date))
         .cloned()
         .collect::<Vec<_>>();
-    let keys_with_logs = worklogs
-        .iter()
-        .map(|w| w.issue_key.clone())
-        .collect::<HashSet<_>>();
-    let keys_with_activity = source
-        .bitbucket_activity
-        .keys()
-        .filter_map(|k| k.rsplit_once(':'))
-        .filter_map(|(issue_key, date)| {
-            NaiveDate::parse_from_str(date, "%Y-%m-%d")
-                .ok()
-                .filter(|d| in_week(*d))
-                .map(|_| issue_key.to_string())
-        })
-        .collect::<HashSet<_>>();
-    let visible_keys = keys_with_logs
-        .union(&keys_with_activity)
-        .cloned()
-        .collect::<HashSet<_>>();
-
-    let work_items = source
-        .work_items
-        .iter()
-        .filter(|i| visible_keys.contains(&i.key))
-        .cloned()
-        .collect::<Vec<_>>();
+    let work_items = source.work_items.clone();
     let ytd_hours = source
         .ytd_hours
         .iter()
-        .filter(|(k, _)| visible_keys.contains(*k))
         .map(|(k, v)| (k.clone(), *v))
         .collect::<HashMap<_, _>>();
     let bitbucket_activity = source
@@ -1200,12 +1282,17 @@ pub async fn add_worklog(
         return Err(msg);
     }
 
-    // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
-
-    // Return the new worklog ID
     let val: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(val["id"].as_str().unwrap_or("").to_string())
+    let new_id = val["id"].as_str().unwrap_or("").to_string();
+    if let Err(err) = refresh_caches_after_worklog_write(creds, issue_key).await {
+        log::warn!(
+            "[add_worklog] cache refresh failed for issue {}: {}; falling back to invalidate",
+            issue_key,
+            err
+        );
+        invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    }
+    Ok(new_id)
 }
 
 /// Update an existing worklog entry.
@@ -1260,8 +1347,14 @@ pub async fn update_worklog(
         return Err(format!("Failed to update worklog: {}", body));
     }
 
-    // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    if let Err(err) = refresh_caches_after_worklog_write(creds, issue_key).await {
+        log::warn!(
+            "[update_worklog] cache refresh failed for issue {}: {}; falling back to invalidate",
+            issue_key,
+            err
+        );
+        invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    }
 
     Ok(())
 }
@@ -1290,8 +1383,14 @@ pub async fn delete_worklog(
         return Err(format!("Failed to delete worklog: {}", body));
     }
 
-    // Invalidate caches for this issue
-    invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    if let Err(err) = refresh_caches_after_worklog_write(creds, issue_key).await {
+        log::warn!(
+            "[delete_worklog] cache refresh failed for issue {}: {}; falling back to invalidate",
+            issue_key,
+            err
+        );
+        invalidate_worklogs_for_issue(&creds.account_id, issue_key);
+    }
 
     Ok(())
 }
@@ -1334,10 +1433,23 @@ async fn prefetch_range(
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
     let bitbucket_range_supported =
         crate::api::bitbucket::requested_range_in_recent_weeks(start, end);
+    let prefs = crate::auth::load_user_prefs(&creds.account_id);
 
     if bitbucket_range_supported {
-        match fetch_timesheet_activity(&creds.email, &creds.account_id, display_name, start, end).await {
+        match fetch_timesheet_activity(&creds.email, &creds.account_id, display_name, start, end)
+            .await
+        {
             Ok(activity) => {
+                let filtered_pr_review: std::collections::HashSet<String> =
+                    if prefs.show_merged_pr_activity {
+                        activity.pr_review_cells.clone()
+                    } else {
+                        activity
+                            .pr_review_cells
+                            .difference(&activity.pr_merged_cells)
+                            .cloned()
+                            .collect()
+                    };
                 let known: std::collections::HashSet<String> =
                     all_items.iter().map(|w| w.key.clone()).collect();
                 let missing: Vec<String> = activity
@@ -1382,7 +1494,7 @@ async fn prefetch_range(
                     merged.dedup();
                     entry.commit_links = merged;
                 }
-                for cell_key in activity.pr_review_cells {
+                for cell_key in filtered_pr_review {
                     let entry = bitbucket_activity.entry(cell_key).or_default();
                     entry.has_pr_review = true;
                 }
@@ -1414,20 +1526,9 @@ async fn prefetch_range(
         }
     }
 
-    // 3. Assemble and cache the TimesheetData — sort by key only
-    all_items.sort_by(|a, b| {
-        fn parse_jira_key(key: &str) -> (&str, u64) {
-            match key.rsplit_once('-') {
-                Some((prefix, num)) => (prefix, num.parse().unwrap_or(0)),
-                None => (key, 0),
-            }
-        }
-        let (ap, an) = parse_jira_key(&a.key);
-        let (bp, bn) = parse_jira_key(&b.key);
-        ap.cmp(bp).then_with(|| an.cmp(&bn))
-    });
+    // 3. Assemble and cache the TimesheetData.
+    crate::model::sort_work_items_for_timesheet(&mut all_items, &all_worklogs, &bitbucket_activity);
 
-    let prefs = crate::auth::load_user_prefs(&creds.account_id);
     let ts = crate::model::TimesheetData {
         work_items: all_items,
         worklogs: all_worklogs,
@@ -1443,6 +1544,20 @@ async fn prefetch_range(
         log::info!("[prefetch] Cache warmed for {} .. {}", start, end);
     }
     for monday in requested_week_mondays(start, end) {
+        // Only write a week-level cache entry when the fetch range fully covers
+        // that week (start ≤ monday AND end ≥ monday + 6 days).  A partial
+        // write would overwrite a previously-restored full-week entry with an
+        // incomplete slice, losing all worklogs outside the narrow fetch window.
+        let week_end = monday + chrono::Duration::days(6);
+        if start > monday || end < week_end {
+            log::debug!(
+                "[prefetch] Skipping partial week_cache write for {} (fetch range {}..{} does not cover full week)",
+                monday,
+                start,
+                end
+            );
+            continue;
+        }
         let week_key = cache::week_cache_key(&creds.account_id, monday);
         let week_ts = slice_timesheet_week(&ts, monday);
         if let Ok(raw) = serde_json::to_string(&week_ts) {
@@ -1511,8 +1626,14 @@ pub async fn prefetch_startup_window(
     let forward = weeks_forward as i64;
     let period_start = anchor_monday - chrono::Duration::weeks(back);
     let period_end = anchor_monday + chrono::Duration::weeks(forward) + chrono::Duration::days(6);
-    if let Err(e) =
-        fetch_timesheet_activity(&creds.email, &creds.account_id, &display_name, period_start, period_end).await
+    if let Err(e) = fetch_timesheet_activity(
+        &creds.email,
+        &creds.account_id,
+        &display_name,
+        period_start,
+        period_end,
+    )
+    .await
     {
         log::warn!(
             "[prefetch] startup bitbucket prefetch failed for {} .. {}: {}",
@@ -1534,7 +1655,236 @@ pub async fn prefetch_startup_window(
     futures::future::join_all(warmups).await;
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+/// Warm cache from the persisted cache update date up to today.
+///
+/// The `start` is snapped back to the Monday of `last_update`'s week so that
+/// `prefetch_range` can write a **full** week_cache entry for any week that was
+/// only partially covered when the cache was last persisted.
+pub async fn prefetch_since_last_update(
+    creds: Arc<JiraCredentials>,
+    display_name: String,
+    last_update: NaiveDate,
+    today: NaiveDate,
+) {
+    if last_update >= today {
+        return;
+    }
+    // Snap back to the Monday of last_update's week so the delta warm always
+    // covers complete weeks and cannot leave partial week_cache entries.
+    let start =
+        last_update - chrono::Duration::days(last_update.weekday().num_days_from_monday() as i64);
+    log::info!(
+        "[prefetch] delta warm {} (snapped from {}) .. {}",
+        start,
+        last_update,
+        today
+    );
+    prefetch_range(creds, &display_name, start, today).await;
+}
+
+/// Background cache-completeness probe.  Only active when the `debug` log
+/// level is enabled.  Fetches fresh Jira work items, worklogs, and Bitbucket
+/// activity for the requested range and compares them against the supplied
+/// cached snapshot.  Any discrepancy is logged at `warn` level with enough
+/// context to diagnose the cause.
+pub async fn verify_cache_completeness(
+    creds: Arc<JiraCredentials>,
+    display_name: String,
+    cached: crate::model::TimesheetData,
+    start: NaiveDate,
+    end: NaiveDate,
+) {
+    if !log::log_enabled!(log::Level::Debug) {
+        return;
+    }
+
+    log::debug!("[cache_verify] start {}..{}", start, end);
+
+    // ── 1. Fresh Jira work items ────────────────────────────────────────────
+    let fresh_items = match fetch_work_items_fresh(&creds, start, end).await {
+        Ok(items) => items,
+        Err(e) => {
+            log::warn!("[cache_verify] Jira items fetch failed: {}", e);
+            return;
+        }
+    };
+
+    let fresh_keys: std::collections::HashSet<String> =
+        fresh_items.iter().map(|w| w.key.clone()).collect();
+    let cached_keys: std::collections::HashSet<String> =
+        cached.work_items.iter().map(|w| w.key.clone()).collect();
+
+    let mut issues = 0usize;
+
+    for key in fresh_keys.difference(&cached_keys) {
+        log::warn!(
+            "[cache_verify] MISSING work_item {} (Jira→cache) range={}..{}",
+            key,
+            start,
+            end
+        );
+        issues += 1;
+    }
+    for key in cached_keys.difference(&fresh_keys) {
+        log::debug!(
+            "[cache_verify] EXTRA work_item {} (cache only) range={}..{}",
+            key,
+            start,
+            end
+        );
+    }
+
+    // ── 2. Fresh worklogs for all known keys ────────────────────────────────
+    let all_keys: std::collections::HashSet<String> =
+        fresh_keys.union(&cached_keys).cloned().collect();
+    let mut fresh_worklogs: Vec<WorklogEntry> = Vec::new();
+    for key in &all_keys {
+        match fetch_worklogs_fresh(&creds, key, start, end).await {
+            Ok((wls, _)) => fresh_worklogs.extend(wls),
+            Err(e) => log::warn!("[cache_verify] worklogs fetch failed for {}: {}", key, e),
+        }
+    }
+
+    let fresh_wl_by_id: HashMap<String, &WorklogEntry> =
+        fresh_worklogs.iter().map(|w| (w.id.clone(), w)).collect();
+    let cached_wl_by_id: HashMap<String, &WorklogEntry> = cached
+        .worklogs
+        .iter()
+        .filter(|w| w.date >= start && w.date <= end)
+        .map(|w| (w.id.clone(), w))
+        .collect();
+
+    for (id, fresh_wl) in &fresh_wl_by_id {
+        match cached_wl_by_id.get(id) {
+            None => {
+                log::warn!(
+                    "[cache_verify] MISSING worklog id={} issue={} date={} hours={} (fresh not in cache)",
+                    id,
+                    fresh_wl.issue_key,
+                    fresh_wl.date,
+                    fresh_wl.hours
+                );
+                issues += 1;
+            }
+            Some(cached_wl) if (fresh_wl.hours - cached_wl.hours).abs() > 0.001 => {
+                log::warn!(
+                    "[cache_verify] MISMATCH worklog id={} issue={} date={} cached_hours={} fresh_hours={}",
+                    id,
+                    fresh_wl.issue_key,
+                    fresh_wl.date,
+                    cached_wl.hours,
+                    fresh_wl.hours
+                );
+                issues += 1;
+            }
+            _ => {}
+        }
+    }
+    for (id, cached_wl) in &cached_wl_by_id {
+        if !fresh_wl_by_id.contains_key(id) {
+            log::debug!(
+                "[cache_verify] STALE worklog id={} issue={} date={} hours={} (in cache, not in Jira)",
+                id,
+                cached_wl.issue_key,
+                cached_wl.date,
+                cached_wl.hours
+            );
+        }
+    }
+
+    // ── 3. Bitbucket activity ───────────────────────────────────────────────
+    if crate::api::bitbucket::requested_range_in_recent_weeks(start, end) {
+        use crate::api::bitbucket::fetch_timesheet_activity_fresh_requested_window;
+        match fetch_timesheet_activity_fresh_requested_window(
+            &creds.email,
+            &creds.account_id,
+            &display_name,
+            start,
+            end,
+        )
+        .await
+        {
+            Ok(activity) => {
+                let prefs = crate::auth::load_user_prefs(&creds.account_id);
+                let fresh_cells =
+                    bitbucket_activity_to_cell_map(activity, prefs.show_merged_pr_activity);
+                for cell_key in fresh_cells.keys() {
+                    if !cached.bitbucket_activity.contains_key(cell_key) {
+                        log::warn!(
+                            "[cache_verify] MISSING bitbucket cell {} (fresh not in cache)",
+                            cell_key
+                        );
+                        issues += 1;
+                    }
+                }
+                for cell_key in cached.bitbucket_activity.keys() {
+                    if !fresh_cells.contains_key(cell_key) {
+                        log::debug!(
+                            "[cache_verify] EXTRA bitbucket cell {} (cache only)",
+                            cell_key
+                        );
+                    }
+                }
+            }
+            Err(e) => log::warn!("[cache_verify] bitbucket fresh fetch failed: {}", e),
+        }
+    }
+
+    if issues == 0 {
+        log::debug!("[cache_verify] OK complete for {}..{}", start, end);
+    } else {
+        log::warn!(
+            "[cache_verify] {} discrepanc(ies) for {}..{}",
+            issues,
+            start,
+            end
+        );
+    }
+}
+
+/// Convert a raw `BitbucketActivity` into the `HashMap<cell_key, CellActivity>`
+/// format used by `TimesheetData`.  Mirrors the conversion logic in
+/// `prefetch_range` so the verify probe is consistent with what was cached.
+fn bitbucket_activity_to_cell_map(
+    activity: crate::api::bitbucket::BitbucketActivity,
+    show_merged_pr: bool,
+) -> HashMap<String, CellActivity> {
+    let mut cells: HashMap<String, CellActivity> = HashMap::new();
+
+    let filtered_pr_review: std::collections::HashSet<String> = if show_merged_pr {
+        activity.pr_review_cells.clone()
+    } else {
+        activity
+            .pr_review_cells
+            .difference(&activity.pr_merged_cells)
+            .cloned()
+            .collect()
+    };
+
+    for (cell_key, msgs) in activity.commit_messages_by_cell {
+        cells.entry(cell_key).or_default().commit_messages = msgs;
+    }
+    for (cell_key, links) in activity.commit_links_by_cell {
+        let entry = cells.entry(cell_key).or_default();
+        let mut merged = entry.commit_links.clone();
+        merged.extend(links);
+        merged.sort();
+        merged.dedup();
+        entry.commit_links = merged;
+    }
+    for cell_key in filtered_pr_review {
+        cells.entry(cell_key).or_default().has_pr_review = true;
+    }
+    for (cell_key, links) in activity.pr_links_by_cell {
+        let entry = cells.entry(cell_key).or_default();
+        let mut merged = entry.pr_links.clone();
+        merged.extend(links);
+        merged.sort();
+        merged.dedup();
+        entry.pr_links = merged;
+    }
+    cells
+}
 
 /// Parse a Jira datetime string (e.g. "2024-01-15T09:00:00.000+0000") into a NaiveDate.
 ///

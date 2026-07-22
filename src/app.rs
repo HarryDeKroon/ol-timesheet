@@ -3,6 +3,7 @@ use crate::connection::provide_connection_context;
 use crate::i18n::I18n;
 use crate::model::ReportData;
 use leptos::prelude::*;
+use leptos_meta::provide_meta_context;
 
 #[cfg(not(feature = "ssr"))]
 use leptos::web_sys;
@@ -34,6 +35,7 @@ pub fn App() -> impl IntoView {
     // ── I18n context ──
     let i18n = RwSignal::new(I18n::default());
     provide_context(i18n);
+    provide_meta_context();
 
     // ── Connection heartbeat context ──
     provide_connection_context();

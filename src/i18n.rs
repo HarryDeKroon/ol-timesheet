@@ -28,6 +28,7 @@ pub mod keys {
     pub const WEEKEND_TITLE: &str = "weekend_title";
     pub const TOTAL: &str = "total";
     pub const DESCRIPTION: &str = "description";
+    pub const DURATION: &str = "duration";
     pub const HOURS: &str = "hours";
     pub const DELETE: &str = "delete";
     pub const ADD_NEW: &str = "add_new";
@@ -74,6 +75,7 @@ pub mod keys {
     pub const OPEN_IN_JIRA: &str = "open_in_jira";
     pub const OPEN_COMMIT_IN_BITBUCKET: &str = "open_commit_in_bitbucket";
     pub const OPEN_PR_IN_BITBUCKET: &str = "open_pr_in_bitbucket";
+    pub const OPEN_TEST_RESULTS_IN_JENKINS: &str = "open_test_results_in_jenkins";
     pub const OPEN_SETTINGS: &str = "open_settings";
     pub const REFRESH_CACHED: &str = "refresh_cached";
     pub const FORCE_PERIODIC_REFRESH: &str = "force_periodic_refresh";
@@ -88,6 +90,12 @@ pub mod keys {
     pub const PLANNED_TIME_OFF: &str = "planned_time_off";
     pub const STUDY: &str = "study";
     pub const LIST_INPUT_HINT: &str = "list_input_hint";
+    pub const SETTINGS_ADD_ENTRY: &str = "settings_add_entry";
+    pub const SETTINGS_ERROR_HOURS_PER_WEEK: &str = "settings_error_hours_per_week";
+    pub const SETTINGS_ERROR_HOURS_PER_DAY: &str = "settings_error_hours_per_day";
+    pub const SETTINGS_ERROR_NON_BILLABLE: &str = "settings_error_non_billable";
+    pub const SETTINGS_ERROR_REPORTING_WORK_ITEMS: &str = "settings_error_reporting_work_items";
+    pub const SETTINGS_ERROR_REPORTING_UNIQUE: &str = "settings_error_reporting_unique";
     pub const REPORT_PERIOD: &str = "report_period";
     pub const REPORT_PERIOD_WEEK: &str = "report_period_week";
     pub const REPORT_PERIOD_MONTH: &str = "report_period_month";
@@ -103,6 +111,24 @@ pub mod keys {
     pub const REPORT_YEAR_SCOPE: &str = "report_year_scope";
     pub const REPORT_PTO_TOTAL: &str = "report_pto_total";
     pub const LIVE_REFRESH_APPLIED: &str = "live_refresh_applied";
+    pub const LIVE_REFRESH_TOAST_CLOSE: &str = "live_refresh_toast_close";
+    pub const LIVE_REFRESH_WORK_KEYS_ADDED: &str = "live_refresh_work_keys_added";
+    pub const LIVE_REFRESH_PR_UPDATES: &str = "live_refresh_pr_updates";
+    pub const LIVE_REFRESH_TEST_UPDATES: &str = "live_refresh_test_updates";
+    pub const DURATIONS: &str = "durations";
+    pub const CUSTOM_ACTIONS: &str = "custom_actions";
+    pub const CUSTOM_ACTION_WORK_ITEM: &str = "custom_action_work_item";
+    pub const SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION: &str =
+        "settings_error_custom_action_description";
+    pub const SETTINGS_ERROR_CUSTOM_ACTION_DURATION: &str = "settings_error_custom_action_duration";
+    pub const SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM: &str =
+        "settings_error_custom_action_work_item";
+    pub const POPUP_ERROR_DURATION_POSITIVE: &str = "popup_error_duration_positive";
+    pub const POPUP_ERROR_DESCRIPTION_REQUIRED: &str = "popup_error_description_required";
+    pub const POPUP_ERROR_DESCRIPTION_UNIQUE: &str = "popup_error_description_unique";
+    pub const PULL_REQUESTS: &str = "pull_requests";
+    pub const LANGUAGE: &str = "language";
+    pub const SHOW_MERGED_PR_ACTIVITY: &str = "show_merged_pr_activity";
 }
 
 type TranslationMap = HashMap<&'static str, HashMap<&'static str, &'static str>>;
@@ -131,6 +157,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::WEEKEND_TITLE, "Weekend"),
         (keys::TOTAL, "Total"),
         (keys::DESCRIPTION, "Description"),
+        (keys::DURATION, "Duration"),
         (keys::HOURS, "Hours"),
         (keys::DELETE, "Delete"),
         (keys::ADD_NEW, "Add new"),
@@ -176,6 +203,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::OPEN_IN_JIRA, "Open in Jira"),
         (keys::OPEN_COMMIT_IN_BITBUCKET, "Open commit in Bitbucket"),
         (keys::OPEN_PR_IN_BITBUCKET, "Open pull request in Bitbucket"),
+        (
+            keys::OPEN_TEST_RESULTS_IN_JENKINS,
+            "Open test results in Jenkins",
+        ),
         (keys::OPEN_SETTINGS, "Open settings"),
         (keys::REFRESH_CACHED, "Refresh cached work items"),
         (keys::FORCE_PERIODIC_REFRESH, "Force periodic refresh"),
@@ -193,6 +224,27 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
             keys::LIST_INPUT_HINT,
             "Comma, semicolon, or newline separated values",
         ),
+        (keys::SETTINGS_ADD_ENTRY, "Add entry…"),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_WEEK,
+            "Choose a whole number from 16 to 42",
+        ),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_DAY,
+            "Choose a value from 4 to 9.5 in steps of 0.5",
+        ),
+        (
+            keys::SETTINGS_ERROR_NON_BILLABLE,
+            "Entry is not in active assigned project list",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_WORK_ITEMS,
+            "Entry must be active assigned work item in selected non-billable project(s)",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_UNIQUE,
+            "Entry can only appear in one of Meetings, Local holidays, Planned time off, or Study",
+        ),
         (keys::REPORT_PERIOD, "Period"),
         (keys::REPORT_PERIOD_WEEK, "Month"),
         (keys::REPORT_PERIOD_MONTH, "Year"),
@@ -208,6 +260,40 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Year"),
         (keys::REPORT_PTO_TOTAL, "PTO"),
         (keys::LIVE_REFRESH_APPLIED, "Timesheet updated"),
+        (keys::LIVE_REFRESH_TOAST_CLOSE, "Close notification"),
+        (keys::LIVE_REFRESH_WORK_KEYS_ADDED, "New work keys"),
+        (keys::LIVE_REFRESH_PR_UPDATES, "PR updates"),
+        (keys::LIVE_REFRESH_TEST_UPDATES, "Jenkins test updates"),
+        (keys::DURATIONS, "Durations"),
+        (keys::CUSTOM_ACTIONS, "Custom actions"),
+        (keys::CUSTOM_ACTION_WORK_ITEM, "Work item"),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION,
+            "Description is required",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DURATION,
+            "Duration must be valid (example: 2h 10m)",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM,
+            "Work item must be active and in selected non-billable project(s)",
+        ),
+        (
+            keys::POPUP_ERROR_DURATION_POSITIVE,
+            "Each non-blank row must have duration greater than zero",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_REQUIRED,
+            "When multiple durations exist, each duration row must have a description",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
+            "When multiple durations exist, descriptions must be unique",
+        ),
+        (keys::PULL_REQUESTS, "Pull requests"),
+        (keys::LANGUAGE, "Language"),
+        (keys::SHOW_MERGED_PR_ACTIVITY, "Show \u{2018}merged\u{2019} activity"),
     ]
     .into_iter()
     .collect();
@@ -241,6 +327,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::WEEKEND_TITLE, "Fin-de-semaine"),
         (keys::TOTAL, "Total"),
         (keys::DESCRIPTION, "Description"),
+        (keys::DURATION, "Durée"),
         (keys::HOURS, "Heures"),
         (keys::DELETE, "Supprimer"),
         (keys::ADD_NEW, "Ajouter"),
@@ -301,6 +388,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
             keys::OPEN_PR_IN_BITBUCKET,
             "Ouvrir la demande de tirage dans Bitbucket",
         ),
+        (
+            keys::OPEN_TEST_RESULTS_IN_JENKINS,
+            "Ouvrir les résultats de test dans Jenkins",
+        ),
         (keys::OPEN_SETTINGS, "Ouvrir les paramètres"),
         (keys::REFRESH_CACHED, "Rafraîchir les éléments en cache"),
         (keys::FORCE_PERIODIC_REFRESH, "Forcer le rafraîchissement périodique"),
@@ -317,6 +408,27 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (
             keys::LIST_INPUT_HINT,
             "Valeurs séparées par virgule, point-virgule ou retour ligne",
+        ),
+        (keys::SETTINGS_ADD_ENTRY, "Ajouter une entrée…"),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_WEEK,
+            "Choisissez un nombre entier de 16 à 42",
+        ),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_DAY,
+            "Choisissez une valeur de 4 à 9,5 par pas de 0,5",
+        ),
+        (
+            keys::SETTINGS_ERROR_NON_BILLABLE,
+            "L’entrée n’est pas dans la liste des projets actifs assignés",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_WORK_ITEMS,
+            "L’entrée doit être un ticket actif assigné dans le(s) projet(s) non facturable(s) sélectionné(s)",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_UNIQUE,
+            "L’entrée ne peut apparaître que dans Réunions, Jours fériés locaux, Congé planifié ou Étude",
         ),
         (keys::REPORT_PERIOD, "Période"),
         (keys::REPORT_PERIOD_WEEK, "Mois"),
@@ -336,6 +448,43 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Année"),
         (keys::REPORT_PTO_TOTAL, "CP"),
         (keys::LIVE_REFRESH_APPLIED, "Feuille de temps mise à jour"),
+        (keys::LIVE_REFRESH_TOAST_CLOSE, "Fermer la notification"),
+        (keys::LIVE_REFRESH_WORK_KEYS_ADDED, "Nouvelles clés de ticket"),
+        (keys::LIVE_REFRESH_PR_UPDATES, "Mises à jour de PR"),
+        (
+            keys::LIVE_REFRESH_TEST_UPDATES,
+            "Mises à jour des tests Jenkins",
+        ),
+        (keys::DURATIONS, "Dur\u{00E9}es"),
+        (keys::CUSTOM_ACTIONS, "Actions personnalisées"),
+        (keys::CUSTOM_ACTION_WORK_ITEM, "Élément de travail"),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION,
+            "La description est obligatoire",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DURATION,
+            "La durée doit être valide (exemple : 2h 10m)",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM,
+            "L’élément doit être actif et dans les projets non facturables sélectionnés",
+        ),
+        (
+            keys::POPUP_ERROR_DURATION_POSITIVE,
+            "Chaque ligne non vide doit avoir une durée supérieure à zéro",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_REQUIRED,
+            "S’il y a plusieurs durées, chaque ligne avec durée doit avoir une description",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
+            "S’il y a plusieurs durées, les descriptions doivent être uniques",
+        ),
+        (keys::PULL_REQUESTS, "Demandes de tirage"),
+        (keys::LANGUAGE, "Langue"),
+        (keys::SHOW_MERGED_PR_ACTIVITY, "Afficher l\u{2019}activit\u{00E9} \u{AB}\u{00A0}fusionn\u{00E9}e\u{00A0}\u{BB}"),
     ]
     .into_iter()
     .collect();
@@ -363,6 +512,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::WEEKEND_TITLE, "Weekend"),
         (keys::TOTAL, "Totaal"),
         (keys::DESCRIPTION, "Beschrijving"),
+        (keys::DURATION, "Duur"),
         (keys::HOURS, "Uren"),
         (keys::DELETE, "Verwijderen"),
         (keys::ADD_NEW, "Nieuw toevoegen"),
@@ -414,6 +564,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
             keys::OPEN_PR_IN_BITBUCKET,
             "Pull request openen in Bitbucket",
         ),
+        (
+            keys::OPEN_TEST_RESULTS_IN_JENKINS,
+            "Testresultaten openen in Jenkins",
+        ),
         (keys::OPEN_SETTINGS, "Instellingen openen"),
         (keys::REFRESH_CACHED, "Werkitems in cache vernieuwen"),
         (keys::FORCE_PERIODIC_REFRESH, "Periodieke verversing forceren"),
@@ -430,6 +584,27 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (
             keys::LIST_INPUT_HINT,
             "Waarden gescheiden door komma, puntkomma of nieuwe regel",
+        ),
+        (keys::SETTINGS_ADD_ENTRY, "Item toevoegen…"),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_WEEK,
+            "Kies een geheel getal van 16 tot 42",
+        ),
+        (
+            keys::SETTINGS_ERROR_HOURS_PER_DAY,
+            "Kies een waarde van 4 tot 9,5 in stappen van 0,5",
+        ),
+        (
+            keys::SETTINGS_ERROR_NON_BILLABLE,
+            "Item staat niet in lijst met actieve toegewezen projecten",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_WORK_ITEMS,
+            "Item moet actief toegewezen werkitem zijn in geselecteerde niet-factureerbare project(en)",
+        ),
+        (
+            keys::SETTINGS_ERROR_REPORTING_UNIQUE,
+            "Item mag maar in één van Vergaderingen, Lokale feestdagen, Gepland verlof of Studie staan",
         ),
         (keys::REPORT_PERIOD, "Periode"),
         (keys::REPORT_PERIOD_WEEK, "Maand"),
@@ -449,6 +624,40 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::REPORT_YEAR_SCOPE, "Jaar"),
         (keys::REPORT_PTO_TOTAL, "Verlof"),
         (keys::LIVE_REFRESH_APPLIED, "Urenstaat bijgewerkt"),
+        (keys::LIVE_REFRESH_TOAST_CLOSE, "Melding sluiten"),
+        (keys::LIVE_REFRESH_WORK_KEYS_ADDED, "Nieuwe werksleutels"),
+        (keys::LIVE_REFRESH_PR_UPDATES, "PR-updates"),
+        (keys::LIVE_REFRESH_TEST_UPDATES, "Jenkins-testupdates"),
+        (keys::DURATIONS, "Duraties"),
+        (keys::CUSTOM_ACTIONS, "Aangepaste acties"),
+        (keys::CUSTOM_ACTION_WORK_ITEM, "Werkitem"),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION,
+            "Beschrijving is verplicht",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DURATION,
+            "Duur moet geldig zijn (voorbeeld: 2h 10m)",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM,
+            "Werkitem moet actief zijn en in geselecteerde niet-factureerbare project(en) staan",
+        ),
+        (
+            keys::POPUP_ERROR_DURATION_POSITIVE,
+            "Elke niet-lege rij moet een duur groter dan nul hebben",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_REQUIRED,
+            "Bij meerdere duren moet elke rij met duur een beschrijving hebben",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
+            "Bij meerdere duren moeten beschrijvingen uniek zijn",
+        ),
+        (keys::PULL_REQUESTS, "Pull requests"),
+        (keys::LANGUAGE, "Taal"),
+        (keys::SHOW_MERGED_PR_ACTIVITY, "Toon \u{2018}samengevoegde\u{2019} activiteit"),
     ]
     .into_iter()
     .collect();
