@@ -128,8 +128,8 @@ main {
 	border: 1px solid #ccc;
 	border-radius: 8px;
 	padding: 1.5rem;
-	width: min(80vw, 1100px);
-	max-height: 80vh;
+	width: min(55vw, 1100px);
+	max-height: 92vh;
 	overflow: auto;
 	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
@@ -272,6 +272,66 @@ main {
 	align-items: center;
 	justify-content: center;
 	cursor: help;
+}
+
+.settings-custom-actions-panel {
+	grid-column: 1 / -1;
+	display: grid;
+	gap: 0.45rem;
+}
+
+.settings-custom-actions-header {
+	display: flex;
+	justify-content: flex-end;
+}
+
+.settings-custom-action-add {
+	width: auto;
+	padding: 4px 10px;
+}
+
+.settings-custom-action-columns {
+	display: grid;
+	grid-template-columns: 2rem minmax(12rem, 1fr) minmax(
+			14rem,
+			1.8fr
+		) 8.5rem 6.2rem;
+	gap: 0.45rem;
+	font-size: 0.78rem;
+	font-weight: 600;
+	color: #555;
+}
+
+.settings-custom-actions-list {
+	display: grid;
+	gap: 0.45rem;
+}
+
+.settings-custom-action-row {
+	position: relative;
+	display: grid;
+	grid-template-columns: 2rem minmax(12rem, 1fr) minmax(
+			14rem,
+			1.8fr
+		) 8.5rem 6.2rem;
+	gap: 0.45rem;
+	align-items: center;
+	padding-right: 1.4rem;
+}
+
+.settings-custom-action-index {
+	text-align: center;
+	color: #666;
+	font-variant-numeric: tabular-nums;
+}
+
+.settings-custom-action-field {
+	position: relative;
+}
+
+.settings-custom-action-delete {
+	width: auto;
+	padding: 4px 8px;
 }
 
 .dialog-buttons {
@@ -542,6 +602,42 @@ main {
 .nav-refresh:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
+}
+
+.custom-action-separator {
+	display: inline-block;
+	width: 1px;
+	height: 22px;
+	background: #c8d3df;
+	margin: 0 0.2rem;
+}
+
+.nav-custom-action {
+	position: relative;
+	width: 40px;
+	height: 32px;
+}
+
+.nav-custom-action svg {
+	width: 21px;
+	height: 21px;
+	display: block;
+}
+
+.custom-action-index {
+	position: absolute;
+	right: 3px;
+	bottom: 2px;
+	font-size: 0.62rem;
+	line-height: 1;
+	font-weight: 700;
+	color: #1f2937;
+	background: rgba(255, 255, 255, 0.9);
+	border: 1px solid #c8d3df;
+	border-radius: 8px;
+	padding: 0.02rem 0.2rem;
+	min-width: 0.9rem;
+	text-align: center;
 }
 
 .circle {
@@ -1137,9 +1233,42 @@ main {
 	min-width: 35ch;
 }
 
+.popup-comment-container {
+	position: relative;
+	flex: 1;
+}
+
 .popup-comment-new {
 	resize: vertical;
 	min-height: 1lh;
+}
+
+.popup-field-invalid {
+	border-color: #d32f2f;
+}
+
+.popup-field-invalid:focus {
+	outline: none;
+	box-shadow: 0 0 0 1px #d32f2f;
+}
+
+.popup-error-indicator {
+	position: absolute;
+	top: 0.25rem;
+	right: 0.35rem;
+	width: 0.95rem;
+	height: 0.95rem;
+	border-radius: 50%;
+	background: #d32f2f;
+	color: #fff;
+	font-size: 0.68rem;
+	font-weight: bold;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: help;
+	pointer-events: auto;
+	z-index: 2;
 }
 
 .popup-actions {
@@ -1339,6 +1468,11 @@ a {
 	max-height: 200px;
 	overflow-y: auto;
 	min-width: 0;
+}
+
+.adf-preview.popup-field-invalid {
+	border-left-color: #d32f2f;
+	box-shadow: inset 0 0 0 1px rgba(211, 47, 47, 0.35);
 }
 
 .popup-link {

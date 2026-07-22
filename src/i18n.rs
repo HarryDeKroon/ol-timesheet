@@ -28,6 +28,7 @@ pub mod keys {
     pub const WEEKEND_TITLE: &str = "weekend_title";
     pub const TOTAL: &str = "total";
     pub const DESCRIPTION: &str = "description";
+    pub const DURATION: &str = "duration";
     pub const HOURS: &str = "hours";
     pub const DELETE: &str = "delete";
     pub const ADD_NEW: &str = "add_new";
@@ -115,6 +116,16 @@ pub mod keys {
     pub const LIVE_REFRESH_PR_UPDATES: &str = "live_refresh_pr_updates";
     pub const LIVE_REFRESH_TEST_UPDATES: &str = "live_refresh_test_updates";
     pub const DURATIONS: &str = "durations";
+    pub const CUSTOM_ACTIONS: &str = "custom_actions";
+    pub const CUSTOM_ACTION_WORK_ITEM: &str = "custom_action_work_item";
+    pub const SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION: &str =
+        "settings_error_custom_action_description";
+    pub const SETTINGS_ERROR_CUSTOM_ACTION_DURATION: &str = "settings_error_custom_action_duration";
+    pub const SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM: &str =
+        "settings_error_custom_action_work_item";
+    pub const POPUP_ERROR_DURATION_POSITIVE: &str = "popup_error_duration_positive";
+    pub const POPUP_ERROR_DESCRIPTION_REQUIRED: &str = "popup_error_description_required";
+    pub const POPUP_ERROR_DESCRIPTION_UNIQUE: &str = "popup_error_description_unique";
     pub const PULL_REQUESTS: &str = "pull_requests";
     pub const LANGUAGE: &str = "language";
     pub const SHOW_MERGED_PR_ACTIVITY: &str = "show_merged_pr_activity";
@@ -146,6 +157,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::WEEKEND_TITLE, "Weekend"),
         (keys::TOTAL, "Total"),
         (keys::DESCRIPTION, "Description"),
+        (keys::DURATION, "Duration"),
         (keys::HOURS, "Hours"),
         (keys::DELETE, "Delete"),
         (keys::ADD_NEW, "Add new"),
@@ -253,6 +265,32 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::LIVE_REFRESH_PR_UPDATES, "PR updates"),
         (keys::LIVE_REFRESH_TEST_UPDATES, "Jenkins test updates"),
         (keys::DURATIONS, "Durations"),
+        (keys::CUSTOM_ACTIONS, "Custom actions"),
+        (keys::CUSTOM_ACTION_WORK_ITEM, "Work item"),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION,
+            "Description is required",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DURATION,
+            "Duration must be valid (example: 2h 10m)",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM,
+            "Work item must be active and in selected non-billable project(s)",
+        ),
+        (
+            keys::POPUP_ERROR_DURATION_POSITIVE,
+            "Each non-blank row must have duration greater than zero",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_REQUIRED,
+            "When multiple durations exist, each duration row must have a description",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
+            "When multiple durations exist, descriptions must be unique",
+        ),
         (keys::PULL_REQUESTS, "Pull requests"),
         (keys::LANGUAGE, "Language"),
         (keys::SHOW_MERGED_PR_ACTIVITY, "Show \u{2018}merged\u{2019} activity"),
@@ -289,6 +327,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::WEEKEND_TITLE, "Fin-de-semaine"),
         (keys::TOTAL, "Total"),
         (keys::DESCRIPTION, "Description"),
+        (keys::DURATION, "Durée"),
         (keys::HOURS, "Heures"),
         (keys::DELETE, "Supprimer"),
         (keys::ADD_NEW, "Ajouter"),
@@ -417,6 +456,32 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
             "Mises à jour des tests Jenkins",
         ),
         (keys::DURATIONS, "Dur\u{00E9}es"),
+        (keys::CUSTOM_ACTIONS, "Actions personnalisées"),
+        (keys::CUSTOM_ACTION_WORK_ITEM, "Élément de travail"),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION,
+            "La description est obligatoire",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DURATION,
+            "La durée doit être valide (exemple : 2h 10m)",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM,
+            "L’élément doit être actif et dans les projets non facturables sélectionnés",
+        ),
+        (
+            keys::POPUP_ERROR_DURATION_POSITIVE,
+            "Chaque ligne non vide doit avoir une durée supérieure à zéro",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_REQUIRED,
+            "S’il y a plusieurs durées, chaque ligne avec durée doit avoir une description",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
+            "S’il y a plusieurs durées, les descriptions doivent être uniques",
+        ),
         (keys::PULL_REQUESTS, "Demandes de tirage"),
         (keys::LANGUAGE, "Langue"),
         (keys::SHOW_MERGED_PR_ACTIVITY, "Afficher l\u{2019}activit\u{00E9} \u{AB}\u{00A0}fusionn\u{00E9}e\u{00A0}\u{BB}"),
@@ -447,6 +512,7 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::WEEKEND_TITLE, "Weekend"),
         (keys::TOTAL, "Totaal"),
         (keys::DESCRIPTION, "Beschrijving"),
+        (keys::DURATION, "Duur"),
         (keys::HOURS, "Uren"),
         (keys::DELETE, "Verwijderen"),
         (keys::ADD_NEW, "Nieuw toevoegen"),
@@ -563,6 +629,32 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::LIVE_REFRESH_PR_UPDATES, "PR-updates"),
         (keys::LIVE_REFRESH_TEST_UPDATES, "Jenkins-testupdates"),
         (keys::DURATIONS, "Duraties"),
+        (keys::CUSTOM_ACTIONS, "Aangepaste acties"),
+        (keys::CUSTOM_ACTION_WORK_ITEM, "Werkitem"),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION,
+            "Beschrijving is verplicht",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_DURATION,
+            "Duur moet geldig zijn (voorbeeld: 2h 10m)",
+        ),
+        (
+            keys::SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM,
+            "Werkitem moet actief zijn en in geselecteerde niet-factureerbare project(en) staan",
+        ),
+        (
+            keys::POPUP_ERROR_DURATION_POSITIVE,
+            "Elke niet-lege rij moet een duur groter dan nul hebben",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_REQUIRED,
+            "Bij meerdere duren moet elke rij met duur een beschrijving hebben",
+        ),
+        (
+            keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
+            "Bij meerdere duren moeten beschrijvingen uniek zijn",
+        ),
         (keys::PULL_REQUESTS, "Pull requests"),
         (keys::LANGUAGE, "Taal"),
         (keys::SHOW_MERGED_PR_ACTIVITY, "Toon \u{2018}samengevoegde\u{2019} activiteit"),

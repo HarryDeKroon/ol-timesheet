@@ -2,18 +2,20 @@ use crate::components::cell_popup::CellPopup;
 use crate::components::popup_flush::{provide_popup_flush_context, use_popup_flush};
 use crate::components::report_overlay::{ReportRibbonControls, ReportView, create_report_state};
 use crate::components::settings_dialog::SettingsDialog;
+#[cfg(feature = "hydrate")]
+use crate::components::settings_dialog::get_settings;
 use crate::components::timer::{
     PersistedTimerPopup, load_persisted_timer_popups, provide_timer_context,
 };
 use crate::components::week_navigator::{WeekNavigator, week_monday};
 use crate::connection::use_connection;
-use crate::formatting::{format_hours_long, format_hours_short};
+use crate::formatting::{format_hours_long, format_hours_short, parse_hours};
 use crate::i18n::{I18n, keys};
 #[cfg(feature = "hydrate")]
 use crate::model::TimesheetRefreshDiff;
 #[cfg(feature = "hydrate")]
 use crate::model::TimesheetWsMessage;
-use crate::model::{ConnectionStatus, TimesheetData, WorkItem, WorklogEntry};
+use crate::model::{ConnectionStatus, CustomAction, TimesheetData, WorkItem, WorklogEntry};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use leptos::prelude::*;
 #[cfg(feature = "hydrate")]
@@ -233,6 +235,10 @@ fn cell_key_date(cell_key: &str) -> Option<NaiveDate> {
     cell_key
         .rsplit_once(':')
         .and_then(|(_, date)| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+}
+
+fn pr_number(url: &str) -> Option<&str> {
+    url.rsplit('/').next().filter(|s| !s.is_empty())
 }
 
 #[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
@@ -931,6 +937,30 @@ struct PopupInfo {
     initial_digit: Option<char>,
 }
 
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum PopupSeed {
+    Hours(char),
+    Description(char),
+}
+
+fn normalize_action_description(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn find_most_recent_matching_worklog(entries: &[WorklogEntry], description: &str) -> Option<usize> {
+    let target = normalize_action_description(description);
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| normalize_action_description(&entry.comment) == target)
+        .map(|(idx, _)| idx)
+        .last()
+}
+
 impl Clone for PopupInfo {
     fn clone(&self) -> Self {
         Self {
@@ -1164,6 +1194,222 @@ fn schedule_digit_fill_for_popup(popup_id: u32, digit: char) {
     fill_cb.forget();
 }
 
+#[cfg(feature = "hydrate")]
+fn schedule_description_fill_for_popup(popup_id: u32, letter: char) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        for class_name in ["popup-comment", "popup-comment-new"] {
+            let nodes = popup_node.get_elements_by_class_name(class_name);
+            for idx in 0..nodes.length() {
+                let Some(node) = nodes.item(idx) else {
+                    continue;
+                };
+                let Some(input) = node.dyn_ref::<web_sys::HtmlTextAreaElement>() else {
+                    continue;
+                };
+                if input.value().trim().is_empty() {
+                    let value = letter.to_string();
+                    input.set_value(&value);
+                    if let Ok(ev) = web_sys::Event::new("input") {
+                        let _ = input.dispatch_event(&ev);
+                    }
+                    let _ = input.focus();
+                    return;
+                }
+            }
+        }
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+#[cfg(feature = "hydrate")]
+fn new_request_nonce() -> String {
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "ssr")] {
+            format!("{}:{}", chrono::Utc::now().timestamp(), uuid::Uuid::new_v4())
+        } else {
+            let ts = (js_sys::Date::now() / 1000.0) as i64;
+            let r1 = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+            let r2 = (js_sys::Math::random() * f64::from(u32::MAX)) as u32;
+            format!("{}:{:08x}{:08x}", ts, r1, r2)
+        }
+    }
+}
+
+fn custom_action_title(action: &CustomAction) -> String {
+    let key = action.work_item_key.trim();
+    let description = action.description.trim();
+    let duration = action.duration.trim();
+    let details = [description, duration]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !key.is_empty() && !details.is_empty() {
+        format!("{}: {}", key, details)
+    } else if !key.is_empty() {
+        key.to_string()
+    } else {
+        details
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_custom_action_focus_existing_duration(popup_id: u32, existing_index: usize) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let rows = popup_node.get_elements_by_class_name("popup-entry-group");
+        let Some(row) = rows.item(existing_index as u32) else {
+            return;
+        };
+        let Some(hours_node) = row
+            .dyn_ref::<web_sys::Element>()
+            .and_then(|el| el.query_selector(".popup-hours").ok().flatten())
+        else {
+            return;
+        };
+        let Some(input) = hours_node.dyn_ref::<web_sys::HtmlInputElement>() else {
+            return;
+        };
+        let _ = input.focus();
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_custom_action_toggle_existing_timer(popup_id: u32, existing_index: usize) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let rows = popup_node.get_elements_by_class_name("popup-entry-group");
+        let Some(row) = rows.item(existing_index as u32) else {
+            return;
+        };
+        let Some(button_node) = row
+            .dyn_ref::<web_sys::Element>()
+            .and_then(|el| el.query_selector(".timer-play-pause").ok().flatten())
+        else {
+            return;
+        };
+        let Some(button) = button_node.dyn_ref::<web_sys::HtmlElement>() else {
+            return;
+        };
+        let _ = button.click();
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+#[cfg(feature = "hydrate")]
+fn schedule_custom_action_focus_new_duration(popup_id: u32, description: String) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let fill_cb = Closure::<dyn FnMut()>::new(move || {
+        let popup_selector = format!(r#"[data-popup-id="{}"]"#, popup_id);
+        let Some(popup_node) = document.query_selector(&popup_selector).ok().flatten() else {
+            return;
+        };
+        let rows = popup_node.get_elements_by_class_name("popup-new");
+        for idx in 0..rows.length() {
+            let Some(row) = rows.item(idx) else {
+                continue;
+            };
+            let Some(comment_node) = row
+                .dyn_ref::<web_sys::Element>()
+                .and_then(|el| el.query_selector(".popup-comment-new").ok().flatten())
+            else {
+                continue;
+            };
+            let Some(comment_input) = comment_node.dyn_ref::<web_sys::HtmlTextAreaElement>() else {
+                continue;
+            };
+            let existing_comment = comment_input.value();
+            if existing_comment.trim().is_empty() || existing_comment.trim() == description {
+                comment_input.set_value(&description);
+                if let Ok(ev) = web_sys::Event::new("input") {
+                    let _ = comment_input.dispatch_event(&ev);
+                }
+                if let Some(hours_input) = row
+                    .dyn_ref::<web_sys::Element>()
+                    .and_then(|el| el.query_selector(".popup-hours").ok().flatten())
+                    .and_then(|node| node.dyn_ref::<web_sys::HtmlInputElement>().cloned())
+                {
+                    let _ = hours_input.focus();
+                }
+                break;
+            }
+        }
+    });
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
+    fill_cb.forget();
+}
+
+fn refresh_custom_actions(custom_actions: RwSignal<Vec<CustomAction>>) {
+    #[cfg(feature = "hydrate")]
+    leptos::task::spawn_local(async move {
+        if let Ok(settings) = get_settings().await {
+            custom_actions.set(
+                settings
+                    .custom_actions
+                    .into_iter()
+                    .filter(|action| !action.description.trim().is_empty())
+                    .take(5)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    });
+    #[cfg(not(feature = "hydrate"))]
+    let _ = custom_actions;
+}
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 #[component]
@@ -1183,7 +1429,9 @@ pub fn TimesheetView() -> impl IntoView {
     // Signals for user avatar and name
     let user_avatar = RwSignal::new(String::new());
     let user_name = RwSignal::new(String::new());
+    let custom_actions = RwSignal::new(Vec::<CustomAction>::new());
     let conn = use_connection();
+    refresh_custom_actions(custom_actions);
 
     // ── Language selection logic ──
     use std::sync::Arc;
@@ -1739,6 +1987,242 @@ pub fn TimesheetView() -> impl IntoView {
         });
     };
 
+    let component_owner_for_action = component_owner.clone();
+    let trigger_custom_action = Callback::new(move |index: usize| {
+        if !conn.is_available() {
+            return;
+        }
+        let Some(action) = custom_actions.get_untracked().get(index).cloned() else {
+            return;
+        };
+        let Some(ts) = last_data.get_untracked() else {
+            return;
+        };
+        if ts.work_items.is_empty() {
+            return;
+        }
+
+        let focused_context = focused_cell.get_untracked().and_then(|(row, col)| {
+            let nw = num_weeks.get_untracked().max(1);
+            let col_count = nw * 6;
+            if row >= ts.work_items.len() || col >= col_count {
+                return None;
+            }
+            let week_idx = col / 6;
+            let day_idx = col % 6;
+            let start_monday =
+                selected_monday.get_untracked() - Duration::weeks((nw.saturating_sub(1)) as i64);
+            let monday = start_monday + Duration::weeks(week_idx as i64);
+            let date = if day_idx == 5 {
+                monday + Duration::days(5)
+            } else {
+                monday + Duration::days(day_idx as i64)
+            };
+            Some((ts.work_items[row].key.clone(), date, day_idx == 5))
+        });
+
+        let target_issue = {
+            let explicit = action.work_item_key.trim().to_uppercase();
+            if !explicit.is_empty() {
+                explicit
+            } else if let Some((issue_key, _, _)) = &focused_context {
+                issue_key.clone()
+            } else {
+                ts.work_items[0].key.clone()
+            }
+        };
+        let (target_date, is_weekend_cell) = if let Some((_, date, weekend)) = focused_context {
+            (date, weekend)
+        } else {
+            (today.get_untracked(), false)
+        };
+
+        let target_entries = if is_weekend_cell {
+            ts.cell_worklogs(&target_issue, target_date)
+                .into_iter()
+                .chain(ts.cell_worklogs(&target_issue, target_date + Duration::days(1)))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            ts.cell_worklogs(&target_issue, target_date)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let trimmed_description = action.description.trim().to_string();
+        let matching_index = find_most_recent_matching_worklog(&target_entries, &trimmed_description);
+        let matching_entry = matching_index.and_then(|idx| target_entries.get(idx).cloned());
+        let matching_has_duration = matching_entry
+            .as_ref()
+            .map(|entry| entry.hours > 0.0)
+            .unwrap_or(false);
+
+        let i = i18n.get_untracked();
+        let action_duration_hours = if action.duration.trim().is_empty() {
+            None
+        } else {
+            parse_hours(
+                action.duration.trim(),
+                ts.hours_per_day,
+                ts.hours_per_week,
+                i.decimal_separator,
+                &i.t(keys::WEEK_ABBR),
+                &i.t(keys::DAY_ABBR),
+                &i.t(keys::HOUR_ABBR),
+                &i.t(keys::MINUTE_ABBR),
+            )
+        };
+        let action_has_duration = action_duration_hours.is_some();
+        let target_is_today = if is_weekend_cell {
+            let today_date = today.get_untracked();
+            today_date == target_date || today_date == target_date + Duration::days(1)
+        } else {
+            today.get_untracked() == target_date
+        };
+        #[cfg(not(feature = "hydrate"))]
+        let _ = (action_has_duration, target_is_today);
+
+        if let Some(hours) = action_duration_hours
+            && (!matching_has_duration
+                || matching_entry.is_none())
+        {
+            let issue_key = target_issue.clone();
+            let description = matching_entry
+                .as_ref()
+                .map(|entry| entry.comment.clone())
+                .unwrap_or_else(|| trimmed_description.clone());
+            let existing_id = matching_entry
+                .as_ref()
+                .map(|entry| entry.id.clone())
+                .unwrap_or_default();
+            let existing_adf = matching_entry.and_then(|entry| entry.comment_adf.clone());
+            #[cfg(feature = "hydrate")]
+            leptos::task::spawn_local(async move {
+                conn.request_started();
+                let result = if existing_id.is_empty() {
+                    crate::components::cell_popup::server_add_worklog(
+                        issue_key.clone(),
+                        target_date,
+                        hours,
+                        description,
+                        new_request_nonce(),
+                    )
+                    .await
+                } else {
+                    crate::components::cell_popup::server_update_worklog(
+                        issue_key.clone(),
+                        existing_id,
+                        hours,
+                        description,
+                        existing_adf,
+                        new_request_nonce(),
+                    )
+                    .await
+                };
+                conn.request_finished();
+                if result.is_ok() {
+                    on_popup_changed.run(issue_key);
+                }
+            });
+            #[cfg(not(feature = "hydrate"))]
+            {
+                let _ = hours;
+                let _ = issue_key;
+                let _ = matching_has_duration;
+                let _ = description;
+                let _ = existing_id;
+                let _ = existing_adf;
+            }
+            return;
+        }
+
+        let popup_id = if let Some(existing_id) = open_popups.with_untracked(|ps| {
+            ps.iter()
+                .find(|popup| popup.issue_key == target_issue && popup.date == target_date)
+                .map(|popup| popup.popup_id)
+        }) {
+            existing_id
+        } else {
+            let issue_summary = ts
+                .work_items
+                .iter()
+                .find(|item| item.key == target_issue)
+                .map(|item| item.summary.clone())
+                .unwrap_or_default();
+            let mut pr_links = ts
+                .bitbucket_activity
+                .iter()
+                .filter_map(|(cell_key, activity)| {
+                    cell_key
+                        .strip_prefix(&format!("{}:", target_issue))
+                        .map(|_| activity.pr_links.clone())
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            pr_links.sort();
+            pr_links.dedup();
+            let popup_id = NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let is_today = if is_weekend_cell {
+                let today_date = today.get_untracked();
+                today_date == target_date || today_date == target_date + Duration::days(1)
+            } else {
+                today.get_untracked() == target_date
+            };
+            let pos_style =
+                compute_popup_style(&target_issue, &target_date.to_string(), target_entries.len());
+            let popup = PopupInfo {
+                popup_id,
+                issue_key: target_issue.clone(),
+                issue_summary,
+                date: target_date,
+                entries: target_entries.clone(),
+                hours_per_day: ts.hours_per_day,
+                hours_per_week: ts.hours_per_week,
+                suggested_comments: Vec::new(),
+                suggested_comment: None,
+                commit_messages: Vec::new(),
+                commit_links: Vec::new(),
+                test_result_links: Vec::new(),
+                pr_links,
+                is_git_log: false,
+                is_weekend: is_weekend_cell,
+                is_today,
+                position_style: component_owner_for_action.with(|| RwSignal::new(pos_style)),
+                site_url: ts.site_url.clone(),
+                restored_timer_popup: None,
+                initial_digit: None,
+            };
+            open_popups.update(|ps| ps.push(popup));
+            popup_id
+        };
+
+        #[cfg(feature = "hydrate")]
+        match (action_has_duration, matching_index, target_is_today) {
+            (true, Some(existing_index), true) => {
+                schedule_custom_action_toggle_existing_timer(popup_id, existing_index);
+            }
+            (true, Some(existing_index), false) => {
+                schedule_custom_action_focus_existing_duration(popup_id, existing_index);
+            }
+            (false, Some(existing_index), true) => {
+                schedule_custom_action_toggle_existing_timer(popup_id, existing_index);
+            }
+            (false, Some(existing_index), false) => {
+                schedule_custom_action_focus_existing_duration(popup_id, existing_index);
+            }
+            (false, None, _) => {
+                schedule_custom_action_focus_new_duration(popup_id, trimmed_description.clone());
+            }
+            _ => {}
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = popup_id;
+    });
+
+    let on_settings_saved = Callback::new(move |_: ()| {
+        refresh_custom_actions(custom_actions);
+        show_settings.set(false);
+    });
     let on_close_settings = Callback::new(move |_: ()| {
         show_settings.set(false);
     });
@@ -1790,6 +2274,7 @@ pub fn TimesheetView() -> impl IntoView {
         let report_state_for_hotkey = report_state.clone();
         let flush_mgr_for_hotkey = flush_mgr.clone();
         let conn_for_hotkey = conn.clone();
+        let trigger_custom_action_for_hotkey = trigger_custom_action;
         let focus_last_cell_cb =
             wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
                 move |ev: web_sys::KeyboardEvent| {
@@ -1869,7 +2354,18 @@ pub fn TimesheetView() -> impl IntoView {
                             _ => {}
                         }
                     } else {
-                        match key.to_ascii_lowercase().as_str() {
+                        let key_lower = key.to_ascii_lowercase();
+                        if key_lower.len() == 1 {
+                            if let Some(digit) =
+                                key_lower.chars().next().filter(|c| ('1'..='5').contains(c))
+                            {
+                                ev.prevent_default();
+                                let idx = (digit as u8 - b'1') as usize;
+                                trigger_custom_action_for_hotkey.run(idx);
+                                return;
+                            }
+                        }
+                        match key_lower.as_str() {
                             "l" => {
                                 ev.prevent_default();
                                 if let Some((row, col)) = focused_cell_for_hotkey.get_untracked() {
@@ -2034,6 +2530,44 @@ pub fn TimesheetView() -> impl IntoView {
                                 } disabled=move || is_refreshing.get() title=move || i18n.get().t(keys::REFRESH_CACHED)>
                                     <span class="icon-refresh">{"🔄"}</span>
                                 </button>
+                                {move || {
+                                    let actions = custom_actions.get();
+                                    if actions.is_empty() {
+                                        return view! { <></> }.into_any();
+                                    }
+                                    view! {
+                                        <>
+                                            <span class="custom-action-separator" aria-hidden="true"></span>
+                                            {actions
+                                                .into_iter()
+                                                .enumerate()
+                                                .map(|(idx, action)| {
+                                                    let title = custom_action_title(&action);
+                                                    let on_click = {
+                                                        let trigger_custom_action = trigger_custom_action;
+                                                        move |_| trigger_custom_action.run(idx)
+                                                    };
+                                                    view! {
+                                                        <button
+                                                            class="nav-btn nav-icon-btn nav-custom-action"
+                                                            on:click=on_click
+                                                            title={title}
+                                                            disabled=move || !conn.is_available()
+                                                        >
+                                                            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                                                <rect x="4" y="3.5" width="13.5" height="17" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+                                                                <path d="M7 8h8M7 12h8M7 16h6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"></path>
+                                                                <path d="M17.5 16.5l1.3 3.5 1.8-1.4 1.4 1.9 1.2-.9-1.4-1.9 2.2-.5-2.8-2.4z" fill="currentColor"></path>
+                                                            </svg>
+                                                            <span class="custom-action-index">{idx + 1}</span>
+                                                        </button>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </>
+                                    }
+                                    .into_any()
+                                }}
                             </>
                         }
                         .into_any()
@@ -2313,7 +2847,7 @@ pub fn TimesheetView() -> impl IntoView {
                                     let site_url_for_cell = site_url.clone();
                                     let owner_for_cell_popup = component_owner.clone();
                                     let row_pr_links_for_cell = row_pr_links.clone();
-                                    let open_weekday_popup: std::rc::Rc<dyn Fn(Option<char>)> = std::rc::Rc::new({
+                                    let open_weekday_popup: std::rc::Rc<dyn Fn(Option<PopupSeed>)> = std::rc::Rc::new({
                                         let ck2 = ck2.clone();
                                         let entries2 = entries2.clone();
                                         let bb_activity_for_closure = bb_activity_for_closure.clone();
@@ -2321,7 +2855,7 @@ pub fn TimesheetView() -> impl IntoView {
                                         let row_pr_links_for_cell = row_pr_links_for_cell.clone();
                                         let site_url_for_cell = site_url_for_cell.clone();
                                         let owner_for_cell_popup = owner_for_cell_popup.clone();
-                                        move |digit: Option<char>| {
+                                        move |seed: Option<PopupSeed>| {
                                             let existing_popup_id = open_popups.with(|ps| {
                                                 ps.iter()
                                                     .find(|p| p.issue_key == ck2 && p.date == cell_date)
@@ -2329,8 +2863,11 @@ pub fn TimesheetView() -> impl IntoView {
                                             });
                                             if let Some(popup_id) = existing_popup_id {
                                                 #[cfg(feature = "hydrate")]
-                                                if let Some(d) = digit {
-                                                    schedule_digit_fill_for_popup(popup_id, d);
+                                                if let Some(seed) = seed {
+                                                    match seed {
+                                                        PopupSeed::Hours(d) => schedule_digit_fill_for_popup(popup_id, d),
+                                                        PopupSeed::Description(ch) => schedule_description_fill_for_popup(popup_id, ch),
+                                                    }
                                                 }
                                                 #[cfg(not(feature = "hydrate"))]
                                                 let _ = popup_id;
@@ -2390,9 +2927,19 @@ pub fn TimesheetView() -> impl IntoView {
                                                     .with(|| RwSignal::new(pos_style)),
                                                 site_url: site_url_for_cell.clone(),
                                                 restored_timer_popup: None,
-                                                initial_digit: digit,
+                                                initial_digit: match seed {
+                                                    Some(PopupSeed::Hours(d)) => Some(d),
+                                                    _ => None,
+                                                },
                                             };
+                                            let popup_id = popup.popup_id;
                                             open_popups.update(|ps| ps.push(popup));
+                                            #[cfg(feature = "hydrate")]
+                                            if let Some(PopupSeed::Description(ch)) = seed {
+                                                schedule_description_fill_for_popup(popup_id, ch);
+                                            }
+                                            #[cfg(not(feature = "hydrate"))]
+                                            let _ = popup_id;
                                         }
                                     });
                                     let open_weekday_popup_click = open_weekday_popup.clone();
@@ -2470,9 +3017,23 @@ pub fn TimesheetView() -> impl IntoView {
                                                         }
                                                         _ => {
                                                             if key.len() == 1 {
-                                                                if let Some(digit) = key.chars().next().filter(|c| c.is_ascii_digit()) {
+                                                                if let Some(digit) = key.chars().next().filter(|c| {
+                                                                    c.is_ascii_digit()
+                                                                        && !ev.alt_key()
+                                                                        && !ev.ctrl_key()
+                                                                        && !ev.meta_key()
+                                                                        && !ev.shift_key()
+                                                                }) {
                                                                     ev.prevent_default();
-                                                                    open_weekday_popup_keydown(Some(digit));
+                                                                    open_weekday_popup_keydown(Some(PopupSeed::Hours(digit)));
+                                                                } else if let Some(letter) = key.chars().next().filter(|c| {
+                                                                    c.is_ascii_alphabetic()
+                                                                        && !ev.alt_key()
+                                                                        && !ev.ctrl_key()
+                                                                        && !ev.meta_key()
+                                                                }) {
+                                                                    ev.prevent_default();
+                                                                    open_weekday_popup_keydown(Some(PopupSeed::Description(letter)));
                                                                 }
                                                             }
                                                         }
@@ -2667,7 +3228,7 @@ pub fn TimesheetView() -> impl IntoView {
                                 let site_url_for_we = site_url.clone();
                                 let owner_for_weekend_popup = component_owner.clone();
                                 let row_pr_links_for_weekend = row_pr_links.clone();
-                                let open_weekend_popup: std::rc::Rc<dyn Fn(Option<char>)> = std::rc::Rc::new({
+                                let open_weekend_popup: std::rc::Rc<dyn Fn(Option<PopupSeed>)> = std::rc::Rc::new({
                                     let we_key2 = we_key2.clone();
                                     let we_entries2 = we_entries2.clone();
                                     let bb_activity_for_closure = bb_activity_for_closure.clone();
@@ -2675,7 +3236,7 @@ pub fn TimesheetView() -> impl IntoView {
                                     let row_pr_links_for_weekend = row_pr_links_for_weekend.clone();
                                     let site_url_for_we = site_url_for_we.clone();
                                     let owner_for_weekend_popup = owner_for_weekend_popup.clone();
-                                    move |digit: Option<char>| {
+                                    move |seed: Option<PopupSeed>| {
                                         let existing_popup_id = open_popups.with(|ps| {
                                             ps.iter()
                                                 .find(|p| p.issue_key == we_key2 && p.date == sat)
@@ -2683,8 +3244,11 @@ pub fn TimesheetView() -> impl IntoView {
                                         });
                                         if let Some(popup_id) = existing_popup_id {
                                             #[cfg(feature = "hydrate")]
-                                            if let Some(d) = digit {
-                                                schedule_digit_fill_for_popup(popup_id, d);
+                                            if let Some(seed) = seed {
+                                                match seed {
+                                                    PopupSeed::Hours(d) => schedule_digit_fill_for_popup(popup_id, d),
+                                                    PopupSeed::Description(ch) => schedule_description_fill_for_popup(popup_id, ch),
+                                                }
                                             }
                                             #[cfg(not(feature = "hydrate"))]
                                             let _ = popup_id;
@@ -2765,9 +3329,19 @@ pub fn TimesheetView() -> impl IntoView {
                                                 .with(|| RwSignal::new(pos_style)),
                                             site_url: site_url_for_we.clone(),
                                             restored_timer_popup: None,
-                                            initial_digit: digit,
+                                            initial_digit: match seed {
+                                                Some(PopupSeed::Hours(d)) => Some(d),
+                                                _ => None,
+                                            },
                                         };
+                                        let popup_id = popup.popup_id;
                                         open_popups.update(|ps| ps.push(popup));
+                                        #[cfg(feature = "hydrate")]
+                                        if let Some(PopupSeed::Description(ch)) = seed {
+                                            schedule_description_fill_for_popup(popup_id, ch);
+                                        }
+                                        #[cfg(not(feature = "hydrate"))]
+                                        let _ = popup_id;
                                     }
                                 });
                                 let open_weekend_popup_click = open_weekend_popup.clone();
@@ -2852,11 +3426,23 @@ pub fn TimesheetView() -> impl IntoView {
                                                     }
                                                     _ => {
                                                         if key.len() == 1 {
-                                                            if let Some(digit) =
-                                                                key.chars().next().filter(|c| c.is_ascii_digit())
-                                                            {
+                                                            if let Some(digit) = key.chars().next().filter(|c| {
+                                                                c.is_ascii_digit()
+                                                                    && !ev.alt_key()
+                                                                    && !ev.ctrl_key()
+                                                                    && !ev.meta_key()
+                                                                    && !ev.shift_key()
+                                                            }) {
                                                                 ev.prevent_default();
-                                                                open_weekend_popup_keydown(Some(digit));
+                                                                open_weekend_popup_keydown(Some(PopupSeed::Hours(digit)));
+                                                            } else if let Some(letter) = key.chars().next().filter(|c| {
+                                                                c.is_ascii_alphabetic()
+                                                                    && !ev.alt_key()
+                                                                    && !ev.ctrl_key()
+                                                                    && !ev.meta_key()
+                                                            }) {
+                                                                ev.prevent_default();
+                                                                open_weekend_popup_keydown(Some(PopupSeed::Description(letter)));
                                                             }
                                                         }
                                                     }
@@ -3095,7 +3681,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                                         <div class="refresh-toast-links">
                                                                             {links.into_iter().map(|link| {
                                                                                 view! {
-                                                                                    <a href={link.clone()} target="_blank" rel="noopener noreferrer">{link.clone()}</a>
+                                                                                    <a href={link.clone()} target="_blank" rel="noopener noreferrer">{pr_number(link.as_str()).unwrap_or_default().to_string()}</a>
                                                                                 }
                                                                             }).collect_view()}
                                                                         </div>
@@ -3222,7 +3808,7 @@ pub fn TimesheetView() -> impl IntoView {
             />
             // Settings dialog modal
             {move || show_settings.get().then(|| view! {
-                <SettingsDialog on_ok=on_close_settings on_cancel=on_close_settings />
+                <SettingsDialog on_ok=on_settings_saved on_cancel=on_close_settings />
             })}
             {move || show_report.get().then(|| view! {
                 <ReportView

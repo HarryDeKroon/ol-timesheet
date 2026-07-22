@@ -27,6 +27,18 @@ pub struct Settings {
     pub study_keys: Vec<String>,
     #[serde(default = "default_show_merged_pr_activity")]
     pub show_merged_pr_activity: bool,
+    #[serde(default)]
+    pub custom_actions: Vec<CustomAction>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CustomAction {
+    #[serde(default)]
+    pub work_item_key: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub duration: String,
 }
 
 fn default_show_merged_pr_activity() -> bool {

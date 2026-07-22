@@ -1,13 +1,90 @@
 use crate::components::settings_group::SettingsGroup;
 use crate::flags::{FLAG_FR, FLAG_NL, FLAG_UK};
+use crate::formatting::parse_hours;
 use crate::i18n::{I18n, keys};
-use crate::model::{Settings, WorkItem};
+use crate::model::{CustomAction, Settings, WorkItem};
 use leptos::prelude::*;
 #[cfg(feature = "hydrate")]
 use leptos::web_sys;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+const MAX_CUSTOM_ACTIONS: usize = 6;
+
+fn blank_custom_action() -> CustomAction {
+    CustomAction {
+        work_item_key: String::new(),
+        description: String::new(),
+        duration: String::new(),
+    }
+}
+
+fn custom_action_is_blank(action: &CustomAction) -> bool {
+    action.work_item_key.trim().is_empty()
+        && action.description.trim().is_empty()
+        && action.duration.trim().is_empty()
+}
+
+fn ensure_custom_action_rows(rows: &[CustomAction]) -> Vec<CustomAction> {
+    let mut normalized = rows
+        .iter()
+        .map(|row| CustomAction {
+            work_item_key: row.work_item_key.trim().to_uppercase(),
+            description: row.description.trim().to_string(),
+            duration: row.duration.trim().to_string(),
+        })
+        .take(MAX_CUSTOM_ACTIONS)
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        normalized.push(blank_custom_action());
+        return normalized;
+    }
+    if normalized.len() < MAX_CUSTOM_ACTIONS && !normalized.iter().any(custom_action_is_blank) {
+        normalized.push(blank_custom_action());
+    }
+    normalized
+}
+
+fn ensure_blank_custom_action_row_in_place(rows: &mut Vec<CustomAction>) {
+    if rows.len() < MAX_CUSTOM_ACTIONS && !rows.iter().any(custom_action_is_blank) {
+        rows.push(blank_custom_action());
+    }
+}
+
+fn custom_actions_for_save(rows: &[CustomAction]) -> Vec<CustomAction> {
+    rows.iter()
+        .map(|row| CustomAction {
+            work_item_key: row.work_item_key.trim().to_uppercase(),
+            description: row.description.trim().to_string(),
+            duration: row.duration.trim().to_string(),
+        })
+        .filter(|row| !custom_action_is_blank(row))
+        .take(MAX_CUSTOM_ACTIONS)
+        .collect()
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct CustomActionValidation {
+    work_item_error: Option<String>,
+    description_error: Option<String>,
+    duration_error: Option<String>,
+}
+
+impl CustomActionValidation {
+    fn is_valid(&self) -> bool {
+        self.work_item_error.is_none()
+            && self.description_error.is_none()
+            && self.duration_error.is_none()
+    }
+
+    fn first_error_message(&self) -> Option<String> {
+        self.description_error
+            .clone()
+            .or_else(|| self.duration_error.clone())
+            .or_else(|| self.work_item_error.clone())
+    }
+}
 
 fn normalize_list(values: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -296,6 +373,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     let ti = i18n.get_untracked();
     let title_prefs = ti.t(keys::DURATIONS);
     let title_reporting = ti.t(keys::REPORTING);
+    let title_custom_actions = ti.t(keys::CUSTOM_ACTIONS);
     let title_pull_requests = ti.t(keys::PULL_REQUESTS);
     let lbl_hpw = ti.t(keys::HOURS_PER_WEEK);
     let lbl_hpd = ti.t(keys::HOURS_PER_DAY);
@@ -311,6 +389,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     let planned_time_off_keys = RwSignal::new(Vec::<String>::new());
     let study_keys = RwSignal::new(Vec::<String>::new());
     let show_merged_pr_activity = RwSignal::new(true);
+    let custom_actions = RwSignal::new(vec![blank_custom_action()]);
     let active_work_items = RwSignal::new(Vec::<WorkItem>::new());
     let non_billable_select_value = RwSignal::new(String::new());
     let meetings_select_value = RwSignal::new(String::new());
@@ -519,6 +598,59 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
             None
         }
     });
+    let custom_action_validations = Memo::new(move |_| {
+        let i = i18n.get();
+        let dec_sep = i.decimal_separator;
+        let wl = i.t(keys::WEEK_ABBR);
+        let dl = i.t(keys::DAY_ABBR);
+        let hl = i.t(keys::HOUR_ABBR);
+        let ml = i.t(keys::MINUTE_ABBR);
+        let scoped = scoped_issue_options
+            .get()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        custom_actions
+            .get()
+            .into_iter()
+            .map(|row| {
+                if custom_action_is_blank(&row) {
+                    return CustomActionValidation::default();
+                }
+                let description_error = row
+                    .description
+                    .trim()
+                    .is_empty()
+                    .then(|| i18n.get().t(keys::SETTINGS_ERROR_CUSTOM_ACTION_DESCRIPTION));
+                let duration_error = (!row.duration.trim().is_empty()
+                    && parse_hours(
+                        &row.duration,
+                        hours_per_day.get(),
+                        hours_per_week.get(),
+                        dec_sep,
+                        &wl,
+                        &dl,
+                        &hl,
+                        &ml,
+                    )
+                    .is_none())
+                .then(|| i18n.get().t(keys::SETTINGS_ERROR_CUSTOM_ACTION_DURATION));
+                let key = row.work_item_key.trim().to_uppercase();
+                let work_item_error = (!key.is_empty() && !scoped.contains(&key))
+                    .then(|| i18n.get().t(keys::SETTINGS_ERROR_CUSTOM_ACTION_WORK_ITEM));
+                CustomActionValidation {
+                    work_item_error,
+                    description_error,
+                    duration_error,
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let custom_actions_valid = Memo::new(move |_| {
+        custom_action_validations
+            .get()
+            .into_iter()
+            .all(|row| row.is_valid())
+    });
 
     let form_valid = Memo::new(move |_| {
         loaded_settings.get()
@@ -530,6 +662,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
             && holidays_error.get().is_none()
             && pto_error.get().is_none()
             && study_error.get().is_none()
+            && custom_actions_valid.get()
     });
 
     let save_action = Action::new(move |_: &()| {
@@ -542,6 +675,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
             planned_time_off_keys: planned_time_off_keys.get(),
             study_keys: study_keys.get(),
             show_merged_pr_activity: show_merged_pr_activity.get(),
+            custom_actions: custom_actions_for_save(&custom_actions.get()),
         };
         async move { save_settings(settings).await }
     });
@@ -566,6 +700,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                 planned_time_off_keys.set(normalize_list(&s.planned_time_off_keys));
                 study_keys.set(normalize_list(&s.study_keys));
                 show_merged_pr_activity.set(s.show_merged_pr_activity);
+                custom_actions.set(ensure_custom_action_rows(&s.custom_actions));
                 loaded_settings.set(true);
 
                 #[cfg(feature = "hydrate")]
@@ -858,6 +993,124 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                             remove_label={Signal::derive(move || i18n.get().t(keys::DELETE))}
                             error={Signal::derive(move || study_error.get())}
                         />
+                    </SettingsGroup>
+                    <SettingsGroup title=title_custom_actions.clone()>
+                        <div class="settings-custom-actions-panel">
+                            <div class="settings-custom-action-columns">
+                                <span>{move || i18n.get().t(keys::CUSTOM_ACTION_WORK_ITEM)}</span>
+                                <span>{move || i18n.get().t(keys::DESCRIPTION)}</span>
+                                <span>{move || i18n.get().t(keys::DURATION)}</span>
+                                <span></span>
+                            </div>
+                            <div class="settings-custom-actions-list">
+                                {move || {
+                                    custom_actions
+                                        .get()
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(idx, row)| {
+                                            let validation = custom_action_validations
+                                                .get()
+                                                .get(idx)
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            let work_item_error = validation.work_item_error.clone();
+                                            let description_error = validation.description_error.clone();
+                                            let duration_error = validation.duration_error.clone();
+                                            let row_error = validation.first_error_message();
+                                            let work_item_key = row.work_item_key.clone();
+                                            let description = row.description.clone();
+                                            let duration = row.duration.clone();
+                                            view! {
+                                                <div class="settings-custom-action-row">
+                                                    <div class="settings-custom-action-index">{idx + 1}</div>
+                                                    <div class="settings-custom-action-field" class:settings-field-invalid={work_item_error.is_some()}>
+                                                        <select
+                                                            class="settings-input"
+                                                            prop:value={work_item_key}
+                                                            on:change=move |ev| {
+                                                                let value = event_target_value(&ev).trim().to_uppercase();
+                                                                custom_actions.update(|rows| {
+                                                                    if let Some(item) = rows.get_mut(idx) {
+                                                                        item.work_item_key = value;
+                                                                    }
+                                                                    ensure_blank_custom_action_row_in_place(rows);
+                                                                });
+                                                            }
+                                                        >
+                                                            <option value="">{move || i18n.get().t(keys::OTHER)}</option>
+                                                            <For
+                                                                each=move || scoped_issue_options.get()
+                                                                key=|item| item.clone()
+                                                                children=move |item| {
+                                                                    let option_text = issue_title_by_key
+                                                                        .get()
+                                                                        .get(&item)
+                                                                        .map(|summary| format!("{} — {}", item, summary))
+                                                                        .unwrap_or_else(|| item.clone());
+                                                                    view! {
+                                                                        <option value={item.clone()}>{option_text}</option>
+                                                                    }
+                                                                }
+                                                            />
+                                                        </select>
+                                                    </div>
+                                                    <div class="settings-custom-action-field" class:settings-field-invalid={description_error.is_some()}>
+                                                        <input
+                                                            type="text"
+                                                            class="settings-input"
+                                                            prop:value={description}
+                                                            on:input=move |ev| {
+                                                                let value = event_target_value(&ev);
+                                                                custom_actions.update(|rows| {
+                                                                    if let Some(item) = rows.get_mut(idx) {
+                                                                        item.description = value;
+                                                                    }
+                                                                    ensure_blank_custom_action_row_in_place(rows);
+                                                                });
+                                                            }
+                                                        />
+                                                    </div>
+                                                    <div class="settings-custom-action-field" class:settings-field-invalid={duration_error.is_some()}>
+                                                        <input
+                                                            type="text"
+                                                            class="settings-input"
+                                                            prop:value={duration}
+                                                            on:input=move |ev| {
+                                                                let value = event_target_value(&ev);
+                                                                custom_actions.update(|rows| {
+                                                                    if let Some(item) = rows.get_mut(idx) {
+                                                                        item.duration = value;
+                                                                    }
+                                                                    ensure_blank_custom_action_row_in_place(rows);
+                                                                });
+                                                            }
+                                                        />
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        class="settings-custom-action-delete popup-delete"
+                                                        on:click=move |_| {
+                                                            custom_actions.update(|rows| {
+                                                                if idx < rows.len() {
+                                                                    rows.remove(idx);
+                                                                }
+                                                                *rows = ensure_custom_action_rows(rows);
+                                                            });
+                                                        }
+                                                    >
+                                                        "🗑"
+                                                    </button>
+                                                    {row_error.map(|msg| view! {
+                                                        <span class="settings-error-indicator" title={msg}>!</span>
+                                                    })}
+                                                </div>
+                                            }
+                                        })
+                                        .collect_view()
+                                }}
+                            </div>
+                        </div>
                     </SettingsGroup>
                     <SettingsGroup title=title_pull_requests.clone()>
                         <label class="settings-checkbox-row">
