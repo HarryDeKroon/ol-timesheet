@@ -14,7 +14,7 @@ RUN apt-get update -y \
 RUN cargo binstall cargo-leptos -y
 
 WORKDIR /src
-RUN git clone --depth 1 --single-branch --branch v0.9.1 https://github.com/HarryDeKroon/ol-timesheet.git .
+RUN git clone --depth 1 --single-branch --branch v0.9.2 https://github.com/HarryDeKroon/ol-timesheet.git .
 
 # Add the WASM target
 RUN rustup target add wasm32-unknown-unknown
