@@ -54,7 +54,7 @@ As it is now, but the .report-controls and .report-period-nav move to the center
 #### Keys
 
 - Alt-P -> previous month/year
-- Alt-N -> next mont/year
+- Alt-N -> next month/year
 - Alt-D -> activate period drop-down
 - Alt-T -> go to current month/year
 - Alt-S -> Settings
