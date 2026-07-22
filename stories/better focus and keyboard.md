@@ -20,7 +20,7 @@ On first page load, the following states can be distinguished:
 
 The navigation bar shows three types of controls - left -> Menu options, like Timesheet and Report - middle -> navigation like previous/next period - right -> user avatar and status
 Menu options and navigation depend on the active view, avatar and status are always visible.
-The ribbon can be collapsed or expanded. When collapsed, only avatar and status are available, plus an small expand button at the far right. When expanded, a small collapse button is at the far right.
+The ribbon can be collapsed or expanded. When collapsed, only avatar and status are available, plus a small expand button at the far right. When expanded, a small collapse button is at the far right.
 
 The user avatar comes from Jira. When clicked it opens a dropdown with Settings option (gear wheel symbol) and Logout (door symbol)
 
