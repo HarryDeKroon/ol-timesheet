@@ -1399,7 +1399,9 @@ main {
 	bottom: 0;
 	left: 0;
 	height: 2px;
-	width: 0%;
+	width: 100%;
+	transform: scaleX(0);
+	transform-origin: left center;
 	background: linear-gradient(to right, #0052cc, #4c9aff);
 	border-radius: 0 0 2px 2px;
 	z-index: 10;
@@ -1429,19 +1431,19 @@ main {
 
 @keyframes timer-progress-even {
 	from {
-		width: 0%;
+		transform: scaleX(0);
 	}
 	to {
-		width: 100%;
+		transform: scaleX(1);
 	}
 }
 
 @keyframes timer-progress-odd {
 	from {
-		width: 0%;
+		transform: scaleX(0);
 	}
 	to {
-		width: 100%;
+		transform: scaleX(1);
 	}
 }
 
