@@ -47,6 +47,8 @@ ENV LEPTOS_SITE_ROOT=site
 ENV LEPTOS_SITE_PKG_DIR=pkg
 ENV LEPTOS_SITE_ADDR=0.0.0.0:8081
 
+VOLUME /root/.config/Timesheet
+
 EXPOSE 8081
 
 ENTRYPOINT ["/app/timesheet"]

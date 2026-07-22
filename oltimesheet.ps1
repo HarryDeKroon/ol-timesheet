@@ -10,7 +10,6 @@ $ErrorActionPreference = "Stop"
 
 $ImageName     = if ($env:IMAGE_NAME)     { $env:IMAGE_NAME }     else { "oltimesheet:0.9.1" }
 $ContainerName = if ($env:CONTAINER_NAME) { $env:CONTAINER_NAME } else { "oltimesheet" }
-$ConfigVolume  = if ($env:CONFIG_VOLUME)  { $env:CONFIG_VOLUME }  else { "oltimesheet-config" }
 $HostPort      = if ($env:HOST_PORT)      { $env:HOST_PORT }      else { "8081" }
 $ContainerPort = if ($env:CONTAINER_PORT) { $env:CONTAINER_PORT } else { "8081" }
 $XdgConfigHome = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { "/root/.config/Timesheet" }
@@ -19,10 +18,11 @@ $SessionsDir   = "$AppConfigDir/sessions"
 $CacheFile     = "$AppConfigDir/cache.yaml"
 $HelperImage   = if ($env:HELPER_IMAGE) { $env:HELPER_IMAGE } else { "alpine:3.20" }
 $ScriptDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ConfigDir     = if ($env:CONFIG_DIR) { $env:CONFIG_DIR } else { Join-Path $ScriptDir "server-config" }
 $EnvFile       = Join-Path $ScriptDir ".env"
 
 function Show-Usage {
-    Write-Error "Usage: .\oltimesheet.ps1 {start|stop|log|tail|users|sessions|rm cache|rm <session_id...>}"
+    Write-Error "Usage: .\oltimesheet.ps1 {start|stop|log|tail|users|sessions|rm cache|rm all|rm <session_id...>}"
 }
 
 function Ensure-ImageExists {
@@ -44,6 +44,7 @@ function Test-ContainerExists {
 
 function Start-TimesheetContainer {
     Ensure-ImageExists
+    New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 
     if (Test-ContainerRunning) {
         Write-Output "$ContainerName already running."
@@ -56,12 +57,18 @@ function Start-TimesheetContainer {
         return
     }
 
+    # Docker Desktop on Windows requires forward slashes in bind-mount paths.
+    $configDirDocker = $ConfigDir -replace '\\', '/'
+    if ($configDirDocker -match '^([A-Za-z]):') {
+        $configDirDocker = '/' + $configDirDocker[0].ToString().ToLower() + $configDirDocker.Substring(2)
+    }
+
     $dockerArgs = @(
         "run", "-d",
         "--name", $ContainerName,
         "--restart", "unless-stopped",
         "-p", "$HostPort`:$ContainerPort",
-        "-v", "$ConfigVolume`:$XdgConfigHome",
+        "-v", "$configDirDocker`:$XdgConfigHome",
         "-e", "XDG_CONFIG_HOME=$XdgConfigHome"
     )
 
@@ -71,7 +78,7 @@ function Start-TimesheetContainer {
 
     $dockerArgs += $ImageName
     docker @dockerArgs *> $null
-    Write-Output "$ContainerName created and started."
+    Write-Output "$ContainerName created and started. Config: $ConfigDir"
 }
 
 function Stop-TimesheetContainer {
@@ -84,20 +91,26 @@ function Stop-TimesheetContainer {
     }
 }
 
+function Get-ConfigMount {
+    $d = $ConfigDir -replace '\\', '/'
+    if ($d -match '^([A-Za-z]):') { $d = '/' + $d[0].ToString().ToLower() + $d.Substring(2) }
+    return "$d`:$XdgConfigHome"
+}
+
 function Get-Users {
-    docker run --rm -v "$ConfigVolume`:$XdgConfigHome" $HelperImage sh -lc 'cfg_dir="$1"; [ -d "$cfg_dir" ] || exit 0; for d in "$cfg_dir"/*; do [ -d "$d" ] || continue; [ -f "$d/prefs.json" ] && basename "$d"; done | sort -u' sh $AppConfigDir
+    docker run --rm -v (Get-ConfigMount) $HelperImage sh -lc 'cfg_dir="$1"; [ -d "$cfg_dir" ] || exit 0; for d in "$cfg_dir"/*; do [ -d "$d" ] || continue; [ -f "$d/prefs.json" ] && basename "$d"; done | sort -u' sh $AppConfigDir
 }
 
 function Get-Sessions {
-    docker run --rm -v "$ConfigVolume`:$XdgConfigHome" $HelperImage sh -lc 'sessions_dir="$1"; [ -d "$sessions_dir" ] || exit 0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; basename "$f" .json; done | sort -u' sh $SessionsDir
+    docker run --rm -v (Get-ConfigMount) $HelperImage sh -lc 'sessions_dir="$1"; [ -d "$sessions_dir" ] || exit 0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; basename "$f" .json; done | sort -u' sh $SessionsDir
 }
 
 function Remove-Cache {
-    docker run --rm -v "$ConfigVolume`:$XdgConfigHome" $HelperImage sh -lc 'f="$1"; if [ -f "$f" ]; then rm -f "$f"; echo "removed cache.yaml"; else echo "cache.yaml not found"; fi' sh $CacheFile
+    docker run --rm -v (Get-ConfigMount) $HelperImage sh -lc 'f="$1"; if [ -f "$f" ]; then rm -f "$f"; echo "removed cache.yaml"; else echo "cache.yaml not found"; fi' sh $CacheFile
 }
 
 function Remove-AllSessions {
-    docker run --rm -v "$ConfigVolume`:$XdgConfigHome" $HelperImage sh -lc 'sessions_dir="$1"; [ -d "$sessions_dir" ] || { echo "sessions directory not found"; exit 0; }; count=0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; rm -f "$f"; count=$((count+1)); done; echo "removed $count session(s)"' sh $SessionsDir
+    docker run --rm -v (Get-ConfigMount) $HelperImage sh -lc 'sessions_dir="$1"; [ -d "$sessions_dir" ] || { echo "sessions directory not found"; exit 0; }; count=0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; rm -f "$f"; count=$((count+1)); done; echo "removed $count session(s)"' sh $SessionsDir
 }
 
 function Remove-Sessions {
@@ -112,7 +125,7 @@ function Remove-Sessions {
         $paths += "$SessionsDir/$sid.json"
     }
 
-    docker run --rm -v "$ConfigVolume`:$XdgConfigHome" $HelperImage sh -lc 'for path in "$@"; do if [ -f "$path" ]; then rm -f "$path"; echo "removed $(basename "$path" .json)"; else echo "missing $(basename "$path" .json)"; fi; done' sh @paths
+    docker run --rm -v (Get-ConfigMount) $HelperImage sh -lc 'for path in "$@"; do if [ -f "$path" ]; then rm -f "$path"; echo "removed $(basename "$path" .json)"; else echo "missing $(basename "$path" .json)"; fi; done' sh @paths
 }
 
 switch ($Command) {

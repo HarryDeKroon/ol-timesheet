@@ -1,5 +1,6 @@
-# Rust build artifacts
+# Rust code and artifacts come from git repo
 /target/
+src/
 
 # cargo-leptos tooling
 node_modules/

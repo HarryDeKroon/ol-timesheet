@@ -3,7 +3,6 @@ set -euo pipefail
 
 IMAGE_NAME="${IMAGE_NAME:-oltimesheet:0.9.1}"
 CONTAINER_NAME="${CONTAINER_NAME:-oltimesheet}"
-CONFIG_VOLUME="${CONFIG_VOLUME:-oltimesheet-config}"
 HOST_PORT="${HOST_PORT:-8081}"
 CONTAINER_PORT="${CONTAINER_PORT:-8081}"
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/root/.config/Timesheet}"
@@ -12,10 +11,11 @@ SESSIONS_DIR="$APP_CONFIG_DIR/sessions"
 CACHE_FILE="$APP_CONFIG_DIR/cache.yaml"
 HELPER_IMAGE="${HELPER_IMAGE:-alpine:3.20}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+CONFIG_DIR="${CONFIG_DIR:-$SCRIPT_DIR/server-config}"
 ENV_FILE="$SCRIPT_DIR/.env"
 
 usage() {
-    echo "Usage: echo "Usage: $0 {start|stop|log|tail|users|sessions|rm cache|rm <session_id...>}" >&2 {start|stop|log|tail|users|sessions|rm cache|rm all|rm <session_id...>}" >&2
+    echo "Usage: $0 {start|stop|log|tail|users|sessions|rm cache|rm all|rm <session_id...>}" >&2
     exit 1
 }
 
@@ -28,6 +28,7 @@ ensure_image_exists() {
 
 start_container() {
     ensure_image_exists
+    mkdir -p "$CONFIG_DIR"
 
     if docker ps --filter "name=^${CONTAINER_NAME}$" --filter "status=running" --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         echo "$CONTAINER_NAME already running."
@@ -45,7 +46,7 @@ start_container() {
         --name "$CONTAINER_NAME"
         --restart unless-stopped
         -p "${HOST_PORT}:${CONTAINER_PORT}"
-        -v "${CONFIG_VOLUME}:${XDG_CONFIG_HOME}"
+        -v "${CONFIG_DIR}:${XDG_CONFIG_HOME}"
         -e "XDG_CONFIG_HOME=${XDG_CONFIG_HOME}"
     )
     if [[ -f "$ENV_FILE" ]]; then
@@ -54,7 +55,7 @@ start_container() {
     args+=("$IMAGE_NAME")
 
     docker "${args[@]}" >/dev/null
-    echo "$CONTAINER_NAME created and started."
+    echo "$CONTAINER_NAME created and started. Config: $CONFIG_DIR"
 }
 
 stop_container() {
@@ -67,25 +68,25 @@ stop_container() {
 }
 
 list_users() {
-    docker run --rm -v "${CONFIG_VOLUME}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
+    docker run --rm -v "${CONFIG_DIR}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
         'cfg_dir="$1"; [ -d "$cfg_dir" ] || exit 0; for d in "$cfg_dir"/*; do [ -d "$d" ] || continue; [ -f "$d/prefs.json" ] && basename "$d"; done | sort -u' \
         sh "$APP_CONFIG_DIR"
 }
 
 list_sessions() {
-    docker run --rm -v "${CONFIG_VOLUME}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
+    docker run --rm -v "${CONFIG_DIR}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
         'sessions_dir="$1"; [ -d "$sessions_dir" ] || exit 0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; basename "$f" .json; done | sort -u' \
         sh "$SESSIONS_DIR"
 }
 
 remove_cache() {
-    docker run --rm -v "${CONFIG_VOLUME}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
+    docker run --rm -v "${CONFIG_DIR}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
         'f="$1"; if [ -f "$f" ]; then rm -f "$f"; echo "removed cache.yaml"; else echo "cache.yaml not found"; fi' \
         sh "$CACHE_FILE"
 }
 
 remove_all_sessions() {
-    docker run --rm -v "${CONFIG_VOLUME}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
+    docker run --rm -v "${CONFIG_DIR}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
         'sessions_dir="$1"; [ -d "$sessions_dir" ] || { echo "sessions directory not found"; exit 0; }; count=0; for f in "$sessions_dir"/*.json; do [ -f "$f" ] || continue; rm -f "$f"; count=$((count+1)); done; echo "removed $count session(s)"' \
         sh "$SESSIONS_DIR"
 }
@@ -101,7 +102,7 @@ remove_sessions() {
         args+=("${SESSIONS_DIR}/${sid}.json")
     done
 
-    docker run --rm -v "${CONFIG_VOLUME}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
+    docker run --rm -v "${CONFIG_DIR}:${XDG_CONFIG_HOME}" "$HELPER_IMAGE" sh -lc \
         'for path in "$@"; do if [ -f "$path" ]; then rm -f "$path"; echo "removed $(basename "$path" .json)"; else echo "missing $(basename "$path" .json)"; fi; done' \
         sh "${args[@]}"
 }
