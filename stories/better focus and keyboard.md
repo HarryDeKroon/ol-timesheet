@@ -26,7 +26,7 @@ The user avatar comes from Jira. When clicked it opens a dropdown with Settings 
 
 ### Settings dialog
 
-The settings dialog opens as a modal dialog: 80% of the available viewport, but the rest op the UI is covered in a semi-transparent gray shaded box. No keyboard or mouse events are passed to the other views
+The settings dialog opens as a modal dialog: 80% of the available viewport, but the rest of the UI is covered in a semi-transparent gray shaded box. No keyboard or mouse events are passed to the other views
 Add a UI group to the top of the settings dialog with a Language option. That option is the current flag button and changes the UI language immediately (no save required)
 The settings dialog has the same Save and close buttons as it has now. Both close the dialog (and removes the overlay), so that operation continues as before opening the dialog.
 The close button may not appear when the settings are displayed because no user preferences are available yet
