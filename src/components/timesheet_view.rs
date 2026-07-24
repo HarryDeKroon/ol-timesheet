@@ -2094,6 +2094,70 @@ pub fn TimesheetView() -> impl IntoView {
                 .map(|entry| entry.id.clone())
                 .unwrap_or_default();
             let existing_adf = matching_entry.and_then(|entry| entry.comment_adf.clone());
+            let optimistic_id = if existing_id.is_empty() {
+                format!(
+                    "optimistic-{}",
+                    NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                )
+            } else {
+                existing_id.clone()
+            };
+
+            let last_data_before = last_data.get_untracked();
+            let popups_before = open_popups.get_untracked();
+            let issue_key_for_optimistic = issue_key.clone();
+            let description_for_optimistic = description.clone();
+            last_data.update(|opt| {
+                if let Some(ts) = opt.as_mut() {
+                    if existing_id.is_empty() {
+                        ts.worklogs.push(WorklogEntry {
+                            id: optimistic_id.clone(),
+                            issue_key: issue_key_for_optimistic.clone(),
+                            date: target_date,
+                            hours,
+                            comment: description_for_optimistic.clone(),
+                            comment_html: String::new(),
+                            comment_adf: None,
+                        });
+                    } else if let Some(worklog) =
+                        ts.worklogs.iter_mut().find(|w| w.id == existing_id)
+                    {
+                        worklog.hours = hours;
+                        if worklog.comment != description_for_optimistic {
+                            worklog.comment = description_for_optimistic.clone();
+                            worklog.comment_html = String::new();
+                            worklog.comment_adf = None;
+                        }
+                    }
+                }
+            });
+            open_popups.update(|ps| {
+                for popup in ps
+                    .iter_mut()
+                    .filter(|p| p.issue_key == issue_key_for_optimistic && p.date == target_date)
+                {
+                    if existing_id.is_empty() {
+                        popup.entries.push(WorklogEntry {
+                            id: optimistic_id.clone(),
+                            issue_key: issue_key_for_optimistic.clone(),
+                            date: target_date,
+                            hours,
+                            comment: description_for_optimistic.clone(),
+                            comment_html: String::new(),
+                            comment_adf: None,
+                        });
+                    } else if let Some(worklog) =
+                        popup.entries.iter_mut().find(|w| w.id == existing_id)
+                    {
+                        worklog.hours = hours;
+                        if worklog.comment != description_for_optimistic {
+                            worklog.comment = description_for_optimistic.clone();
+                            worklog.comment_html = String::new();
+                            worklog.comment_adf = None;
+                        }
+                    }
+                }
+            });
             #[cfg(feature = "hydrate")]
             leptos::task::spawn_local(async move {
                 conn.request_started();
@@ -2118,7 +2182,16 @@ pub fn TimesheetView() -> impl IntoView {
                     .await
                 };
                 conn.request_finished();
-                if result.is_ok() {
+                if let Err(err) = result {
+                    log::warn!(
+                        "[custom_action] server sync failed for {} on {}: {}",
+                        issue_key,
+                        target_date,
+                        err
+                    );
+                    last_data.set(last_data_before);
+                    open_popups.set(popups_before);
+                } else {
                     on_popup_changed.run(issue_key);
                 }
             });
@@ -2130,6 +2203,9 @@ pub fn TimesheetView() -> impl IntoView {
                 let _ = description;
                 let _ = existing_id;
                 let _ = existing_adf;
+                let _ = optimistic_id;
+                let _ = last_data_before;
+                let _ = popups_before;
             }
             return;
         }

@@ -8,7 +8,7 @@ RUN cp cargo-binstall /usr/local/cargo/bin
 
 # Install required tools
 RUN apt-get update -y \
-  && apt-get install -y --no-install-recommends clang
+	&& apt-get install -y --no-install-recommends clang
 
 # Install cargo-leptos
 RUN cargo binstall cargo-leptos -y
@@ -25,10 +25,10 @@ RUN cargo leptos build --release -vv
 FROM debian:trixie-slim AS runtime
 WORKDIR /app
 RUN apt-get update -y \
-  && apt-get install -y --no-install-recommends openssl ca-certificates \
-  && apt-get autoremove -y \
-  && apt-get clean -y \
-  && rm -rf /var/lib/apt/lists/*
+	&& apt-get install -y --no-install-recommends openssl ca-certificates \
+	&& apt-get autoremove -y \
+	&& apt-get clean -y \
+	&& rm -rf /var/lib/apt/lists/*
 
 # -- NB: update binary name from "leptos_start" to match your app name in Cargo.toml --
 # Copy the server binary to the /app directory
@@ -41,13 +41,13 @@ COPY --from=builder /src/target/site /app/site
 COPY --from=builder /src/Cargo.toml /app/
 
 ENV RUST_LOG=info
-ENV XDG_CONFIG_HOME=/root/.config/Timesheet
+ENV XDG_CONFIG_HOME=/root/.config/timesheet
 ENV LEPTOS_OUTPUT_NAME=timesheet
 ENV LEPTOS_SITE_ROOT=site
 ENV LEPTOS_SITE_PKG_DIR=pkg
 ENV LEPTOS_SITE_ADDR=0.0.0.0:8081
 
-VOLUME /root/.config/Timesheet
+VOLUME /root/.config/timesheet
 
 EXPOSE 8081
 

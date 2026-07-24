@@ -266,6 +266,10 @@ cfg_if::cfg_if! {
                 .ok()
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(62);
+            let cache_flush_seconds = std::env::var("CACHE_PERSIST_FLUSH_SECONDS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(30);
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                     cleanup_interval_minutes.saturating_mul(60),
@@ -274,6 +278,15 @@ cfg_if::cfg_if! {
                     interval.tick().await;
                     timesheet::api::cache::evict_expired();
                     timesheet::api::cache::prune_old_week_entries(cache_retention_days);
+                }
+            });
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                    cache_flush_seconds.max(1),
+                ));
+                loop {
+                    interval.tick().await;
+                    timesheet::api::cache::flush_to_disk();
                 }
             });
             tokio::spawn(timesheet::api::periodic_refresh::run_periodic_refresh_loop());
@@ -318,7 +331,13 @@ cfg_if::cfg_if! {
                 }
             };
 
-            if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+            if let Err(e) = axum::serve(listener, app.into_make_service())
+                .with_graceful_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                    timesheet::api::cache::flush_to_disk();
+                })
+                .await
+            {
                 log::error!("Server failed to start: {}", e);
             }
         }

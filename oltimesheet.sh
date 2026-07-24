@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE_NAME="${IMAGE_NAME:-oltimesheet:0.9.1}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+  OLTIMESHEET_VERSION="$(grep -E '^OLTIMESHEET=' "$ENV_FILE" | cut -d '=' -f2-)"
+fi
+
+IMAGE_NAME="${IMAGE_NAME:-oltimesheet:${OLTIMESHEET_VERSION:-0.9.1}}"
 CONTAINER_NAME="${CONTAINER_NAME:-oltimesheet}"
 HOST_PORT="${HOST_PORT:-8081}"
 CONTAINER_PORT="${CONTAINER_PORT:-8081}"
-XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/root/.config/Timesheet}"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/root/.config/timesheet}"
 APP_CONFIG_DIR="${APP_CONFIG_DIR:-$XDG_CONFIG_HOME/timesheet}"
 SESSIONS_DIR="$APP_CONFIG_DIR/sessions"
 CACHE_FILE="$APP_CONFIG_DIR/cache.yaml"
 HELPER_IMAGE="${HELPER_IMAGE:-alpine:3.20}"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 CONFIG_DIR="${CONFIG_DIR:-$SCRIPT_DIR/server-config}"
-ENV_FILE="$SCRIPT_DIR/.env"
 
 usage() {
     echo "Usage: $0 {start|stop|log|tail|users|sessions|rm cache|rm all|rm <session_id...>}" >&2
@@ -24,6 +29,14 @@ ensure_image_exists() {
         echo "Docker image '$IMAGE_NAME' not found. Build it first (e.g. docker build -t $IMAGE_NAME .)." >&2
         exit 1
     fi
+}
+
+build_container() {
+	if docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        echo "Docker image '$IMAGE_NAME' already exists. Remove it first (e.g. docker rmi $IMAGE_NAME)." >&2
+        exit 1
+    fi
+    docker build -t "$IMAGE_NAME" .
 }
 
 start_container() {
@@ -109,6 +122,9 @@ remove_sessions() {
 
 cmd="${1:-}"
 case "$cmd" in
+	build)
+        build_container
+        ;;
     start)
         start_container
         ;;
