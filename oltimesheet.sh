@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 
 if [[ -f "$ENV_FILE" ]]; then
-  OLTIMESHEET_VERSION="$(grep -E '^OLTIMESHEET=' "$ENV_FILE" | cut -d '=' -f2-)"
+  OLTIMESHEET_VERSION="$(grep -E '^OLTIMESHEET=' "$ENV_FILE" | cut -d '=' -f2- || true)"
 fi
 
 IMAGE_NAME="${IMAGE_NAME:-oltimesheet:${OLTIMESHEET_VERSION:-0.9.1}}"
