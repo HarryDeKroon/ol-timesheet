@@ -286,7 +286,7 @@ cfg_if::cfg_if! {
                 ));
                 loop {
                     interval.tick().await;
-                    timesheet::api::cache::flush_to_disk();
+let _ = tokio::task::spawn_blocking(timesheet::api::cache::flush_to_disk).await;
                 }
             });
             tokio::spawn(timesheet::api::periodic_refresh::run_periodic_refresh_loop());
