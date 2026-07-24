@@ -92,7 +92,14 @@ pub fn flush_to_disk() {
         return;
     }
     let file = {
-        let Ok(cache) = CACHE.lock() else { return };
+        let cache = match CACHE.lock() {
+            Ok(cache) => cache,
+            Err(_) => {
+                DIRTY.store(true, Ordering::Release);
+                log::warn!("[cache] cache lock unavailable while flushing to disk");
+                return;
+            }
+        };
         build_persisted_cache_file(&cache)
     };
     if !write_persisted_cache_file(&file) {
