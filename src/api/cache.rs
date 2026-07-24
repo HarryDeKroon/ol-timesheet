@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,12 @@ struct CacheEntry {
 
 static CACHE: LazyLock<Mutex<HashMap<String, CacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static DIRTY: AtomicBool = AtomicBool::new(false);
+
+fn mark_dirty() {
+    DIRTY.store(true, Ordering::Relaxed);
+}
 
 /// Default TTL for cached responses: 5 days.
 const DEFAULT_TTL: Duration = Duration::from_secs(5 * 24 * 3600);
@@ -58,13 +65,13 @@ fn build_persisted_cache_file(cache: &HashMap<String, CacheEntry>) -> PersistedC
     }
 }
 
-fn write_persisted_cache_file(file: &PersistedCacheFile) {
+fn write_persisted_cache_file(file: &PersistedCacheFile) -> bool {
     let path = cache_persist_path();
     let raw = match serde_yaml::to_string(file) {
         Ok(raw) => raw,
         Err(err) => {
             log::warn!("[cache] failed to serialize cache yaml: {}", err);
-            return;
+            return false;
         }
     };
     if let Err(err) = fs::write(&path, raw) {
@@ -73,13 +80,33 @@ fn write_persisted_cache_file(file: &PersistedCacheFile) {
             path.display(),
             err
         );
+        return false;
     }
+    true
 }
 
-fn persist_cache_snapshot(snapshot: Option<PersistedCacheFile>) {
-    if let Some(file) = snapshot {
-        write_persisted_cache_file(&file);
+/// Flush the in-memory cache to disk if it has been modified since the last flush.
+/// Called by the background flush task and at graceful shutdown.
+pub fn flush_to_disk() {
+    if !DIRTY.swap(false, Ordering::AcqRel) {
+        return;
     }
+    let file = {
+        let cache = match CACHE.lock() {
+            Ok(cache) => cache,
+            Err(_) => {
+                DIRTY.store(true, Ordering::Release);
+                log::warn!("[cache] cache lock unavailable while flushing to disk");
+                return;
+            }
+        };
+        build_persisted_cache_file(&cache)
+    };
+    if !write_persisted_cache_file(&file) {
+        DIRTY.store(true, Ordering::Release);
+        return;
+    }
+    log::debug!("[cache] flushed to disk");
 }
 
 pub fn load_persisted_cache() -> Option<NaiveDate> {
@@ -167,13 +194,11 @@ pub fn get(key: &str) -> Option<String> {
 
 /// Store a value in the cache with the default TTL.
 pub fn put(key: String, data: String) {
-    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
         let ttl_secs = DEFAULT_TTL.as_secs();
         cache.insert(key, cache_entry(data, ttl_secs));
-        snapshot = Some(build_persisted_cache_file(&cache));
+        mark_dirty();
     }
-    persist_cache_snapshot(snapshot);
 }
 
 fn cache_entry(data: String, ttl_secs: u64) -> CacheEntry {
@@ -187,26 +212,22 @@ fn cache_entry(data: String, ttl_secs: u64) -> CacheEntry {
 
 /// Remove a single cache entry by exact key.
 pub fn remove(key: &str) {
-    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
         if cache.remove(key).is_some() {
-            snapshot = Some(build_persisted_cache_file(&cache));
+            mark_dirty();
         }
     }
-    persist_cache_snapshot(snapshot);
 }
 
 /// Remove all cache entries whose key starts with the given prefix.
 pub fn remove_by_prefix(prefix: &str) {
-    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
         let before = cache.len();
         cache.retain(|k, _| !k.starts_with(prefix));
         if cache.len() != before {
-            snapshot = Some(build_persisted_cache_file(&cache));
+            mark_dirty();
         }
     }
-    persist_cache_snapshot(snapshot);
 }
 
 /// Remove all cache entries that belong to a specific user.
@@ -217,28 +238,24 @@ pub fn remove_user_cache(account_id: &str) {
 
 /// Remove all entries from the cache.
 pub fn clear_all() {
-    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
         if !cache.is_empty() {
             cache.clear();
-            snapshot = Some(build_persisted_cache_file(&cache));
+            mark_dirty();
         }
     }
-    persist_cache_snapshot(snapshot);
 }
 
 /// Remove all expired entries from the cache.
 pub fn evict_expired() {
-    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
         let before = cache.len();
         let now = Instant::now();
         cache.retain(|_, entry| entry.expires_at > now);
         if cache.len() != before {
-            snapshot = Some(build_persisted_cache_file(&cache));
+            mark_dirty();
         }
     }
-    persist_cache_snapshot(snapshot);
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -327,7 +344,6 @@ pub fn update_cached_bitbucket_week(
 
 pub fn prune_old_week_entries(retention_days: i64) {
     let cutoff = Utc::now().date_naive() - chrono::Duration::days(retention_days.max(1));
-    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
         let mut changed = false;
         let keys = cache.keys().cloned().collect::<Vec<_>>();
@@ -380,10 +396,9 @@ pub fn prune_old_week_entries(retention_days: i64) {
             }
         }
         if changed {
-            snapshot = Some(build_persisted_cache_file(&cache));
+            mark_dirty();
         }
     }
-    persist_cache_snapshot(snapshot);
 }
 
 fn classify_cache_kind(key: &str) -> &'static str {
@@ -452,7 +467,6 @@ where
     F: FnMut(&str, &str) -> Option<String>,
 {
     let prefix = format!("{}:", account_id);
-    let mut snapshot = None;
     if let Ok(mut cache) = CACHE.lock() {
         let mut changed = false;
         let keys = cache
@@ -472,8 +486,7 @@ where
             }
         }
         if changed {
-            snapshot = Some(build_persisted_cache_file(&cache));
+            mark_dirty();
         }
     }
-    persist_cache_snapshot(snapshot);
 }
