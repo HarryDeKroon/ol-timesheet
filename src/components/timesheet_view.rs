@@ -67,10 +67,30 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
         })
         .collect::<HashMap<_, _>>();
 
-    // Show all work_items (already filtered by Jira query for active status).
-    // Jira returns items that match: worklogAuthor=user OR assignee=user with active status.
-    // No need to filter by week activity here; active items remain visible all week.
-    let work_items = source.work_items.clone();
+    // Keep only items that are visible in this specific week:
+    // - items with at least one worklog in the week
+    // - items with at least one git activity cell in the week
+    // - currently active assignee/status items (already present in source.work_items)
+    //
+    // This prevents stale rows from wider cached ranges (e.g. 5-week view)
+    // from leaking into narrower ranges (e.g. 2-week view) after resize.
+    let mut week_keys = worklogs
+        .iter()
+        .map(|w| w.issue_key.clone())
+        .collect::<HashSet<_>>();
+    week_keys.extend(
+        bitbucket_activity
+            .keys()
+            .filter_map(|k| k.split_once(':').map(|(key, _)| key.to_string())),
+    );
+    week_keys.extend(source.work_items.iter().map(|i| i.key.clone()));
+
+    let work_items = source
+        .work_items
+        .iter()
+        .filter(|i| week_keys.contains(&i.key))
+        .cloned()
+        .collect::<Vec<_>>();
 
     let visible_keys = work_items
         .iter()
@@ -149,6 +169,33 @@ fn timesheet_has_activity_for_issue(ts: &TimesheetData, issue_key: &str) -> bool
             .keys()
             .filter_map(|cell_key| cell_key.split_once(':').map(|(key, _)| key))
             .any(|key| key == issue_key)
+}
+
+fn visible_timesheet_rows(ts: &TimesheetData, week_mondays: &[NaiveDate]) -> Vec<WorkItem> {
+    let mut visible_keys = HashSet::<String>::new();
+    for monday in week_mondays {
+        let sunday = *monday + Duration::days(6);
+        visible_keys.extend(
+            ts.worklogs
+                .iter()
+                .filter(|entry| entry.date >= *monday && entry.date <= sunday)
+                .map(|entry| entry.issue_key.clone()),
+        );
+        visible_keys.extend(ts.bitbucket_activity.iter().filter_map(|(cell_key, _)| {
+            let (issue_key, raw_date) = cell_key.split_once(':')?;
+            let date = NaiveDate::parse_from_str(raw_date, "%Y-%m-%d").ok()?;
+            (date >= *monday && date <= sunday).then(|| issue_key.to_string())
+        }));
+    }
+
+    let mut rows = ts
+        .work_items
+        .iter()
+        .filter(|item| visible_keys.contains(&item.key))
+        .cloned()
+        .collect::<Vec<_>>();
+    crate::model::sort_work_items_for_timesheet(&mut rows, &ts.worklogs, &ts.bitbucket_activity);
+    rows
 }
 
 #[cfg(feature = "hydrate")]
@@ -1332,6 +1379,21 @@ fn schedule_custom_action_toggle_existing_timer(popup_id: u32, existing_index: u
             return;
         };
         let _ = button.click();
+        let popup_for_focus = popup_node.clone();
+        let focus_cb = Closure::once(move || {
+            let Ok(Some(node)) =
+                popup_for_focus.query_selector("input:not([disabled]),textarea:not([disabled])")
+            else {
+                return;
+            };
+            if let Ok(input) = node.dyn_into::<web_sys::HtmlElement>() {
+                let _ = input.focus();
+            }
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window.request_animation_frame(focus_cb.as_ref().unchecked_ref());
+        }
+        focus_cb.forget();
     });
     let _ = window
         .set_timeout_with_callback_and_timeout_and_arguments_0(fill_cb.as_ref().unchecked_ref(), 0);
@@ -2103,8 +2165,13 @@ pub fn TimesheetView() -> impl IntoView {
                 existing_id.clone()
             };
 
-            let last_data_before = last_data.get_untracked();
-            let popups_before = open_popups.get_untracked();
+            let previous_fields_for_revert = if existing_id.is_empty() {
+                None
+            } else {
+                last_data
+                    .get_untracked()
+                    .and_then(|ts| ts.worklogs.iter().find(|w| w.id == existing_id).cloned())
+            };
             let issue_key_for_optimistic = issue_key.clone();
             let description_for_optimistic = description.clone();
             last_data.update(|opt| {
@@ -2160,8 +2227,9 @@ pub fn TimesheetView() -> impl IntoView {
             });
             #[cfg(feature = "hydrate")]
             leptos::task::spawn_local(async move {
+                let is_new_worklog = existing_id.is_empty();
                 conn.request_started();
-                let result = if existing_id.is_empty() {
+                let result = if is_new_worklog {
                     crate::components::cell_popup::server_add_worklog(
                         issue_key.clone(),
                         target_date,
@@ -2189,8 +2257,39 @@ pub fn TimesheetView() -> impl IntoView {
                         target_date,
                         err
                     );
-                    last_data.set(last_data_before);
-                    open_popups.set(popups_before);
+                    last_data.update(|opt| {
+                        if let Some(ts) = opt.as_mut() {
+                            if is_new_worklog {
+                                ts.worklogs.retain(|w| w.id != optimistic_id);
+                            } else if let Some(previous) = previous_fields_for_revert.as_ref()
+                                && let Some(current) =
+                                    ts.worklogs.iter_mut().find(|w| w.id == optimistic_id)
+                            {
+                                current.hours = previous.hours;
+                                current.comment = previous.comment.clone();
+                                current.comment_html = previous.comment_html.clone();
+                                current.comment_adf = previous.comment_adf.clone();
+                            }
+                        }
+                    });
+                    open_popups.update(|ps| {
+                        for popup in ps
+                            .iter_mut()
+                            .filter(|p| p.issue_key == issue_key && p.date == target_date)
+                        {
+                            if is_new_worklog {
+                                popup.entries.retain(|w| w.id != optimistic_id);
+                            } else if let Some(previous) = previous_fields_for_revert.as_ref()
+                                && let Some(current) =
+                                    popup.entries.iter_mut().find(|w| w.id == optimistic_id)
+                            {
+                                current.hours = previous.hours;
+                                current.comment = previous.comment.clone();
+                                current.comment_html = previous.comment_html.clone();
+                                current.comment_adf = previous.comment_adf.clone();
+                            }
+                        }
+                    });
                 } else {
                     on_popup_changed.run(issue_key);
                 }
@@ -2204,8 +2303,7 @@ pub fn TimesheetView() -> impl IntoView {
                 let _ = existing_id;
                 let _ = existing_adf;
                 let _ = optimistic_id;
-                let _ = last_data_before;
-                let _ = popups_before;
+                let _ = previous_fields_for_revert;
             }
             return;
         }
@@ -2303,7 +2401,23 @@ pub fn TimesheetView() -> impl IntoView {
     let on_close_settings = Callback::new(move |_: ()| {
         show_settings.set(false);
     });
+    let report_cache_for_open = report_state.report_cache;
+    let report_refresh = report_state.refresh;
+    let report_period_for_open = report_state.period;
+    let report_month_for_open = report_state.selected_month;
+    let report_year_for_open = report_state.selected_year;
     let on_open_report = move |_| {
+        let year = if report_period_for_open.get_untracked()
+            == crate::components::report_overlay::ReportPeriod::Week
+        {
+            report_month_for_open.get_untracked().year()
+        } else {
+            report_year_for_open.get_untracked()
+        };
+        report_cache_for_open.update(|cache| {
+            cache.remove(&year);
+        });
+        report_refresh.update(|n| *n = n.wrapping_add(1));
         show_report.set(true);
     };
 
@@ -2357,6 +2471,9 @@ pub fn TimesheetView() -> impl IntoView {
                 move |ev: web_sys::KeyboardEvent| {
                     let key = ev.key();
                     if !ev.alt_key() || ev.ctrl_key() || ev.meta_key() {
+                        return;
+                    }
+                    if show_settings.get_untracked() {
                         return;
                     }
 
@@ -2741,7 +2858,8 @@ pub fn TimesheetView() -> impl IntoView {
                     let h_l = i.t(keys::HOUR_ABBR);
                     let m_l = i.t(keys::MINUTE_ABBR);
                     let multi = nw > 1;
-                    let nav_row_count = ts.work_items.len();
+                    let visible_rows = visible_timesheet_rows(&ts, &week_mondays);
+                    let nav_row_count = visible_rows.len();
                     let nav_col_count = nw * 6;
 
                     // ── Build header columns for every week group ──
@@ -2804,7 +2922,7 @@ pub fn TimesheetView() -> impl IntoView {
                     }
 
                     // ── Build body rows ──
-                    let body_rows: Vec<AnyView> = ts.work_items
+                    let body_rows: Vec<AnyView> = visible_rows
                         .iter()
                         .enumerate()
                         .map(|(row_idx, item)| {

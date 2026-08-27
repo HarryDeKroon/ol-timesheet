@@ -1499,6 +1499,11 @@ async fn prefetch_range(
                     entry.has_pr_review = true;
                 }
                 for (cell_key, links) in activity.pr_links_by_cell {
+                    if !prefs.show_merged_pr_activity
+                        && activity.pr_merged_cells.contains(&cell_key)
+                    {
+                        continue;
+                    }
                     let entry = bitbucket_activity.entry(cell_key).or_default();
                     let mut merged = entry.pr_links.clone();
                     merged.extend(links);
@@ -1876,6 +1881,9 @@ fn bitbucket_activity_to_cell_map(
         cells.entry(cell_key).or_default().has_pr_review = true;
     }
     for (cell_key, links) in activity.pr_links_by_cell {
+        if !show_merged_pr && activity.pr_merged_cells.contains(&cell_key) {
+            continue;
+        }
         let entry = cells.entry(cell_key).or_default();
         let mut merged = entry.pr_links.clone();
         merged.extend(links);

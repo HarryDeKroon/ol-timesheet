@@ -359,6 +359,9 @@ fn bitbucket_activity_cells_from_source(
         entry.has_pr_review = true;
     }
     for (cell_key, pr_links) in &activity.pr_links_by_cell {
+        if !show_merged_pr_activity && activity.pr_merged_cells.contains(cell_key) {
+            continue;
+        }
         let entry = by_cell.entry(cell_key.clone()).or_default();
         entry.pr_links = pr_links.clone();
     }
@@ -493,6 +496,9 @@ async fn build_refresh_snapshot(
         entry.has_pr_review = true;
     }
     for (cell_key, pr_links) in bitbucket_activity.pr_links_by_cell {
+        if !prefs.show_merged_pr_activity && bitbucket_activity.pr_merged_cells.contains(&cell_key) {
+            continue;
+        }
         let entry = bitbucket_activity_by_cell.entry(cell_key).or_default();
         entry.pr_links = pr_links;
     }
