@@ -188,6 +188,20 @@ fn timesheet_has_activity_for_issue(ts: &TimesheetData, issue_key: &str) -> bool
 
 fn visible_timesheet_rows(ts: &TimesheetData, week_mondays: &[NaiveDate]) -> Vec<WorkItem> {
     let mut visible_keys = HashSet::<String>::new();
+    let active_assigned_keys = ts
+        .work_items
+        .iter()
+        .filter(|item| {
+            !ts.worklogs.iter().any(|entry| entry.issue_key == item.key)
+                && !ts.bitbucket_activity.keys().any(|cell_key| {
+                    cell_key
+                        .split_once(':')
+                        .map(|(key, _)| key == item.key)
+                        .unwrap_or(false)
+                })
+        })
+        .map(|item| item.key.clone())
+        .collect::<HashSet<_>>();
     for monday in week_mondays {
         let sunday = *monday + Duration::days(6);
         visible_keys.extend(
@@ -202,6 +216,7 @@ fn visible_timesheet_rows(ts: &TimesheetData, week_mondays: &[NaiveDate]) -> Vec
             (date >= *monday && date <= sunday).then(|| issue_key.to_string())
         }));
     }
+    visible_keys.extend(active_assigned_keys);
 
     let mut rows = ts
         .work_items
