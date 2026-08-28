@@ -375,14 +375,14 @@ fn filter_activity_by_range(
                 referenced_keys.insert(key);
             }
         }
-        for (cell_key, values) in &source.merged_pr_links_by_cell {
-            if key_in_range(cell_key, start, end) {
-                filtered
-                    .merged_pr_links_by_cell
-                    .insert(cell_key.clone(), values.clone());
-                if let Some(key) = issue_key_from_cell(cell_key) {
-                    referenced_keys.insert(key);
-                }
+    }
+    for (cell_key, values) in &source.merged_pr_links_by_cell {
+        if key_in_range(cell_key, start, end) {
+            filtered
+                .merged_pr_links_by_cell
+                .insert(cell_key.clone(), values.clone());
+            if let Some(key) = issue_key_from_cell(cell_key) {
+                referenced_keys.insert(key);
             }
         }
     }
