@@ -293,6 +293,7 @@ pub struct ReportState {
     pub error: RwSignal<Option<String>>,
     pub report_cache: RwSignal<HashMap<i32, ReportData>>,
     pub refresh: RwSignal<u32>,
+    pub request_generation: RwSignal<HashMap<i32, u32>>,
 }
 
 pub fn create_report_state() -> ReportState {
@@ -305,6 +306,7 @@ pub fn create_report_state() -> ReportState {
         error: RwSignal::new(Option::<String>::None),
         report_cache: RwSignal::new(HashMap::<i32, ReportData>::new()),
         refresh: RwSignal::new(0_u32),
+        request_generation: RwSignal::new(HashMap::<i32, u32>::new()),
     };
 
     let period = state.period;
@@ -314,6 +316,7 @@ pub fn create_report_state() -> ReportState {
     let error = state.error;
     let report_cache = state.report_cache;
     let refresh = state.refresh;
+    let request_generation = state.request_generation;
 
     let context_year = Memo::new(move |_| {
         if period.get() == ReportPeriod::Week {
@@ -325,7 +328,10 @@ pub fn create_report_state() -> ReportState {
 
     Effect::new(move |_| {
         let year = context_year.get();
-        let _refresh = refresh.get();
+        let generation = refresh.get();
+        request_generation.update(|in_flight| {
+            in_flight.insert(year, generation);
+        });
         if report_cache.get_untracked().contains_key(&year) {
             return;
         }
@@ -334,6 +340,13 @@ pub fn create_report_state() -> ReportState {
         leptos::task::spawn_local(async move {
             match get_report_data(year).await {
                 Ok(report) => {
+                    let is_current = request_generation
+                        .get_untracked()
+                        .get(&year)
+                        .is_some_and(|current_generation| *current_generation == generation);
+                    if !is_current {
+                        return;
+                    }
                     report_cache.update(|cache| {
                         cache.insert(year, report);
                     });

@@ -2065,7 +2065,12 @@ pub fn TimesheetView() -> impl IntoView {
         let focused_context = focused_cell.get_untracked().and_then(|(row, col)| {
             let nw = num_weeks.get_untracked().max(1);
             let col_count = nw * 6;
-            if row >= ts.work_items.len() || col >= col_count {
+            let sel_monday = selected_monday.get_untracked();
+            let week_mondays: Vec<NaiveDate> = (0..nw)
+                .map(|i| sel_monday - Duration::weeks((nw - 1 - i) as i64))
+                .collect();
+            let visible_rows = visible_timesheet_rows(&ts, &week_mondays);
+            if row >= visible_rows.len() || col >= col_count {
                 return None;
             }
             let week_idx = col / 6;
@@ -2078,7 +2083,7 @@ pub fn TimesheetView() -> impl IntoView {
             } else {
                 monday + Duration::days(day_idx as i64)
             };
-            Some((ts.work_items[row].key.clone(), date, day_idx == 5))
+            Some((visible_rows[row].key.clone(), date, day_idx == 5))
         });
 
         let target_issue = {
