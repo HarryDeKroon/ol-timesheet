@@ -683,6 +683,18 @@ async fn fetch_work_items_with_cache_policy(
     end: NaiveDate,
     use_cache: bool,
 ) -> Result<Vec<WorkItem>, String> {
+    fetch_work_items_with_cache_policy_internal(creds, start, end, use_cache)
+        .await
+        .map(|(items, _)| items)
+}
+
+/// Internal version that also returns the set of active-assigned keys.
+async fn fetch_work_items_with_cache_policy_internal(
+    creds: &JiraCredentials,
+    start: NaiveDate,
+    end: NaiveDate,
+    use_cache: bool,
+) -> Result<(Vec<WorkItem>, std::collections::HashSet<String>), String> {
     // JQL for work items with worklogs in the date range
     let worklog_jql = format!(
         "worklogAuthor = \"{}\" AND worklogDate >= \"{}\" AND worklogDate <= \"{}\"",
@@ -703,6 +715,9 @@ async fn fetch_work_items_with_cache_policy(
     let worklog_items = fetch_work_items_by_jql(creds, &worklog_jql, use_cache).await?;
     let assigned_items = fetch_work_items_by_jql(creds, &assigned_jql, use_cache).await?;
 
+    let assigned_keys: std::collections::HashSet<String> =
+        assigned_items.iter().map(|item| item.key.clone()).collect();
+
     let mut seen = std::collections::HashSet::new();
     let mut items: Vec<WorkItem> = Vec::new();
     for item in worklog_items.into_iter().chain(assigned_items.into_iter()) {
@@ -711,7 +726,7 @@ async fn fetch_work_items_with_cache_policy(
         }
     }
 
-    Ok(items)
+    Ok((items, assigned_keys))
 }
 
 /// Fetch all work items the user has logged time on in the given date range,
@@ -810,6 +825,7 @@ fn slice_timesheet_week(
         ytd_hours,
         bitbucket_activity,
         site_url: source.site_url.clone(),
+        active_assigned_keys: source.active_assigned_keys.clone(),
         ..Default::default()
     }
 }
@@ -1421,13 +1437,14 @@ async fn prefetch_range(
     log::debug!("[prefetch] Warming cache for {} .. {}", start, end);
 
     // 1. Fetch work items (populates jira_search cache)
-    let items = match fetch_work_items(&creds, start, end).await {
-        Ok(items) => items,
-        Err(e) => {
-            log::warn!("[prefetch] fetch_work_items failed for {}: {}", start, e);
-            return false;
-        }
-    };
+    let (items, active_assigned_keys) =
+        match fetch_work_items_with_cache_policy_internal(&creds, start, end, true).await {
+            Ok((items, keys)) => (items, keys),
+            Err(e) => {
+                log::warn!("[prefetch] fetch_work_items failed for {}: {}", start, e);
+                return false;
+            }
+        };
 
     let mut all_items = items;
     let mut bitbucket_activity: HashMap<String, CellActivity> = HashMap::new();
@@ -1553,6 +1570,7 @@ async fn prefetch_range(
         hours_per_day: prefs.hours_per_day,
         ytd_hours,
         bitbucket_activity,
+        active_assigned_keys,
         ..Default::default()
     };
 

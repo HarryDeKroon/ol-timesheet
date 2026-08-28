@@ -153,6 +153,11 @@ pub struct TimesheetData {
     /// Used by the client to build worklog deep-link URLs.
     #[serde(default)]
     pub site_url: String,
+    /// Work item keys that are explicitly active-assigned (came from the assignee query).
+    /// Preserved so that filtering can distinguish active-assigned items from items that
+    /// happen to lack activity in the displayed week range but might have activity elsewhere.
+    #[serde(default)]
+    pub active_assigned_keys: std::collections::HashSet<String>,
 }
 
 impl TimesheetData {
