@@ -292,6 +292,8 @@ pub struct ReportState {
     pub loading: RwSignal<bool>,
     pub error: RwSignal<Option<String>>,
     pub report_cache: RwSignal<HashMap<i32, ReportData>>,
+    pub refresh: RwSignal<u32>,
+    pub request_generation: RwSignal<HashMap<i32, u32>>,
 }
 
 pub fn create_report_state() -> ReportState {
@@ -303,6 +305,8 @@ pub fn create_report_state() -> ReportState {
         loading: RwSignal::new(false),
         error: RwSignal::new(Option::<String>::None),
         report_cache: RwSignal::new(HashMap::<i32, ReportData>::new()),
+        refresh: RwSignal::new(0_u32),
+        request_generation: RwSignal::new(HashMap::<i32, u32>::new()),
     };
 
     let period = state.period;
@@ -311,6 +315,8 @@ pub fn create_report_state() -> ReportState {
     let loading = state.loading;
     let error = state.error;
     let report_cache = state.report_cache;
+    let refresh = state.refresh;
+    let request_generation = state.request_generation;
 
     let context_year = Memo::new(move |_| {
         if period.get() == ReportPeriod::Week {
@@ -322,22 +328,52 @@ pub fn create_report_state() -> ReportState {
 
     Effect::new(move |_| {
         let year = context_year.get();
+        let _ = refresh.get();
+        let generation = request_generation
+            .get_untracked()
+            .get(&year)
+            .copied()
+            .unwrap_or(0)
+            .wrapping_add(1);
+        request_generation.update(|in_flight| {
+            in_flight.insert(year, generation);
+        });
         if report_cache.get_untracked().contains_key(&year) {
+            loading.set(false);
             return;
         }
+        error.set(None);
         loading.set(true);
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
+            let still_current = || {
+                let year_matches_context = context_year.get_untracked() == year;
+                let generation_matches = request_generation
+                    .get_untracked()
+                    .get(&year)
+                    .is_some_and(|current_generation| *current_generation == generation);
+                year_matches_context && generation_matches
+            };
             match get_report_data(year).await {
                 Ok(report) => {
+                    if !still_current() {
+                        return;
+                    }
                     report_cache.update(|cache| {
                         cache.insert(year, report);
                     });
                     error.set(None);
                 }
-                Err(e) => error.set(Some(e.to_string())),
+                Err(e) => {
+                    if !still_current() {
+                        return;
+                    }
+                    error.set(Some(e.to_string()));
+                }
             }
-            loading.set(false);
+            if still_current() {
+                loading.set(false);
+            }
         });
     });
     #[cfg(not(feature = "hydrate"))]

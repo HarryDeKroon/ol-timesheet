@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export MSYS_NO_PATHCONV=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
@@ -12,7 +13,7 @@ IMAGE_NAME="${IMAGE_NAME:-oltimesheet:${OLTIMESHEET_VERSION:-0.9.1}}"
 CONTAINER_NAME="${CONTAINER_NAME:-oltimesheet}"
 HOST_PORT="${HOST_PORT:-8081}"
 CONTAINER_PORT="${CONTAINER_PORT:-8081}"
-XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/root/.config/timesheet}"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/root/.config}"
 APP_CONFIG_DIR="${APP_CONFIG_DIR:-$XDG_CONFIG_HOME/timesheet}"
 SESSIONS_DIR="$APP_CONFIG_DIR/sessions"
 CACHE_FILE="$APP_CONFIG_DIR/cache.yaml"
@@ -59,11 +60,15 @@ start_container() {
         --name "$CONTAINER_NAME"
         --restart unless-stopped
         -p "${HOST_PORT}:${CONTAINER_PORT}"
-        -v "${CONFIG_DIR}:${XDG_CONFIG_HOME}"
+        -v "${CONFIG_DIR}:${APP_CONFIG_DIR}"
         -e "XDG_CONFIG_HOME=${XDG_CONFIG_HOME}"
     )
     if [[ -f "$ENV_FILE" ]]; then
-        args+=(--env-file "$ENV_FILE")
+    	if command -v cygpath >/dev/null 2>&1; then
+    		args+=(--env-file "$(cygpath -w "$ENV_FILE")")
+    	else
+    		args+=(--env-file "$ENV_FILE")
+    	fi
     fi
     args+=("$IMAGE_NAME")
 

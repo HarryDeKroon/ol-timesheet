@@ -1499,9 +1499,350 @@ async fn prefetch_range(
                     entry.has_pr_review = true;
                 }
                 for (cell_key, links) in activity.pr_links_by_cell {
+                    if links.is_empty() {
+                        continue;
+                    }
                     let entry = bitbucket_activity.entry(cell_key).or_default();
                     let mut merged = entry.pr_links.clone();
                     merged.extend(links);
+                    merged.sort();
+                    merged.dedup();
+                    entry.pr_links = merged;
+                }
+                if prefs.show_merged_pr_activity {
+                    for (cell_key, links) in &activity.merged_pr_links_by_cell {
+                        if links.is_empty() {
+                            continue;
+                        }
+                        let entry = bitbucket_activity.entry(cell_key.clone()).or_default();
+                        let mut merged = entry.pr_links.clone();
+                        merged.extend(links.iter().cloned());
+                        merged.sort();
+                        merged.dedup();
+                        entry.pr_links = merged;
+                    }
+                }
+                if !prefs.show_merged_pr_activity {
+                    for cell_key in activity.merged_pr_links_by_cell.keys() {
+                        if let Some(entry) = bitbucket_activity.get_mut(cell_key) {
+                            entry.pr_links.sort();
+                            entry.pr_links.dedup();
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("[prefetch] fetch_timesheet_activity failed: {}", e);
+            }
+        }
+    }
+
+    // 2. Fetch worklogs per issue (populates jira_worklogs:{key} cache)
+    let mut all_worklogs = Vec::new();
+    let mut ytd_hours: HashMap<String, f64> = HashMap::new();
+    for item in &all_items {
+        match fetch_worklogs(&creds, &item.key, start, end).await {
+            Ok((wls, total)) => {
+                all_worklogs.extend(wls);
+                ytd_hours.insert(item.key.clone(), total);
+            }
+            Err(e) => log::warn!("[prefetch] worklogs for {} failed: {}", item.key, e),
+        }
+    }
+
+    // 3. Assemble and cache the TimesheetData.
+    crate::model::sort_work_items_for_timesheet(&mut all_items, &all_worklogs, &bitbucket_activity);
+    let mut ts = TimesheetData {
+        work_items: all_items,
+        worklogs: all_worklogs,
+        hours_per_week,
+        hours_per_day,
+        ytd_hours,
+        bitbucket_activity,
+        site_url,
+        ..Default::default()
+    };
+
+    // 4. Ensure only rows/cells with current visibility remain (same rules as UI data path).
+    // Preserve active assigned rows that have no activity.
+    let visible_item_keys: HashSet<String> = ts
+        .worklogs
+        .iter()
+        .map(|w| w.issue_key.clone())
+        .chain(ts.bitbucket_activity.keys().filter_map(|k| {
+            k.split_once(':').map(|(issue_key, _)| issue_key.to_string())
+        }))
+        .collect();
+    let active_assigned_keys = ts
+        .work_items
+        .iter()
+        .filter(|item| {
+            !ts.worklogs.iter().any(|w| w.issue_key == item.key)
+                && !ts.bitbucket_activity.keys().any(|cell_key| {
+                    cell_key
+                        .split_once(':')
+                        .map(|(key, _)| key == item.key)
+                        .unwrap_or(false)
+                })
+        })
+        .map(|item| item.key.clone())
+        .collect::<HashSet<_>>();
+    let allowed_keys = visible_item_keys
+        .union(&active_assigned_keys)
+        .cloned()
+        .collect::<HashSet<_>>();
+    ts.work_items.retain(|i| allowed_keys.contains(&i.key));
+    ts.ytd_hours.retain(|k, _| allowed_keys.contains(k));
+    ts.bitbucket_activity.retain(|cell_key, _| {
+        cell_key
+            .split_once(':')
+            .map(|(issue_key, _)| allowed_keys.contains(issue_key))
+            .unwrap_or(false)
+    });
+    crate::model::sort_work_items_for_timesheet(&mut ts.work_items, &ts.worklogs, &ts.bitbucket_activity);
+
+    cache::set_timesheet_data(start, end, account_id, &ts);
+}
+
+[derive(Serialize)]
+struct WorklogPayload<'a> {
+    started: &'a str,
+    #[serde(rename = "timeSpentSeconds")]
+    time_spent_seconds: i64,
+    comment: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct JiraWorklogResponse {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct JiraUserProfile {
+    #[serde(default)]
+    #[serde(rename = "displayName")]
+    display_name: String,
+    #[serde(default)]
+    #[serde(rename = "avatarUrls")]
+    avatar_urls: std::collections::HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct JiraIssue {
+    key: String,
+    fields: JiraIssueFields,
+}
+
+#[derive(Deserialize)]
+struct JiraIssueFields {
+    summary: String,
+    #[serde(rename = "issuetype")]
+    issue_type: JiraIssueType,
+}
+
+#[derive(Deserialize)]
+struct JiraIssueType {
+    name: String,
+    #[serde(default)]
+    iconUrl: String,
+}
+
+#[derive(Deserialize)]
+struct JiraSearchResponse {
+    issues: Vec<JiraIssue>,
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<String>,
+    #[serde(default, rename = "isLast")]
+    is_last: bool,
+}
+
+#[derive(Deserialize)]
+struct JiraWorklogAuthor {
+    #[serde(default)]
+    #[serde(rename = "emailAddress")]
+    email_address: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JiraComment {
+    Plain(String),
+    Adf(serde_json::Value),
+}
+
+#[derive(Deserialize)]
+struct JiraWorklog {
+    id: String,
+    started: String,
+    #[serde(rename = "timeSpentSeconds")]
+    time_spent_seconds: i64,
+    #[serde(default)]
+    comment: Option<JiraComment>,
+    author: JiraWorklogAuthor,
+}
+
+#[derive(Deserialize)]
+struct JiraWorklogResponsePage {
+    worklogs: Vec<JiraWorklog>,
+}
+
+#[derive(Deserialize)]
+struct JiraPickerIssueType {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    iconUrl: String,
+}
+
+#[derive(Deserialize)]
+struct JiraPickerIssue {
+    key: String,
+    summary: String,
+    #[serde(default)]
+    issuetype: Option<JiraPickerIssueType>,
+}
+
+#[derive(Deserialize)]
+struct JiraPickerSection {
+    #[serde(default)]
+    issues: Vec<JiraPickerIssue>,
+}
+
+#[derive(Deserialize)]
+struct JiraPickerResponse {
+    #[serde(default)]
+    sections: Vec<JiraPickerSection>,
+}
+
+#[cfg(feature = "ssr")]
+fn get_auth_header(creds: &JiraCredentials) -> String {
+    use base64::Engine;
+    let creds = format!("{}:{}", creds.email, creds.access_token);
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(creds)
+    )
+}
+
+#[cfg(feature = "ssr")]
+fn get_api_base_url() -> String {
+    if std::env::var("JIRA_CLOUD_ID").is_ok() {
+        "https://api.atlassian.com/ex/jira".to_string()
+    } else {
+        "https://uplandsoftware.atlassian.net/rest/api/3".to_string()
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn endpoint_for(creds: &JiraCredentials, path: &str) -> String {
+    let base = get_api_base_url();
+    if std::env::var("JIRA_CLOUD_ID").is_ok() {
+        format!("{}/{}/rest/api/3{}", base, creds.cloud_id, path)
+    } else {
+        format!("{}{}", base, path)
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn log_jira_error(context: &str, status: reqwest::StatusCode, body: &str) -> String {
+    let msg = format!("Jira API error {}: {}", status, body);
+    log::warn!("[jira] {} {}", context, msg);
+    msg
+}
+
+#[cfg(feature = "ssr")]
+fn merge_cell_activity(
+    target: &mut HashMap<String, CellActivity>,
+    source: HashMap<String, CellActivity>,
+) {
+    for (cell_key, patch) in source {
+        let entry = target.entry(cell_key).or_default();
+        if !patch.commit_messages.is_empty() {
+            entry.commit_messages.extend(patch.commit_messages);
+            entry.commit_messages.sort();
+            entry.commit_messages.dedup();
+        }
+        if !patch.commit_links.is_empty() {
+            entry.commit_links.extend(patch.commit_links);
+            entry.commit_links.sort();
+            entry.commit_links.dedup();
+        }
+        if !patch.test_result_links.is_empty() {
+            entry.test_result_links.extend(patch.test_result_links);
+            entry.test_result_links.sort();
+            entry.test_result_links.dedup();
+        }
+        if !patch.pr_links.is_empty() {
+            entry.pr_links.extend(patch.pr_links);
+            entry.pr_links.sort();
+            entry.pr_links.dedup();
+        }
+        entry.has_pr_review = entry.has_pr_review || patch.has_pr_review;
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn issue_key_from_cell_key(cell_key: &str) -> Option<&str> {
+    cell_key.split_once(':').map(|(issue_key, _)| issue_key)
+}
+
+#[cfg(feature = "ssr")]
+fn bitbucket_activity_to_cell_map(
+    activity: crate::api::bitbucket::BitbucketActivity,
+    show_merged_pr: bool,
+) -> HashMap<String, CellActivity> {
+    let mut cells: HashMap<String, CellActivity> = HashMap::new();
+
+    let filtered_pr_review: std::collections::HashSet<String> = if show_merged_pr {
+        activity.pr_review_cells.clone()
+    } else {
+        activity
+            .pr_review_cells
+            .difference(&activity.pr_merged_cells)
+            .cloned()
+            .collect()
+    };
+
+    for (cell_key, msgs) in activity.commit_messages_by_cell {
+        cells.entry(cell_key).or_default().commit_messages = msgs;
+    }
+    for (cell_key, links) in activity.commit_links_by_cell {
+        let entry = cells.entry(cell_key).or_default();
+        let mut merged = entry.commit_links.clone();
+        merged.extend(links);
+        merged.sort();
+        merged.dedup();
+        entry.commit_links = merged;
+    }
+    for cell_key in filtered_pr_review {
+        cells.entry(cell_key).or_default().has_pr_review = true;
+    }
+    for (cell_key, links) in activity.pr_links_by_cell {
+        if links.is_empty() {
+            continue;
+        }
+        let entry = cells.entry(cell_key).or_default();
+        let mut merged = entry.pr_links.clone();
+        merged.extend(links);
+        merged.sort();
+        merged.dedup();
+        entry.pr_links = merged;
+    }
+    if show_merged_pr {
+        for (cell_key, links) in activity.merged_pr_links_by_cell {
+            if links.is_empty() {
+                continue;
+            }
+            let entry = cells.entry(cell_key).or_default();
+            let mut merged = entry.pr_links.clone();
+            merged.extend(links);
+            merged.sort();
+            merged.dedup();
+            entry.pr_links = merged;
+        }
+    }
+    cells
+}
                     merged.sort();
                     merged.dedup();
                     entry.pr_links = merged;
@@ -1876,9 +2217,24 @@ fn bitbucket_activity_to_cell_map(
         cells.entry(cell_key).or_default().has_pr_review = true;
     }
     for (cell_key, links) in activity.pr_links_by_cell {
+        let filtered_links = if show_merged_pr {
+            links
+        } else {
+            let open_only = links
+                .into_iter()
+                .filter(|link| !link.contains("/merged"))
+                .collect::<Vec<_>>();
+            if open_only.is_empty() {
+                continue;
+            }
+            open_only
+        };
+        if filtered_links.is_empty() {
+            continue;
+        }
         let entry = cells.entry(cell_key).or_default();
         let mut merged = entry.pr_links.clone();
-        merged.extend(links);
+        merged.extend(filtered_links);
         merged.sort();
         merged.dedup();
         entry.pr_links = merged;

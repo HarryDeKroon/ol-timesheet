@@ -37,6 +37,7 @@ pub struct BitbucketActivity {
     pub pr_review_cells: HashSet<String>,
     pub pr_merged_cells: HashSet<String>,
     pub pr_links_by_cell: HashMap<String, Vec<String>>,
+    pub merged_pr_links_by_cell: HashMap<String, Vec<String>>,
     pub discovered_item_summaries: HashMap<String, String>,
 }
 
@@ -369,6 +370,16 @@ fn filter_activity_by_range(
         if key_in_range(cell_key, start, end) {
             filtered
                 .pr_links_by_cell
+                .insert(cell_key.clone(), values.clone());
+            if let Some(key) = issue_key_from_cell(cell_key) {
+                referenced_keys.insert(key);
+            }
+        }
+    }
+    for (cell_key, values) in &source.merged_pr_links_by_cell {
+        if key_in_range(cell_key, start, end) {
+            filtered
+                .merged_pr_links_by_cell
                 .insert(cell_key.clone(), values.clone());
             if let Some(key) = issue_key_from_cell(cell_key) {
                 referenced_keys.insert(key);
@@ -1388,11 +1399,20 @@ async fn fetch_timesheet_activity_inner(
                         activity.pr_merged_cells.insert(map_key.clone());
                     }
                     if let Some(link) = pr_link(&repo_base, &pr) {
-                        activity
-                            .pr_links_by_cell
-                            .entry(format!("{}:{}", key, pr_date))
-                            .or_default()
-                            .push(link);
+                        let cell_key = format!("{}:{}", key, pr_date);
+                        if pr.state.as_deref() == Some("MERGED") {
+                            activity
+                                .merged_pr_links_by_cell
+                                .entry(cell_key)
+                                .or_default()
+                                .push(link);
+                        } else {
+                            activity
+                                .pr_links_by_cell
+                                .entry(cell_key)
+                                .or_default()
+                                .push(link);
+                        }
                     }
                     let cleaned = strip_key_prefix(&pr.title, &key);
                     activity
