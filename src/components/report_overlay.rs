@@ -342,6 +342,7 @@ pub fn create_report_state() -> ReportState {
             loading.set(false);
             return;
         }
+        error.set(None);
         loading.set(true);
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
