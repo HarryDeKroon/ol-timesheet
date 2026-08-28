@@ -339,18 +339,23 @@ pub fn create_report_state() -> ReportState {
             in_flight.insert(year, generation);
         });
         if report_cache.get_untracked().contains_key(&year) {
+            loading.set(false);
             return;
         }
         loading.set(true);
         #[cfg(feature = "hydrate")]
         leptos::task::spawn_local(async move {
+            let still_current = || {
+                let year_matches_context = context_year.get_untracked() == year;
+                let generation_matches = request_generation
+                    .get_untracked()
+                    .get(&year)
+                    .is_some_and(|current_generation| *current_generation == generation);
+                year_matches_context && generation_matches
+            };
             match get_report_data(year).await {
                 Ok(report) => {
-                    let is_current = request_generation
-                        .get_untracked()
-                        .get(&year)
-                        .is_some_and(|current_generation| *current_generation == generation);
-                    if !is_current {
+                    if !still_current() {
                         return;
                     }
                     report_cache.update(|cache| {
@@ -358,9 +363,16 @@ pub fn create_report_state() -> ReportState {
                     });
                     error.set(None);
                 }
-                Err(e) => error.set(Some(e.to_string())),
+                Err(e) => {
+                    if !still_current() {
+                        return;
+                    }
+                    error.set(Some(e.to_string()));
+                }
             }
-            loading.set(false);
+            if still_current() {
+                loading.set(false);
+            }
         });
     });
     #[cfg(not(feature = "hydrate"))]
