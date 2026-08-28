@@ -70,7 +70,8 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
     // Keep only items that are visible in this specific week:
     // - items with at least one worklog in the week
     // - items with at least one git activity cell in the week
-    // - currently active assignee/status items (already present in source.work_items)
+    // - currently active assignee/status items (tracked separately in source.work_items
+    //   as rows that have no week activity)
     //
     // This prevents stale rows from wider cached ranges (e.g. 5-week view)
     // from leaking into narrower ranges (e.g. 2-week view) after resize.
@@ -83,7 +84,21 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
             .keys()
             .filter_map(|k| k.split_once(':').map(|(key, _)| key.to_string())),
     );
-    week_keys.extend(source.work_items.iter().map(|i| i.key.clone()));
+    let active_assigned_keys = source
+        .work_items
+        .iter()
+        .filter(|item| {
+            !source.worklogs.iter().any(|w| w.issue_key == item.key)
+                && !source.bitbucket_activity.keys().any(|cell_key| {
+                    cell_key
+                        .split_once(':')
+                        .map(|(key, _)| key == item.key)
+                        .unwrap_or(false)
+                })
+        })
+        .map(|item| item.key.clone())
+        .collect::<HashSet<_>>();
+    week_keys.extend(active_assigned_keys);
 
     let work_items = source
         .work_items
@@ -2179,6 +2194,8 @@ pub fn TimesheetView() -> impl IntoView {
             };
             let issue_key_for_optimistic = issue_key.clone();
             let description_for_optimistic = description.clone();
+            let optimistic_hours_for_revert = hours;
+            let optimistic_comment_for_revert = description_for_optimistic.clone();
             last_data.update(|opt| {
                 if let Some(ts) = opt.as_mut() {
                     if existing_id.is_empty() {
@@ -2269,6 +2286,8 @@ pub fn TimesheetView() -> impl IntoView {
                             } else if let Some(previous) = previous_fields_for_revert.as_ref()
                                 && let Some(current) =
                                     ts.worklogs.iter_mut().find(|w| w.id == optimistic_id)
+                                && current.hours == optimistic_hours_for_revert
+                                && current.comment == optimistic_comment_for_revert
                             {
                                 current.hours = previous.hours;
                                 current.comment = previous.comment.clone();
@@ -2287,6 +2306,8 @@ pub fn TimesheetView() -> impl IntoView {
                             } else if let Some(previous) = previous_fields_for_revert.as_ref()
                                 && let Some(current) =
                                     popup.entries.iter_mut().find(|w| w.id == optimistic_id)
+                                && current.hours == optimistic_hours_for_revert
+                                && current.comment == optimistic_comment_for_revert
                             {
                                 current.hours = previous.hours;
                                 current.comment = previous.comment.clone();
@@ -2411,7 +2432,7 @@ pub fn TimesheetView() -> impl IntoView {
     let report_period_for_open = report_state.period;
     let report_month_for_open = report_state.selected_month;
     let report_year_for_open = report_state.selected_year;
-    let on_open_report = move |_| {
+    let open_report = move || {
         let year = if report_period_for_open.get_untracked()
             == crate::components::report_overlay::ReportPeriod::Week
         {
@@ -2425,6 +2446,7 @@ pub fn TimesheetView() -> impl IntoView {
         report_refresh.update(|n| *n = n.wrapping_add(1));
         show_report.set(true);
     };
+    let on_open_report = move |_| open_report();
 
     // ── beforeunload listener: flush open popups on page leave ──
     #[cfg(feature = "hydrate")]
@@ -2630,7 +2652,7 @@ pub fn TimesheetView() -> impl IntoView {
                             }
                             "r" => {
                                 ev.prevent_default();
-                                show_report.set(true);
+                                open_report();
                             }
                             "f" => {
                                 ev.prevent_default();
