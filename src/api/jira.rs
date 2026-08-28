@@ -1604,22 +1604,7 @@ async fn prefetch_range(
     cache::set_timesheet_data(start, end, account_id, &ts);
 }
 
-#[cfg(feature = "ssr")]
-fn make_adf_comment(text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "doc",
-        "version": 1,
-        "content": [{
-            "type": "paragraph",
-            "content": [{
-                "type": "text",
-                "text": text
-            }]
-        }]
-    })
-}
-
-#[derive(Serialize)]
+[derive(Serialize)]
 struct WorklogPayload<'a> {
     started: &'a str,
     #[serde(rename = "timeSpentSeconds")]
