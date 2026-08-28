@@ -2431,20 +2431,8 @@ pub fn TimesheetView() -> impl IntoView {
     });
     let report_cache_for_open = report_state.report_cache;
     let report_refresh = report_state.refresh;
-    let report_period_for_open = report_state.period;
-    let report_month_for_open = report_state.selected_month;
-    let report_year_for_open = report_state.selected_year;
     let open_report = move || {
-        let year = if report_period_for_open.get_untracked()
-            == crate::components::report_overlay::ReportPeriod::Week
-        {
-            report_month_for_open.get_untracked().year()
-        } else {
-            report_year_for_open.get_untracked()
-        };
-        report_cache_for_open.update(|cache| {
-            cache.remove(&year);
-        });
+        report_cache_for_open.update(|cache| cache.clear());
         report_refresh.update(|n| *n = n.wrapping_add(1));
         show_report.set(true);
     };
