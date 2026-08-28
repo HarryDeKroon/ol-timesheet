@@ -359,8 +359,24 @@ fn bitbucket_activity_cells_from_source(
         entry.has_pr_review = true;
     }
     for (cell_key, pr_links) in &activity.pr_links_by_cell {
+        let filtered_links = if show_merged_pr_activity {
+            pr_links.clone()
+        } else {
+            let open_only = pr_links
+                .iter()
+                .filter(|link| !link.contains("/merged"))
+                .cloned()
+                .collect::<Vec<_>>();
+            if open_only.is_empty() {
+                continue;
+            }
+            open_only
+        };
+        if filtered_links.is_empty() {
+            continue;
+        }
         let entry = by_cell.entry(cell_key.clone()).or_default();
-        entry.pr_links = pr_links.clone();
+        entry.pr_links = filtered_links;
     }
     by_cell
 }
@@ -493,8 +509,23 @@ async fn build_refresh_snapshot(
         entry.has_pr_review = true;
     }
     for (cell_key, pr_links) in bitbucket_activity.pr_links_by_cell {
+        let filtered_links = if prefs.show_merged_pr_activity {
+            pr_links
+        } else {
+            let open_only = pr_links
+                .into_iter()
+                .filter(|link| !link.contains("/merged"))
+                .collect::<Vec<_>>();
+            if open_only.is_empty() {
+                continue;
+            }
+            open_only
+        };
+        if filtered_links.is_empty() {
+            continue;
+        }
         let entry = bitbucket_activity_by_cell.entry(cell_key).or_default();
-        entry.pr_links = pr_links;
+        entry.pr_links = filtered_links;
     }
 
     let bitbucket_visible_keys = bitbucket_activity_by_cell

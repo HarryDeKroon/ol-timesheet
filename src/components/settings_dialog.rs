@@ -401,12 +401,20 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     let loaded_reporting_options = RwSignal::new(false);
     let dialog_ref: NodeRef<leptos::html::Div> = NodeRef::new();
 
-    // Focus the dialog container the moment it mounts so that keyboard events
-    // (Tab, Escape) are captured immediately — before the settings resource resolves.
+    // Focus the dialog container after mount so keyboard events are captured
+    // immediately, even when opened via global hotkeys.
     #[cfg(feature = "hydrate")]
     dialog_ref.on_load(move |el| {
         use leptos::wasm_bindgen::JsCast;
-        let _ = el.unchecked_ref::<web_sys::HtmlElement>().focus();
+        use leptos::wasm_bindgen::closure::Closure;
+        let dialog_html: web_sys::HtmlElement = el.unchecked_ref::<web_sys::HtmlElement>().clone();
+        let cb = Closure::once(move || {
+            let _ = dialog_html.focus();
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
+        }
+        cb.forget();
     });
 
     let non_billable_options =
@@ -747,6 +755,8 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
 
     let on_dialog_keydown = move |ev: leptos::ev::KeyboardEvent| match ev.key().as_str() {
         "Tab" => {
+            ev.prevent_default();
+            ev.stop_propagation();
             #[cfg(feature = "hydrate")]
             {
                 use leptos::wasm_bindgen::JsCast;
@@ -829,16 +839,17 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                     current_idx.map(|idx| (idx + 1) % focusables.len())
                 }
                 .unwrap_or(0);
-                ev.prevent_default();
                 let _ = focusables[next_idx].focus();
             }
         }
         "Escape" => {
             ev.prevent_default();
+            ev.stop_propagation();
             on_cancel.run(());
         }
         "Enter" => {
             ev.prevent_default();
+            ev.stop_propagation();
             if form_valid.get() {
                 save_action.dispatch(());
             }
@@ -846,11 +857,52 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
         _ => {}
     };
 
+    let on_overlay_keydown = {
+        let on_dialog_keydown = on_dialog_keydown.clone();
+        move |ev: leptos::ev::KeyboardEvent| {
+            on_dialog_keydown(ev);
+        }
+    };
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        use leptos::wasm_bindgen::JsCast;
+
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(document) = window.document() else {
+            return;
+        };
+        let Some(dialog) = dialog_ref.get() else {
+            return;
+        };
+
+        let active_inside_dialog = document
+            .active_element()
+            .map(|active| {
+                let active_node: &web_sys::Node = active.unchecked_ref();
+                dialog.contains(Some(active_node))
+            })
+            .unwrap_or(false);
+        if !active_inside_dialog {
+            let _ = dialog.unchecked_ref::<web_sys::HtmlElement>().focus();
+        }
+    });
+
     view! {
-        <div class="settings-overlay">
+        <div class="settings-overlay" tabindex="0" on:keydown=on_overlay_keydown>
             <div class="settings-backdrop" on:click=move |_| on_cancel.run(())></div>
-            <div class="settings-dialog" node_ref=dialog_ref tabindex="-1" on:keydown=on_dialog_keydown>
-                <h2>{move || i18n.get().t(keys::SETTINGS_TITLE)}</h2>
+            <div
+                class="settings-dialog"
+                node_ref=dialog_ref
+                tabindex="-1"
+role="dialog"
+                aria-modal="true"
+                aria-labelledby="settings-dialog-title"
+                on:keydown=on_dialog_keydown
+            >
+                <h2 id="settings-dialog-title">{move || i18n.get().t(keys::SETTINGS_TITLE)}</h2>
 
                 <Suspense fallback=move || view! { <p>{move || i18n.get().t(keys::LOADING_SETTINGS)}</p> }>
                     <SettingsGroup title=title_language.clone()>
@@ -868,7 +920,6 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                             <div class=move || if lang_menu_open.get() { "lang-menu lang-menu-open" } else { "lang-menu" }>
                                 {supported_langs.iter().map(|(code, name, flag)| {
                                     let code = code.to_string();
-                                    let is_selected = current_lang.get() == *code;
                                     let on_click = {
                                         let code = code.clone();
                                         let on_lang_change = on_lang_change.clone();
@@ -879,7 +930,11 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                                         }
                                     };
                                     view! {
-                                        <div class="lang-menu-item" class:lang-menu-item-selected=is_selected on:click=on_click>
+                                        <div
+                                            class="lang-menu-item"
+                                            class:lang-menu-item-selected=move || current_lang.get() == code
+                                            on:click=on_click
+                                        >
                                             <span inner_html={*flag} title={*name}></span>
                                             <span>{*name}</span>
                                         </div>

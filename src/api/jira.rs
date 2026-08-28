@@ -1499,9 +1499,24 @@ async fn prefetch_range(
                     entry.has_pr_review = true;
                 }
                 for (cell_key, links) in activity.pr_links_by_cell {
+                    let filtered_links = if prefs.show_merged_pr_activity {
+                        links
+                    } else {
+                        let open_only = links
+                            .into_iter()
+                            .filter(|link| !link.contains("/merged"))
+                            .collect::<Vec<_>>();
+                        if open_only.is_empty() {
+                            continue;
+                        }
+                        open_only
+                    };
+                    if filtered_links.is_empty() {
+                        continue;
+                    }
                     let entry = bitbucket_activity.entry(cell_key).or_default();
                     let mut merged = entry.pr_links.clone();
-                    merged.extend(links);
+                    merged.extend(filtered_links);
                     merged.sort();
                     merged.dedup();
                     entry.pr_links = merged;
@@ -1876,9 +1891,24 @@ fn bitbucket_activity_to_cell_map(
         cells.entry(cell_key).or_default().has_pr_review = true;
     }
     for (cell_key, links) in activity.pr_links_by_cell {
+        let filtered_links = if show_merged_pr {
+            links
+        } else {
+            let open_only = links
+                .into_iter()
+                .filter(|link| !link.contains("/merged"))
+                .collect::<Vec<_>>();
+            if open_only.is_empty() {
+                continue;
+            }
+            open_only
+        };
+        if filtered_links.is_empty() {
+            continue;
+        }
         let entry = cells.entry(cell_key).or_default();
         let mut merged = entry.pr_links.clone();
-        merged.extend(links);
+        merged.extend(filtered_links);
         merged.sort();
         merged.dedup();
         entry.pr_links = merged;
