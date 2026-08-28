@@ -2194,7 +2194,9 @@ pub fn TimesheetView() -> impl IntoView {
             };
             let issue_key_for_optimistic = issue_key.clone();
             let description_for_optimistic = description.clone();
+            #[cfg(feature = "hydrate")]
             let optimistic_hours_for_revert = hours;
+            #[cfg(feature = "hydrate")]
             let optimistic_comment_for_revert = description_for_optimistic.clone();
             last_data.update(|opt| {
                 if let Some(ts) = opt.as_mut() {
