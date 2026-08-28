@@ -900,7 +900,6 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
 role="dialog"
                 aria-modal="true"
                 aria-labelledby="settings-dialog-title"
-                on:keydown:window=on_dialog_keydown
                 on:keydown=on_dialog_keydown
             >
                 <h2 id="settings-dialog-title">{move || i18n.get().t(keys::SETTINGS_TITLE)}</h2>
