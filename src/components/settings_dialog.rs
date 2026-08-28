@@ -897,12 +897,13 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                 class="settings-dialog"
                 node_ref=dialog_ref
                 tabindex="-1"
-                role="dialog"
+role="dialog"
                 aria-modal="true"
+                aria-labelledby="settings-dialog-title"
                 on:keydown:window=on_dialog_keydown
                 on:keydown=on_dialog_keydown
             >
-                <h2>{move || i18n.get().t(keys::SETTINGS_TITLE)}</h2>
+                <h2 id="settings-dialog-title">{move || i18n.get().t(keys::SETTINGS_TITLE)}</h2>
 
                 <Suspense fallback=move || view! { <p>{move || i18n.get().t(keys::LOADING_SETTINGS)}</p> }>
                     <SettingsGroup title=title_language.clone()>
