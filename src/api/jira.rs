@@ -1510,13 +1510,13 @@ async fn prefetch_range(
                     entry.pr_links = merged;
                 }
                 if prefs.show_merged_pr_activity {
-                    for (cell_key, links) in activity.merged_pr_links_by_cell {
+                    for (cell_key, links) in &activity.merged_pr_links_by_cell {
                         if links.is_empty() {
                             continue;
                         }
-                        let entry = bitbucket_activity.entry(cell_key).or_default();
+                        let entry = bitbucket_activity.entry(cell_key.clone()).or_default();
                         let mut merged = entry.pr_links.clone();
-                        merged.extend(links);
+                        merged.extend(links.iter().cloned());
                         merged.sort();
                         merged.dedup();
                         entry.pr_links = merged;
