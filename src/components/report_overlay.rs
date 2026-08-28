@@ -328,7 +328,13 @@ pub fn create_report_state() -> ReportState {
 
     Effect::new(move |_| {
         let year = context_year.get();
-        let generation = refresh.get();
+        let _ = refresh.get();
+        let generation = request_generation
+            .get_untracked()
+            .get(&year)
+            .copied()
+            .unwrap_or(0)
+            .wrapping_add(1);
         request_generation.update(|in_flight| {
             in_flight.insert(year, generation);
         });
