@@ -67,6 +67,10 @@ pub mod keys {
     pub const CONNECTION_DISCONNECTED: &str = "connection_disconnected";
     pub const CONNECTION_UNAVAILABLE: &str = "connection_unavailable";
     pub const TIMER_START: &str = "timer_start";
+    pub const ANONYMOUS_TIMER: &str = "anonymous_timer";
+    pub const ANONYMOUS_TIMER_START: &str = "anonymous_timer_start";
+    pub const ANONYMOUS_TIMER_NO_SAVE: &str = "anonymous_timer_no_save";
+    pub const ANONYMOUS_TIMER_HELP: &str = "anonymous_timer_help";
     pub const TIMER_PAUSE: &str = "timer_pause";
     pub const TIMER_RESUME: &str = "timer_resume";
     pub const TIMER_STOP: &str = "timer_stop";
@@ -197,6 +201,16 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::CONNECTION_DISCONNECTED, "Disconnected"),
         (keys::CONNECTION_UNAVAILABLE, "Connection unavailable"),
         (keys::TIMER_START, "Start timer"),
+        (keys::ANONYMOUS_TIMER, "Anonymous timer"),
+        (keys::ANONYMOUS_TIMER_START, "Start anonymous timer (Alt+A)"),
+        (
+            keys::ANONYMOUS_TIMER_NO_SAVE,
+            "Anonymous timers cannot be saved to Jira",
+        ),
+        (
+            keys::ANONYMOUS_TIMER_HELP,
+            "Not linked to a work item. Kept only in this browser; closing discards this timer.",
+        ),
         (keys::TIMER_PAUSE, "Pause timer"),
         (keys::TIMER_RESUME, "Resume timer"),
         (keys::TIMER_STOP, "Stop timer"),
@@ -381,6 +395,19 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::CONNECTION_DISCONNECTED, "Déconnecté"),
         (keys::CONNECTION_UNAVAILABLE, "Connexion indisponible"),
         (keys::TIMER_START, "Démarrer le minuteur"),
+        (keys::ANONYMOUS_TIMER, "Minuteur anonyme"),
+        (
+            keys::ANONYMOUS_TIMER_START,
+            "Démarrer un minuteur anonyme (Alt+A)",
+        ),
+        (
+            keys::ANONYMOUS_TIMER_NO_SAVE,
+            "Les minuteurs anonymes ne peuvent pas être enregistrés dans Jira",
+        ),
+        (
+            keys::ANONYMOUS_TIMER_HELP,
+            "Sans lien avec un ticket. Conservé uniquement dans ce navigateur ; fermer supprime ce minuteur.",
+        ),
         (keys::TIMER_PAUSE, "Mettre en pause"),
         (keys::TIMER_RESUME, "Reprendre le minuteur"),
         (keys::TIMER_STOP, "Arrêter le minuteur"),
@@ -562,6 +589,16 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::CONNECTION_DISCONNECTED, "Verbinding verbroken"),
         (keys::CONNECTION_UNAVAILABLE, "Verbinding niet beschikbaar"),
         (keys::TIMER_START, "Timer starten"),
+        (keys::ANONYMOUS_TIMER, "Anonieme timer"),
+        (keys::ANONYMOUS_TIMER_START, "Anonieme timer starten (Alt+A)"),
+        (
+            keys::ANONYMOUS_TIMER_NO_SAVE,
+            "Anonieme timers kunnen niet in Jira worden opgeslagen",
+        ),
+        (
+            keys::ANONYMOUS_TIMER_HELP,
+            "Niet gekoppeld aan een werkitem. Alleen in deze browser bewaard; sluiten verwijdert deze timer.",
+        ),
         (keys::TIMER_PAUSE, "Timer pauzeren"),
         (keys::TIMER_RESUME, "Timer hervatten"),
         (keys::TIMER_STOP, "Timer stoppen"),

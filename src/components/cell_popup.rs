@@ -206,6 +206,8 @@ pub fn CellPopup(
     pos_sig: RwSignal<String>,
     issue_key: String,
     issue_summary: String,
+    #[prop(default = false)] is_anonymous: bool,
+    anonymous_timer_trigger: RwSignal<u64>,
     date: NaiveDate,
     entries: Vec<WorklogEntry>,
     hours_per_day: f64,
@@ -391,6 +393,35 @@ pub fn CellPopup(
         };
     let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> =
         RwSignal::new(initial_new_entries);
+    let popup_owner = Owner::current();
+    let append_new_row = Callback::new(move |last_index: usize| {
+        let Some(owner) = popup_owner.as_ref() else {
+            log::error!("[CellPopup] Cannot add a row without a reactive owner");
+            return;
+        };
+        if new_entries.with_untracked(|rows| rows.len() == last_index + 1) {
+            // Rows must outlive the render scope of the button that creates them.
+            let row = owner.with(|| (RwSignal::new(String::new()), RwSignal::new(String::new())));
+            new_entries.update(|rows| rows.push(row));
+        }
+    });
+
+    if is_anonymous && restored_popup.is_none() {
+        if let Some((hours_sig, _)) = new_entries.with_untracked(|rows| rows.first().copied()) {
+            timer_mgr.start(
+                TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: 1000,
+                },
+                hours_sig,
+                hours_per_day,
+                hours_per_week,
+                i18n.get_untracked().decimal_separator,
+            );
+            append_new_row.run(0);
+        }
+    }
 
     // ── Drag support ──
     // We use Rc<Cell<>> for drag state because these closures
@@ -495,6 +526,7 @@ pub fn CellPopup(
             save_persisted_timer_popup(PersistedTimerPopup {
                 issue_key: issue_key.clone(),
                 issue_summary: issue_summary.clone(),
+                is_anonymous,
                 date,
                 suggested_comment: suggested_comment.clone(),
                 is_git_log,
@@ -637,6 +669,13 @@ pub fn CellPopup(
     // ── Validation (Save enablement) ────────────────────────────────────
     let existing_for_validation = existing.clone();
     let popup_validations = Memo::new(move |_| {
+        if is_anonymous {
+            return (
+                false,
+                vec![PopupRowValidation::default(); existing_for_validation.len()],
+                vec![PopupRowValidation::default(); new_entries.get().len()],
+            );
+        }
         let w = i18n.get();
         let dec_sep = w.decimal_separator;
         let wl = w.t(keys::WEEK_ABBR);
@@ -782,6 +821,13 @@ pub fn CellPopup(
         let issue_key_for_stop = issue_key.clone();
         let saving_timer_rows = saving_timer_rows.clone();
         move |latch: Option<FlushLatch>| {
+            if is_anonymous {
+                log::warn!("[CellPopup] Anonymous timers cannot be saved to Jira");
+                if let Some(latch) = latch {
+                    latch.arrive();
+                }
+                return;
+            }
             let w = i18n.get_untracked();
             let dec_sep = w.decimal_separator;
             let wl = w.t(keys::WEEK_ABBR);
@@ -906,7 +952,7 @@ pub fn CellPopup(
     // Build is_dirty / is_valid closures that inspect popup signals without
     // subscribing (get_untracked), then register with PopupDraftManager so
     // navigation actions can auto-save this popup.
-    {
+    if !is_anonymous {
         let existing_for_dirty = existing.clone();
         let popup_has_active_timers = popup_has_active_timers.clone();
         let is_dirty: Rc<dyn Fn() -> bool> = Rc::new(move || {
@@ -1104,6 +1150,11 @@ pub fn CellPopup(
             }
             match key.as_str() {
                 "Enter" if ev.ctrl_key() => {
+                    if is_anonymous {
+                        ev.prevent_default();
+                        ev.stop_propagation();
+                        return;
+                    }
                     if save_enabled.get() && conn.is_available() {
                         ev.prevent_default();
                         ev.stop_propagation();
@@ -1148,38 +1199,22 @@ pub fn CellPopup(
                 .is_some()
             {
                 leptos::task::spawn_local(async move {
-                    new_entries.update(|vec| {
-                        vec.push((RwSignal::new(String::new()), RwSignal::new(String::new())));
-                    });
+                    append_new_row.run(idx);
                 });
             }
         }
     };
 
-    // ── Helper: build timer buttons for a row ───────────────────────────
-    // Returns a view fragment with play/pause + stop buttons, or an empty
-    // spacer when timers are not applicable.
-    let build_timer_buttons = move |timer_id: TimerId, hours_sig: RwSignal<String>| {
-        if !is_today && !timer_mgr.is_active_untracked(&timer_id) {
-            return view! { <span class="popup-spacer"></span> }.into_any();
-        }
-
-        let tid_for_phase = timer_id.clone();
-        let tid_start = timer_id.clone();
-        let tid_pause = timer_id.clone();
-        let tid_resume = timer_id.clone();
-        let tid_persist = timer_id.clone();
-        let persist_tick = persist_tick;
+    let toggle_timer = {
         let issue_summary = issue_summary_for_persist.clone();
         let suggested_comment = suggested_comment_for_persist.clone();
-        let pos_sig = pos_sig;
-        let on_play_pause = move |_| {
-            let phase = timer_mgr.phase_untracked(&tid_for_phase);
+        Callback::new(move |(tid_persist, hours_sig): (TimerId, RwSignal<String>)| {
+            let phase = timer_mgr.phase_untracked(&tid_persist);
             let dec_sep = i18n.get_untracked().decimal_separator;
             match phase {
                 None | Some(TimerPhase::Stopped) => {
                     timer_mgr.start(
-                        tid_start.clone(),
+                        tid_persist.clone(),
                         hours_sig,
                         hours_per_day,
                         hours_per_week,
@@ -1187,11 +1222,11 @@ pub fn CellPopup(
                     );
                 }
                 Some(TimerPhase::Running) => {
-                    timer_mgr.pause(&tid_pause);
+                    timer_mgr.pause(&tid_persist);
                 }
                 Some(TimerPhase::Paused { .. }) => {
                     let dec_sep = i18n.get_untracked().decimal_separator;
-                    timer_mgr.resume(&tid_resume, dec_sep);
+                    timer_mgr.resume(&tid_persist, dec_sep);
                 }
             }
             ensure_timer_storage_initialized();
@@ -1199,6 +1234,7 @@ pub fn CellPopup(
                 upsert_persisted_timer_row(
                     &tid_persist.issue_key,
                     &issue_summary,
+                    is_anonymous,
                     tid_persist.date,
                     suggested_comment.clone(),
                     is_git_log,
@@ -1238,6 +1274,7 @@ pub fn CellPopup(
                 upsert_persisted_timer_row(
                     &tid_persist.issue_key,
                     &issue_summary,
+                    is_anonymous,
                     tid_persist.date,
                     suggested_comment.clone(),
                     is_git_log,
@@ -1253,10 +1290,65 @@ pub fn CellPopup(
                 );
             }
             persist_tick.update(|value| *value += 1);
-        };
+            if is_anonymous {
+                if let Some(index) = tid_persist.row_index.checked_sub(1000) {
+                    append_new_row.run(index);
+                }
+            }
+        })
+    };
 
+    if is_anonymous {
+        let issue_key = issue_key.clone();
+        Effect::new(move |previous: Option<u64>| {
+            let generation = anonymous_timer_trigger.get();
+            if previous.is_some() && previous != Some(generation) {
+                let rows = new_entries.get_untracked();
+                let selected = rows.iter().enumerate().find(|(idx, (hours, comment))| {
+                    !hours.get_untracked().trim().is_empty()
+                        || !comment.get_untracked().trim().is_empty()
+                        || timer_mgr.is_active_untracked(&TimerId {
+                            issue_key: issue_key.clone(),
+                            date,
+                            row_index: 1000 + idx,
+                        })
+                });
+                if let Some((idx, (hours_sig, _))) =
+                    selected.or_else(|| rows.first().map(|row| (0, row)))
+                {
+                    toggle_timer.run((
+                        TimerId {
+                            issue_key: issue_key.clone(),
+                            date,
+                            row_index: 1000 + idx,
+                        },
+                        *hours_sig,
+                    ));
+                    #[cfg(feature = "hydrate")]
+                    if let Some(popup) = popup_ref.get_untracked() {
+                        use wasm_bindgen::JsCast;
+                        if let Some(node) = popup
+                            .get_elements_by_class_name("popup-comment-new")
+                            .item(idx as u32)
+                            && let Some(input) = node.dyn_ref::<web_sys::HtmlElement>()
+                        {
+                            let _ = input.focus();
+                        }
+                    }
+                }
+            }
+            generation
+        });
+    }
+
+    // ── Helper: build timer buttons for a row ───────────────────────────
+    let build_timer_buttons = move |timer_id: TimerId, hours_sig: RwSignal<String>| {
+        if !is_anonymous && !is_today && !timer_mgr.is_active_untracked(&timer_id) {
+            return view! { <span class="popup-spacer"></span> }.into_any();
+        }
         let tid_phase_display = timer_id.clone();
         let tid_phase_display2 = timer_id.clone();
+        let on_play_pause = move |_| toggle_timer.run((timer_id.clone(), hours_sig));
 
         view! {
             <span class="timer-controls">
@@ -1399,11 +1491,14 @@ pub fn CellPopup(
         let next = POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         z_index.set(next);
     };
+    let issue_summary_title = issue_summary.clone();
+    let existing_count = existing.len();
 
     //
     view! {
          <div
             class="cell-popup"
+            class:cell-popup-anonymous=is_anonymous
             node_ref=popup_ref
             data-popup-id={popup_id.to_string()}
             style=move || format!("{};z-index:{}", pos_sig.get(), z_index.get())
@@ -1411,8 +1506,14 @@ pub fn CellPopup(
             on:focusin=on_focusin
          >
             <div class="popup-draggable-title" on:mousedown=on_header_mousedown>
-                <span class="popup-key">{issue_key}</span>
-                <span class="popup-summary" title={issue_summary}>{issue_summary.clone()}</span>
+                <span class="popup-key">{if is_anonymous { String::new() } else { issue_key }}</span>
+                <span class="popup-summary" title={issue_summary_title}>{move || {
+                    if is_anonymous {
+                        i18n.get().t(keys::ANONYMOUS_TIMER)
+                    } else {
+                        issue_summary.clone()
+                    }
+                }}</span>
                 <span class="popup-date">{i18n.get_untracked().format_date(&date)}</span>
                 <span class="popup-title-actions" on:mousedown=on_title_action_mousedown>
                     <button
@@ -1446,7 +1547,8 @@ pub fn CellPopup(
                         tabindex="-1"
                         on:click=move |_| on_save(None)
                         disabled=move || !save_enabled.get() || !conn.is_available()
-                        title=move || i18n.get().t(keys::SAVE)
+                        title=move || i18n.get().t(if is_anonymous { keys::ANONYMOUS_TIMER_NO_SAVE } else { keys::SAVE })
+                        aria-label=move || i18n.get().t(keys::SAVE)
                     >
                         {"✓"}
                     </button>
@@ -1467,6 +1569,9 @@ pub fn CellPopup(
                     String::new()
                 }}
             </p>
+            {is_anonymous.then(|| view! {
+                <p class="popup-anonymous-help">{move || i18n.get().t(keys::ANONYMOUS_TIMER_HELP)}</p>
+            })}
         <div class="cell-popup-content" tabindex="0">
             <div class="popup-entries">
                 // ── Existing entry rows ─────────────────────────────────
@@ -1623,10 +1728,10 @@ pub fn CellPopup(
                     .collect::<Vec<_>>()}
 
                 // ── Dynamic new entry rows ──────────────────────────────
-                {move || {
-                    let rows = new_entries.get();
-                    let existing_count = existing.len();
-                    rows.into_iter().enumerate().map(|(idx, (hours_sig, comment_sig))| {
+                <For
+                    each={move || new_entries.get().into_iter().enumerate().collect::<Vec<_>>()}
+                    key={|(_, (hours_sig, _))| *hours_sig}
+                    children={move |(idx, (hours_sig, comment_sig))| {
                         let on_blur = on_new_hours_blur.clone();
                         // New rows get timer IDs offset by existing count + 1000 to
                         // avoid collisions with existing entry indices.
@@ -1657,7 +1762,7 @@ pub fn CellPopup(
                                         on:input=move |ev| hours_sig.set(event_target_value(&ev))
                                         on:blur=move |_| on_blur(idx)
                                         placeholder={move || i18n.get().t(keys::HOURS)}
-                                        disabled=move || !conn.is_available() || timer_mgr.is_active(&tid_for_disabled)
+                                        disabled=move || (!is_anonymous && !conn.is_available()) || timer_mgr.is_active(&tid_for_disabled)
                                     />
                                     {move || {
                                         new_row_validations
@@ -1699,7 +1804,7 @@ pub fn CellPopup(
                                         prop:value={move || comment_sig.get()}
                                         on:input=move |ev| comment_sig.set(event_target_value(&ev))
                                         placeholder={move || i18n.get().t(keys::DESCRIPTION)}
-                                        disabled=move || !conn.is_available()
+                                        disabled=move || !is_anonymous && !conn.is_available()
                                         rows="1"
                                     />
                                     {move || {
@@ -1737,8 +1842,8 @@ pub fn CellPopup(
                                 </span>
                             </div>
                         }
-                    }).collect::<Vec<_>>()
-                }}
+                    }}
+                />
             </div>
 
             <div class="popup-buttons">

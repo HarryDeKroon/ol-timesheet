@@ -1209,6 +1209,54 @@ main {
 	display: none;
 }
 
+.popup-anonymous-help {
+	margin: 0 0 0.5rem;
+	color: var(--popup-move-text);
+	font-size: 0.85rem;
+	line-height: 1.4;
+}
+
+@media (max-width: 520px) {
+	.ribbon {
+		flex-wrap: wrap;
+	}
+
+	.ribbon-left {
+		flex: 1 1 0;
+		flex-wrap: wrap;
+	}
+
+	.ribbon-center {
+		order: 1;
+		flex-basis: 100%;
+	}
+
+	.cell-popup-anonymous {
+		box-sizing: border-box;
+		width: calc(100vw - 64px);
+		min-width: 0;
+	}
+
+	.cell-popup-anonymous .popup-summary,
+	.cell-popup-anonymous .popup-comment-container {
+		min-width: 0;
+	}
+
+	.cell-popup-anonymous .popup-comment {
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+	}
+
+	.cell-popup-anonymous .popup-actions {
+		width: auto;
+	}
+
+	.cell-popup-anonymous .popup-spacer {
+		display: none;
+	}
+}
+
 .popup-title-save {
 	color: #16a34a;
 	font-size: 1.15rem;

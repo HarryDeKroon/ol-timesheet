@@ -25,6 +25,10 @@ To track time, simply click on a worklog entry **in the today column** to edit i
 
 Only one worklog entry can be tracked at a time. If you start tracking a new entry, any existing tracking will be paused.
 
+For activities without a work item, click the stopwatch icon immediately after **Refresh cached work items**, or press **Alt+A**. Both open or focus the **Anonymous timer** popup and toggle its first non-empty row, or start a blank row if none is populated. Running and paused timers count as populated even before their first duration increment. Starting or resuming a timer pauses any other running timer. Add descriptions and use the blank row to start additional timers in the same popup. Each row can be paused and resumed, including while offline.
+
+Anonymous timers cannot be saved to Jira: Save is disabled, Ctrl+Enter does not save or close them, and navigation never auto-saves them. Like other active timers, running and paused rows are recovered locally after a browser reload. Closing the popup (or pressing Escape) stops and discards its timers. No work-item assignment is required or created.
+
 **Note:** Just as manual time tracking, time tracking is not automatically saved. You must click the "Save" button to save your changes.
 
 ## Bitbucket webhooks (optional)

@@ -1073,6 +1073,7 @@ struct PopupInfo {
     popup_id: u32,
     issue_key: String,
     issue_summary: String,
+    is_anonymous: bool,
     date: NaiveDate,
     entries: Vec<WorklogEntry>,
     hours_per_day: f64,
@@ -1127,6 +1128,7 @@ impl Clone for PopupInfo {
             popup_id: self.popup_id,
             issue_key: self.issue_key.clone(),
             issue_summary: self.issue_summary.clone(),
+            is_anonymous: self.is_anonymous,
             date: self.date,
             entries: self.entries.clone(),
             hours_per_day: self.hours_per_day,
@@ -1873,6 +1875,7 @@ pub fn TimesheetView() -> impl IntoView {
 
     // ── Popup state — multiple popups can be open simultaneously ──
     let open_popups: RwSignal<Vec<PopupInfo>> = RwSignal::new(Vec::new());
+    let anonymous_timer_trigger = RwSignal::new(0u64);
     let restored_timer_popups_loaded = RwSignal::new(false);
     // Capture component-level owner so signals created during restore are not
     // owned by the Effect's reactive scope (which gets disposed on re-runs).
@@ -1949,6 +1952,7 @@ pub fn TimesheetView() -> impl IntoView {
                     popup_id: NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     issue_key: draft.issue_key.clone(),
                     issue_summary,
+                    is_anonymous: draft.is_anonymous,
                     date: draft.date,
                     entries,
                     hours_per_day: ts.hours_per_day,
@@ -1981,6 +1985,45 @@ pub fn TimesheetView() -> impl IntoView {
                 });
             }
         });
+    });
+
+    let component_owner_for_anonymous = component_owner.clone();
+    let start_anonymous_timer = Callback::new(move |_: ()| {
+        if open_popups.with_untracked(|popups| popups.iter().any(|popup| popup.is_anonymous)) {
+            anonymous_timer_trigger.update(|generation| *generation = generation.wrapping_add(1));
+            return;
+        }
+        let popup_id = NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (hours_per_day, hours_per_week) = last_data
+            .with_untracked(|ts| ts.as_ref().map(|ts| (ts.hours_per_day, ts.hours_per_week)))
+            .unwrap_or((8.0, 40.0));
+        let popup = PopupInfo {
+            popup_id,
+            // This namespace cannot be a Jira key and stays unique across restored popups.
+            issue_key: format!("anonymous:{}:{popup_id}", chrono::Utc::now().timestamp_micros()),
+            issue_summary: String::new(),
+            is_anonymous: true,
+            date: Local::now().date_naive(),
+            entries: Vec::new(),
+            hours_per_day,
+            hours_per_week,
+            suggested_comments: Vec::new(),
+            suggested_comment: None,
+            commit_messages: Vec::new(),
+            commit_links: Vec::new(),
+            test_result_links: Vec::new(),
+            pr_links: Vec::new(),
+            is_git_log: false,
+            is_weekend: false,
+            is_today: true,
+            position_style: component_owner_for_anonymous.with(|| {
+                RwSignal::new(restored_popup_style(open_popups.with_untracked(Vec::len)))
+            }),
+            site_url: String::new(),
+            restored_timer_popup: None,
+            initial_digit: None,
+        };
+        open_popups.update(|popups| popups.push(popup));
     });
 
     // State for showing the settings dialog
@@ -2496,6 +2539,7 @@ pub fn TimesheetView() -> impl IntoView {
                 popup_id,
                 issue_key: target_issue.clone(),
                 issue_summary,
+                is_anonymous: false,
                 date: target_date,
                 entries: target_entries.clone(),
                 hours_per_day: ts.hours_per_day,
@@ -2696,6 +2740,12 @@ pub fn TimesheetView() -> impl IntoView {
                             }
                         }
                         match key_lower.as_str() {
+                            "a" if !ev.shift_key() && !ev.is_composing() => {
+                                ev.prevent_default();
+                                if !ev.repeat() {
+                                    start_anonymous_timer.run(());
+                                }
+                            }
                             "l" => {
                                 ev.prevent_default();
                                 if let Some((row, col)) = focused_cell_for_hotkey.get_untracked() {
@@ -2859,6 +2909,19 @@ pub fn TimesheetView() -> impl IntoView {
                                     }
                                 } disabled=move || is_refreshing.get() title=move || i18n.get().t(keys::REFRESH_CACHED)>
                                     <span class="icon-refresh">{"🔄"}</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    class="nav-btn nav-icon-btn nav-anonymous-timer"
+                                    on:click=move |_| start_anonymous_timer.run(())
+                                    title=move || i18n.get().t(keys::ANONYMOUS_TIMER_START)
+                                    aria-label=move || i18n.get().t(keys::ANONYMOUS_TIMER_START)
+                                    aria-keyshortcuts="Alt+A"
+                                >
+                                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                        <circle cx="12" cy="14" r="8" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+                                        <path d="M9 2h6M12 2v4M18 6l2-2M12 10v4l3 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                                    </svg>
                                 </button>
                                 {move || {
                                     let actions = custom_actions.get();
@@ -3242,6 +3305,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                 ),
                                                 issue_key: ck2.clone(),
                                                 issue_summary,
+                                                is_anonymous: false,
                                                 date: cell_date,
                                                 entries: entries2.clone(),
                                                 hours_per_day: hpd,
@@ -3638,6 +3702,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                                             issue_key: we_key2.clone(),
                                             issue_summary,
+                                            is_anonymous: false,
                                             date: sat,
                                             entries: we_entries2.clone(),
                                             hours_per_day: hpd,
@@ -4116,6 +4181,8 @@ pub fn TimesheetView() -> impl IntoView {
                            pos_sig={pos_sig.clone()}
                            issue_key={info.issue_key}
                            issue_summary={info.issue_summary}
+                           is_anonymous={info.is_anonymous}
+                           anonymous_timer_trigger=anonymous_timer_trigger
                            date={info.date}
                            entries={info.entries}
                            hours_per_day={info.hours_per_day}

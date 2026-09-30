@@ -80,6 +80,8 @@ pub struct PersistedTimerRow {
 pub struct PersistedTimerPopup {
     pub issue_key: String,
     pub issue_summary: String,
+    #[serde(default)]
+    pub is_anonymous: bool,
     pub date: chrono::NaiveDate,
     #[serde(default)]
     pub suggested_comment: Option<String>,
@@ -292,6 +294,7 @@ pub fn save_persisted_timer_popup(_popup: PersistedTimerPopup) {}
 pub fn upsert_persisted_timer_row(
     issue_key: &str,
     issue_summary: &str,
+    is_anonymous: bool,
     date: chrono::NaiveDate,
     suggested_comment: Option<String>,
     is_git_log: bool,
@@ -306,6 +309,7 @@ pub fn upsert_persisted_timer_row(
         .find(|p| p.issue_key == issue_key && p.date == date)
     {
         popup.issue_summary = issue_summary.to_string();
+        popup.is_anonymous = is_anonymous;
         popup.suggested_comment = suggested_comment;
         popup.is_git_log = is_git_log;
         popup.is_weekend = is_weekend;
@@ -324,6 +328,7 @@ pub fn upsert_persisted_timer_row(
         file.popups.push(PersistedTimerPopup {
             issue_key: issue_key.to_string(),
             issue_summary: issue_summary.to_string(),
+            is_anonymous,
             date,
             suggested_comment,
             is_git_log,
@@ -339,6 +344,7 @@ pub fn upsert_persisted_timer_row(
 pub fn upsert_persisted_timer_row(
     _issue_key: &str,
     _issue_summary: &str,
+    _is_anonymous: bool,
     _date: chrono::NaiveDate,
     _suggested_comment: Option<String>,
     _is_git_log: bool,
