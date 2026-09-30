@@ -683,13 +683,13 @@ async fn fetch_work_items_with_cache_policy(
     end: NaiveDate,
     use_cache: bool,
 ) -> Result<Vec<WorkItem>, String> {
-    fetch_work_items_with_cache_policy_internal(creds, start, end, use_cache)
+    fetch_work_items_with_active_assigned_keys(creds, start, end, use_cache)
         .await
         .map(|(items, _)| items)
 }
 
-/// Internal version that also returns the set of active-assigned keys.
-async fn fetch_work_items_with_cache_policy_internal(
+/// Fetch work items and retain which ones came from the active-assignee query.
+pub(crate) async fn fetch_work_items_with_active_assigned_keys(
     creds: &JiraCredentials,
     start: NaiveDate,
     end: NaiveDate,
@@ -1438,7 +1438,7 @@ async fn prefetch_range(
 
     // 1. Fetch work items (populates jira_search cache)
     let (items, active_assigned_keys) =
-        match fetch_work_items_with_cache_policy_internal(&creds, start, end, true).await {
+        match fetch_work_items_with_active_assigned_keys(&creds, start, end, true).await {
             Ok((items, keys)) => (items, keys),
             Err(e) => {
                 log::warn!("[prefetch] fetch_work_items failed for {}: {}", start, e);
