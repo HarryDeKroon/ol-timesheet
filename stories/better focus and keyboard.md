@@ -31,6 +31,8 @@ Add a UI group to the top of the settings dialog with a Language option. That op
 The settings dialog has the same Save and close buttons as it has now. Both close the dialog (and removes the overlay), so that operation continues as before opening the dialog.
 The close button may not appear when the settings are displayed because no user preferences are available yet
 
+Opening Settings (Alt-S or the avatar menu) immediately focuses the Language dropdown, with its blue focus outline. Space opens the dropdown, Tab moves to Hours per week once the preferences have loaded, and Escape closes Settings without requiring a mouse click. Tab and Shift-Tab stay inside the dialog and skip disabled controls. Loading settings or reporting options must not detach the dialog or move focus away from the control the user is using.
+
 ### Timesheet view
 
 This is the timesheet view as we already have. Navigation shows Report button and both refresh buttons left and the current week navigator in the center
