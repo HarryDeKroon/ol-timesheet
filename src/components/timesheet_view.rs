@@ -176,7 +176,7 @@ async fn overlay_current_assignments(
     creds: &crate::api::jira::JiraCredentials,
     ts: &mut TimesheetData,
 ) {
-    match crate::api::jira::fetch_active_assigned_keys(creds, true).await {
+    match crate::api::jira::fetch_active_assigned_keys(creds, false).await {
         Ok(current) => {
             let known = ts
                 .work_items
