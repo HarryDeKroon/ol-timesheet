@@ -29,6 +29,8 @@ For activities without a work item, click the stopwatch icon immediately after *
 
 Anonymous timers cannot be saved to Jira: Save is disabled, Ctrl+Enter does not save or close them, and navigation never auto-saves them. Like other active timers, running and paused rows are recovered locally after a browser reload. Closing the popup (or pressing Escape) stops and discards its timers. No work-item assignment is required or created.
 
+With focus inside a work-item popup, press **Alt+I** (or use its import arrow) to move the first anonymous row with a positive duration and a non-blank description into that popup. Each activation moves one row, using an empty new-entry row when available and otherwise adding one. Existing worklogs and drafts are never overwritten. The moved timer is stopped, removed from local recovery, and removed from the Anonymous popup. When no populated rows or running/paused timers remain, the Anonymous popup closes automatically; trailing empty rows do not keep it open. Other anonymous timers keep their durations and running/paused state. The destination is a normal unsaved worklog on the destination cell's date; save it in the usual way. This shortcut is not available in the Anonymous popup itself.
+
 **Note:** Just as manual time tracking, time tracking is not automatically saved. You must click the "Save" button to save your changes.
 
 ## Bitbucket webhooks (optional)

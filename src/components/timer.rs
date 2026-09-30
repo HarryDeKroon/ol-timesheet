@@ -48,6 +48,19 @@ pub struct TimerId {
     pub row_index: usize,
 }
 
+#[derive(Clone)]
+pub struct AnonymousTimerDraft {
+    pub id: TimerId,
+    pub hours_signal: RwSignal<String>,
+    pub comment_signal: RwSignal<String>,
+    pub hours_per_day: f64,
+    pub hours_per_week: f64,
+    pub remove: Callback<usize>,
+}
+
+#[derive(Clone, Copy)]
+pub struct AnonymousTimerDrafts(pub RwSignal<Vec<AnonymousTimerDraft>>);
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum PersistedTimerPhase {
     Running,
@@ -383,6 +396,21 @@ pub fn remove_persisted_timer_popup(issue_key: &str, date: chrono::NaiveDate) {
 
 #[cfg(not(feature = "hydrate"))]
 pub fn remove_persisted_timer_popup(_issue_key: &str, _date: chrono::NaiveDate) {}
+
+#[cfg(feature = "hydrate")]
+pub fn remove_persisted_timer_row(id: &TimerId) {
+    let mut file = read_persisted_timer_file();
+    for popup in &mut file.popups {
+        if popup.issue_key == id.issue_key && popup.date == id.date {
+            popup.rows.retain(|row| row.row_index != id.row_index);
+        }
+    }
+    file.popups.retain(|popup| !popup.rows.is_empty());
+    write_persisted_timer_file(&file);
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub fn remove_persisted_timer_row(_id: &TimerId) {}
 
 // ---------------------------------------------------------------------------
 // TimerManager — the global singleton
@@ -781,6 +809,15 @@ impl TimerManager {
         });
     }
 
+    #[cfg(feature = "hydrate")]
+    pub fn remove(&self, id: &TimerId) {
+        self.inner.update(|map| {
+            if let Some(entry) = map.remove(id) {
+                cancel_timeout(entry.timeout_handle);
+            }
+        });
+    }
+
     /// Stop and remove **all** timers. Called when a popup is closed.
     #[cfg(feature = "hydrate")]
     pub fn stop_all_for_popup(&self, issue_key: &str, date: chrono::NaiveDate) {
@@ -837,6 +874,9 @@ impl TimerManager {
     pub fn stop(&self, _id: &TimerId) {}
 
     #[cfg(not(feature = "hydrate"))]
+    pub fn remove(&self, _id: &TimerId) {}
+
+    #[cfg(not(feature = "hydrate"))]
     pub fn stop_all_for_popup(&self, _issue_key: &str, _date: chrono::NaiveDate) {}
 
     #[cfg(not(feature = "hydrate"))]
@@ -864,6 +904,7 @@ impl TimerManager {
 pub fn provide_timer_context() -> TimerManager {
     let mgr = TimerManager::new();
     provide_context(mgr);
+    provide_context(AnonymousTimerDrafts(RwSignal::new(Vec::new())));
     mgr
 }
 
@@ -872,6 +913,13 @@ pub fn use_timer() -> TimerManager {
     use_context::<TimerManager>().unwrap_or_else(|| {
         log::error!("TimerManager context not provided, using fallback manager");
         TimerManager::new()
+    })
+}
+
+pub fn use_anonymous_timer_drafts() -> AnonymousTimerDrafts {
+    use_context::<AnonymousTimerDrafts>().unwrap_or_else(|| {
+        log::error!("AnonymousTimerDrafts context not provided, using empty registry");
+        AnonymousTimerDrafts(RwSignal::new(Vec::new()))
     })
 }
 

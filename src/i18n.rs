@@ -71,6 +71,7 @@ pub mod keys {
     pub const ANONYMOUS_TIMER_START: &str = "anonymous_timer_start";
     pub const ANONYMOUS_TIMER_NO_SAVE: &str = "anonymous_timer_no_save";
     pub const ANONYMOUS_TIMER_HELP: &str = "anonymous_timer_help";
+    pub const ANONYMOUS_TIMER_IMPORT: &str = "anonymous_timer_import";
     pub const TIMER_PAUSE: &str = "timer_pause";
     pub const TIMER_RESUME: &str = "timer_resume";
     pub const TIMER_STOP: &str = "timer_stop";
@@ -202,6 +203,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::CONNECTION_UNAVAILABLE, "Connection unavailable"),
         (keys::TIMER_START, "Start timer"),
         (keys::ANONYMOUS_TIMER, "Anonymous timer"),
+        (
+            keys::ANONYMOUS_TIMER_IMPORT,
+            "Move anonymous timer here (Alt+I)",
+        ),
         (keys::ANONYMOUS_TIMER_START, "Start anonymous timer (Alt+A)"),
         (
             keys::ANONYMOUS_TIMER_NO_SAVE,
@@ -397,6 +402,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::TIMER_START, "Démarrer le minuteur"),
         (keys::ANONYMOUS_TIMER, "Minuteur anonyme"),
         (
+            keys::ANONYMOUS_TIMER_IMPORT,
+            "Déplacer le minuteur anonyme ici (Alt+I)",
+        ),
+        (
             keys::ANONYMOUS_TIMER_START,
             "Démarrer un minuteur anonyme (Alt+A)",
         ),
@@ -590,6 +599,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::CONNECTION_UNAVAILABLE, "Verbinding niet beschikbaar"),
         (keys::TIMER_START, "Timer starten"),
         (keys::ANONYMOUS_TIMER, "Anonieme timer"),
+        (
+            keys::ANONYMOUS_TIMER_IMPORT,
+            "Anonieme timer hierheen verplaatsen (Alt+I)",
+        ),
         (keys::ANONYMOUS_TIMER_START, "Anonieme timer starten (Alt+A)"),
         (
             keys::ANONYMOUS_TIMER_NO_SAVE,
