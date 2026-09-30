@@ -245,6 +245,25 @@ fn update_cached_timesheet_entries(
     });
 }
 
+/// Rewrite the assignment set in **every** cached timesheet/week entry so no
+/// stale per-chunk copy can resurrect an unassigned issue when chunks are
+/// later merged for a multi-week view.
+fn update_cached_assignment_state(account_id: &str, current: &HashSet<String>) {
+    cache::update_user_entries(account_id, |key, raw| {
+        if parse_timesheet_range_from_key(key).is_none()
+            && parse_week_monday_from_key(key).is_none()
+        {
+            return None;
+        }
+        let mut ts = serde_json::from_str::<TimesheetData>(raw).ok()?;
+        if ts.active_assigned_keys == *current {
+            return None;
+        }
+        ts.active_assigned_keys = current.clone();
+        serde_json::to_string(&ts).ok()
+    });
+}
+
 fn build_refresh_diff(old: &RefreshSnapshot, new: &RefreshSnapshot) -> TimesheetRefreshDiff {
     let mut diff = TimesheetRefreshDiff::default();
 
@@ -627,6 +646,17 @@ async fn refresh_user(account_id: String, creds: jira::JiraCredentials, display_
                 return;
             }
         };
+    // The refresh above re-fetched the assigned-issues query fresh (and
+    // re-cached it), so this is a cache hit with current data. Propagate it to
+    // every cached weekly/assembled entry so stale copies cannot linger.
+    match jira::fetch_active_assigned_keys(&creds, true).await {
+        Ok(current) => update_cached_assignment_state(&account_id, &current),
+        Err(err) => log::warn!(
+            "[periodic_refresh] assignment sync failed account={}: {}",
+            account_id,
+            err
+        ),
+    }
     let old_snapshot_opt = {
         let guard = ACTIVE_TIMESHEET_USERS.read().await;
         guard

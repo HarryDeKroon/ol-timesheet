@@ -70,8 +70,7 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
     // Keep only items that are visible in this specific week:
     // - items with at least one worklog in the week
     // - items with at least one git activity cell in the week
-    // - currently active assignee/status items (tracked separately in source.work_items
-    //   as rows that have no week activity)
+    // - currently active assignee/status items
     //
     // This prevents stale rows from wider cached ranges (e.g. 5-week view)
     // from leaking into narrower ranges (e.g. 2-week view) after resize.
@@ -84,21 +83,7 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
             .keys()
             .filter_map(|k| k.split_once(':').map(|(key, _)| key.to_string())),
     );
-    let active_assigned_keys = source
-        .work_items
-        .iter()
-        .filter(|item| {
-            !source.worklogs.iter().any(|w| w.issue_key == item.key)
-                && !source.bitbucket_activity.keys().any(|cell_key| {
-                    cell_key
-                        .split_once(':')
-                        .map(|(key, _)| key == item.key)
-                        .unwrap_or(false)
-                })
-        })
-        .map(|item| item.key.clone())
-        .collect::<HashSet<_>>();
-    week_keys.extend(active_assigned_keys);
+    week_keys.extend(source.active_assigned_keys.iter().cloned());
 
     let work_items = source
         .work_items
@@ -127,6 +112,7 @@ fn timesheet_for_week(source: &TimesheetData, monday: NaiveDate) -> TimesheetDat
         ytd_hours,
         bitbucket_activity,
         site_url: source.site_url.clone(),
+        active_assigned_keys: source.active_assigned_keys.clone(),
         ..Default::default()
     }
 }
@@ -137,6 +123,7 @@ fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
     let mut worklogs = Vec::<WorklogEntry>::new();
     let mut ytd_hours = HashMap::<String, f64>::new();
     let mut bitbucket_activity = HashMap::<String, CellActivity>::new();
+    let mut active_assigned_keys = HashSet::<String>::new();
     let mut hours_per_week = 40.0;
     let mut hours_per_day = 8.0;
     let mut site_url = String::new();
@@ -159,6 +146,7 @@ fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
         for (k, v) in chunk.bitbucket_activity {
             bitbucket_activity.entry(k).or_insert(v);
         }
+        active_assigned_keys.extend(chunk.active_assigned_keys);
     }
 
     let mut work_items = by_key.into_values().collect::<Vec<_>>();
@@ -172,7 +160,56 @@ fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
         ytd_hours,
         bitbucket_activity,
         site_url,
+        active_assigned_keys,
         ..Default::default()
+    }
+}
+
+/// Replace possibly stale per-chunk assignment state with the current
+/// authoritative set. Cached week chunks each carry a copy of
+/// `active_assigned_keys` taken at write time; unioning or reusing those
+/// copies can resurrect issues that have since been unassigned. Work items
+/// for newly assigned issues missing from the cached data are fetched so
+/// their rows can render.
+#[cfg(feature = "ssr")]
+async fn overlay_current_assignments(
+    creds: &crate::api::jira::JiraCredentials,
+    ts: &mut TimesheetData,
+) {
+    match crate::api::jira::fetch_active_assigned_keys(creds, false).await {
+        Ok(current) => {
+            let known = ts
+                .work_items
+                .iter()
+                .map(|item| item.key.clone())
+                .collect::<HashSet<_>>();
+            let missing = current
+                .iter()
+                .filter(|key| !known.contains(*key))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                match crate::api::jira::fetch_work_items_by_keys(creds, &missing).await {
+                    Ok(found) => {
+                        ts.work_items.extend(found);
+                        crate::model::sort_work_items_for_timesheet(
+                            &mut ts.work_items,
+                            &ts.worklogs,
+                            &ts.bitbucket_activity,
+                        );
+                    }
+                    Err(e) => log::warn!(
+                        "[get_timesheet_data] fetch of newly assigned items failed: {}",
+                        e
+                    ),
+                }
+            }
+            ts.active_assigned_keys = current;
+        }
+        Err(e) => log::warn!(
+            "[get_timesheet_data] active-assignment refresh failed, keeping cached state: {}",
+            e
+        ),
     }
 }
 
@@ -186,7 +223,11 @@ fn timesheet_has_activity_for_issue(ts: &TimesheetData, issue_key: &str) -> bool
             .any(|key| key == issue_key)
 }
 
-fn visible_timesheet_rows(ts: &TimesheetData, week_mondays: &[NaiveDate]) -> Vec<WorkItem> {
+fn visible_timesheet_rows(
+    ts: &TimesheetData,
+    week_mondays: &[NaiveDate],
+    pinned_keys: &[String],
+) -> Vec<WorkItem> {
     let mut visible_keys = HashSet::<String>::new();
     for monday in week_mondays {
         let sunday = *monday + Duration::days(6);
@@ -205,6 +246,8 @@ fn visible_timesheet_rows(ts: &TimesheetData, week_mondays: &[NaiveDate]) -> Vec
     // Include all explicitly active-assigned items, regardless of whether they have
     // activity in the displayed week range.
     visible_keys.extend(ts.active_assigned_keys.iter().cloned());
+    // Manually added items (search pick / live-refresh toast) are always visible.
+    visible_keys.extend(pinned_keys.iter().cloned());
 
     let mut rows = ts
         .work_items
@@ -213,7 +256,12 @@ fn visible_timesheet_rows(ts: &TimesheetData, week_mondays: &[NaiveDate]) -> Vec
         .cloned()
         .collect::<Vec<_>>();
     crate::model::sort_work_items_for_timesheet(&mut rows, &ts.worklogs, &ts.bitbucket_activity);
-    rows
+    // Pinned items go to the top, in pinned order (most recently added first).
+    let (mut pinned, rest): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .partition(|item| pinned_keys.contains(&item.key));
+    pinned.sort_by_key(|item| pinned_keys.iter().position(|k| k == &item.key));
+    pinned.into_iter().chain(rest).collect()
 }
 
 #[cfg(feature = "hydrate")]
@@ -539,6 +587,7 @@ fn start_timesheet_refresh_socket(
     num_weeks: RwSignal<usize>,
     today: RwSignal<NaiveDate>,
     refresh_toasts: RwSignal<Vec<RefreshToastInfo>>,
+    pinned_work_item_keys: RwSignal<Vec<String>>,
 ) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
@@ -550,6 +599,7 @@ fn start_timesheet_refresh_socket(
         num_weeks: RwSignal<usize>,
         today: RwSignal<NaiveDate>,
         refresh_toasts: RwSignal<Vec<RefreshToastInfo>>,
+        pinned_work_item_keys: RwSignal<Vec<String>>,
     ) {
         let reconnect = Closure::wrap(Box::new(move || {
             start_timesheet_refresh_socket(
@@ -558,6 +608,7 @@ fn start_timesheet_refresh_socket(
                 num_weeks,
                 today,
                 refresh_toasts,
+                pinned_work_item_keys,
             );
         }) as Box<dyn FnMut()>);
         if let Some(window) = web_sys::window() {
@@ -578,7 +629,14 @@ fn start_timesheet_refresh_socket(
     let host = location.host().unwrap_or_else(|_| "localhost:8081".into());
     let url = format!("{}//{}/ws/timesheet", ws_protocol, host);
     let Ok(ws) = WebSocket::new(&url) else {
-        schedule_reconnect(last_data, selected_monday, num_weeks, today, refresh_toasts);
+        schedule_reconnect(
+            last_data,
+            selected_monday,
+            num_weeks,
+            today,
+            refresh_toasts,
+            pinned_work_item_keys,
+        );
         return;
     };
 
@@ -605,6 +663,7 @@ fn start_timesheet_refresh_socket(
                     }
                     let mut applied = false;
                     let mut toast_info = None;
+                    let mut newly_added_keys = Vec::<String>::new();
                     last_data.update(|opt| {
                         if let Some(ts) = opt.as_mut() {
                             let existing_keys = ts
@@ -614,11 +673,27 @@ fn start_timesheet_refresh_socket(
                                 .collect::<HashSet<_>>();
                             toast_info =
                                 build_refresh_toast_info(&diff, &existing_keys, &applied_at);
+                            newly_added_keys = diff
+                                .work_items_upserted
+                                .iter()
+                                .filter(|item| {
+                                    !existing_keys.contains(&item.key.trim().to_uppercase())
+                                })
+                                .map(|item| item.key.clone())
+                                .collect();
                             apply_refresh_diff_to_timesheet(ts, &diff);
                             applied = true;
                         }
                     });
                     if applied {
+                        if !newly_added_keys.is_empty() {
+                            pinned_work_item_keys.update(|keys| {
+                                for key in newly_added_keys.into_iter().rev() {
+                                    keys.retain(|k| k != &key);
+                                    keys.insert(0, key);
+                                }
+                            });
+                        }
                         if let Some(toast) = toast_info {
                             refresh_toasts.update(|toasts| {
                                 toasts.insert(0, toast);
@@ -634,7 +709,14 @@ fn start_timesheet_refresh_socket(
 
     {
         let onclose = Closure::<dyn Fn(CloseEvent)>::new(move |_: CloseEvent| {
-            schedule_reconnect(last_data, selected_monday, num_weeks, today, refresh_toasts);
+            schedule_reconnect(
+                last_data,
+                selected_monday,
+                num_weeks,
+                today,
+                refresh_toasts,
+                pinned_work_item_keys,
+            );
         });
         ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
         onclose.forget();
@@ -717,7 +799,11 @@ pub async fn get_timesheet_data(
         .collect::<Vec<_>>();
 
     if week_chunks.len() == requested_mondays.len() && !week_chunks.is_empty() {
-        let merged = merge_weekly_timesheets(week_chunks);
+        let mut merged = merge_weekly_timesheets(week_chunks);
+        // Per-chunk assignment copies may be stale; the union above must not
+        // resurrect unassigned issues. Override with the current set.
+        overlay_current_assignments(&creds, &mut merged).await;
+        let merged = merged;
         if !missing_bitbucket_mondays.is_empty() {
             crate::api::periodic_refresh::queue_bitbucket_week_backfill(
                 creds.account_id.clone(),
@@ -751,8 +837,12 @@ pub async fn get_timesheet_data(
 
     // Check assembled-data cache first — this makes revisiting a week instant.
     if let Some(cached_json) = crate::api::cache::get(&cache_key) {
-        if let Ok(ts) = serde_json::from_str::<TimesheetData>(&cached_json) {
+        if let Ok(mut ts) = serde_json::from_str::<TimesheetData>(&cached_json) {
             log::info!("[get_timesheet_data] cache hit for {} .. {}", start, end);
+            // The cached copy of the assignment set may be stale; override
+            // with the current authoritative set.
+            overlay_current_assignments(&creds, &mut ts).await;
+            let ts = ts;
             if !missing_bitbucket_mondays.is_empty() {
                 crate::api::periodic_refresh::queue_bitbucket_week_backfill(
                     creds.account_id.clone(),
@@ -794,17 +884,22 @@ pub async fn get_timesheet_data(
             let week_start = *monday;
             let week_end = *monday + Duration::days(6);
             tokio::spawn(async move {
-                crate::api::jira::fetch_work_items(&creds, week_start, week_end).await
+                crate::api::jira::fetch_work_items_with_active_assigned_keys(
+                    &creds, week_start, week_end, true,
+                )
+                .await
             })
         })
         .collect::<Vec<_>>();
 
     let mut jira_items_by_key = HashMap::<String, WorkItem>::new();
+    let mut active_assigned_keys = HashSet::<String>::new();
     for handle in jira_handles {
-        let week_items = handle
+        let (week_items, week_active_assigned_keys) = handle
             .await
             .map_err(|e| ServerFnError::new(format!("Jira fetch task failed: {}", e)))?
             .map_err(ServerFnError::new)?;
+        active_assigned_keys.extend(week_active_assigned_keys);
         for item in week_items {
             jira_items_by_key.entry(item.key.clone()).or_insert(item);
         }
@@ -856,6 +951,7 @@ pub async fn get_timesheet_data(
         ytd_hours,
         bitbucket_activity,
         site_url: session.site_url.clone(),
+        active_assigned_keys,
         ..Default::default()
     };
 
@@ -1723,9 +1819,19 @@ pub fn TimesheetView() -> impl IntoView {
     let error_msg = RwSignal::new(Option::<String>::None);
     let refresh_toasts = RwSignal::new(Vec::<RefreshToastInfo>::new());
     let toast_stack_offset = RwSignal::new((0.0_f64, 0.0_f64));
+    // Keys of work items added manually this session (search pick or live-refresh
+    // toast). They are always visible and pinned to the top of the grid.
+    let pinned_work_item_keys = RwSignal::new(Vec::<String>::new());
 
     #[cfg(feature = "hydrate")]
-    start_timesheet_refresh_socket(last_data, selected_monday, num_weeks, today, refresh_toasts);
+    start_timesheet_refresh_socket(
+        last_data,
+        selected_monday,
+        num_weeks,
+        today,
+        refresh_toasts,
+        pinned_work_item_keys,
+    );
 
     // ── Work-item search state ──
     let search_query = RwSignal::new(String::new());
@@ -2043,14 +2149,19 @@ pub fn TimesheetView() -> impl IntoView {
         // Bump version so any still-pending request is discarded.
         search_version.set(search_version.get_untracked() + 1);
 
-        // Add the item to the current timesheet data (if not already present).
-        // Insert at the top of the list so it appears as the first row.
+        // Add the item to the current timesheet data (if not already present)
+        // and pin it so it renders as the first row.
+        let picked_key = item.key.clone();
         last_data.update(|opt| {
             if let Some(ts) = opt.as_mut() {
                 if !ts.work_items.iter().any(|w| w.key == item.key) {
                     ts.work_items.insert(0, item);
                 }
             }
+        });
+        pinned_work_item_keys.update(|keys| {
+            keys.retain(|k| k != &picked_key);
+            keys.insert(0, picked_key);
         });
     };
 
@@ -2088,7 +2199,11 @@ pub fn TimesheetView() -> impl IntoView {
             let week_mondays: Vec<NaiveDate> = (0..nw)
                 .map(|i| sel_monday - Duration::weeks((nw - 1 - i) as i64))
                 .collect();
-            let visible_rows = visible_timesheet_rows(&ts, &week_mondays);
+            let visible_rows = visible_timesheet_rows(
+                &ts,
+                &week_mondays,
+                &pinned_work_item_keys.get_untracked(),
+            );
             if row >= visible_rows.len() || col >= col_count {
                 return None;
             }
@@ -2879,7 +2994,8 @@ pub fn TimesheetView() -> impl IntoView {
                     let h_l = i.t(keys::HOUR_ABBR);
                     let m_l = i.t(keys::MINUTE_ABBR);
                     let multi = nw > 1;
-                    let visible_rows = visible_timesheet_rows(&ts, &week_mondays);
+                    let visible_rows =
+                        visible_timesheet_rows(&ts, &week_mondays, &pinned_work_item_keys.get());
                     let nav_row_count = visible_rows.len();
                     let nav_col_count = nw * 6;
 

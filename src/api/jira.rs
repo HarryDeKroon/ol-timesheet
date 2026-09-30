@@ -683,13 +683,37 @@ async fn fetch_work_items_with_cache_policy(
     end: NaiveDate,
     use_cache: bool,
 ) -> Result<Vec<WorkItem>, String> {
-    fetch_work_items_with_cache_policy_internal(creds, start, end, use_cache)
+    fetch_work_items_with_active_assigned_keys(creds, start, end, use_cache)
         .await
         .map(|(items, _)| items)
 }
 
-/// Internal version that also returns the set of active-assigned keys.
-async fn fetch_work_items_with_cache_policy_internal(
+/// JQL for the user's assigned active tickets. Date-independent: it always
+/// reflects the *current* assignment state, so its single JQL cache entry is
+/// the authoritative source for `active_assigned_keys`.
+fn assigned_active_jql(email: &str) -> String {
+    // Use Jira's status category instead of specific status names so
+    // project-specific active workflow states (for example non-billable
+    // boards) stay visible too.
+    format!(
+        "assignee = \"{}\" AND statusCategory = \"In Progress\"",
+        email
+    )
+}
+
+/// Fetch the current set of actively assigned issue keys from the single
+/// authoritative (date-independent) assigned-issues query.
+pub(crate) async fn fetch_active_assigned_keys(
+    creds: &JiraCredentials,
+    use_cache: bool,
+) -> Result<std::collections::HashSet<String>, String> {
+    let jql = assigned_active_jql(&creds.email);
+    let items = fetch_work_items_by_jql(creds, &jql, use_cache).await?;
+    Ok(items.into_iter().map(|item| item.key).collect())
+}
+
+/// Fetch work items and retain which ones came from the active-assignee query.
+pub(crate) async fn fetch_work_items_with_active_assigned_keys(
     creds: &JiraCredentials,
     start: NaiveDate,
     end: NaiveDate,
@@ -701,13 +725,7 @@ async fn fetch_work_items_with_cache_policy_internal(
         creds.email, start, end
     );
 
-    // JQL for assigned active tickets. Use Jira's status category instead of
-    // specific status names so project-specific active workflow states
-    // (for example non-billable boards) stay visible too.
-    let assigned_jql = format!(
-        "assignee = \"{}\" AND statusCategory = \"In Progress\"",
-        creds.email
-    );
+    let assigned_jql = assigned_active_jql(&creds.email);
 
     log::trace!("[fetch_work_items] worklogDate >= {start} AND worklogDate <= {end}");
 
@@ -1438,7 +1456,7 @@ async fn prefetch_range(
 
     // 1. Fetch work items (populates jira_search cache)
     let (items, active_assigned_keys) =
-        match fetch_work_items_with_cache_policy_internal(&creds, start, end, true).await {
+        match fetch_work_items_with_active_assigned_keys(&creds, start, end, true).await {
             Ok((items, keys)) => (items, keys),
             Err(e) => {
                 log::warn!("[prefetch] fetch_work_items failed for {}: {}", start, e);
