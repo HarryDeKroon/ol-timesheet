@@ -223,11 +223,25 @@ fn timesheet_has_activity_for_issue(ts: &TimesheetData, issue_key: &str) -> bool
             .any(|key| key == issue_key)
 }
 
+/// Merge manually pinned work items into `ts.work_items`, keeping the freshly
+/// loaded version whenever the same key is already present.
+fn merge_pinned_work_items(ts: &mut TimesheetData, pinned_items: &[WorkItem]) {
+    for item in pinned_items.iter().rev() {
+        if !ts.work_items.iter().any(|w| w.key == item.key) {
+            ts.work_items.insert(0, item.clone());
+        }
+    }
+}
+
 fn visible_timesheet_rows(
     ts: &TimesheetData,
     week_mondays: &[NaiveDate],
-    pinned_keys: &[String],
+    pinned_items: &[WorkItem],
 ) -> Vec<WorkItem> {
+    let pinned_keys = pinned_items
+        .iter()
+        .map(|item| item.key.clone())
+        .collect::<Vec<_>>();
     let mut visible_keys = HashSet::<String>::new();
     for monday in week_mondays {
         let sunday = *monday + Duration::days(6);
@@ -255,6 +269,15 @@ fn visible_timesheet_rows(
         .filter(|item| visible_keys.contains(&item.key))
         .cloned()
         .collect::<Vec<_>>();
+    // Pinned items that are absent from the current dataset (e.g. a search-picked
+    // item with no activity, after a navigation refetch) still render from the
+    // preserved WorkItem value.
+    let missing_pinned = pinned_items
+        .iter()
+        .filter(|item| !rows.iter().any(|row| row.key == item.key))
+        .cloned()
+        .collect::<Vec<_>>();
+    rows.extend(missing_pinned);
     crate::model::sort_work_items_for_timesheet(&mut rows, &ts.worklogs, &ts.bitbucket_activity);
     // Pinned items go to the top, in pinned order (most recently added first).
     let (mut pinned, rest): (Vec<_>, Vec<_>) = rows
@@ -587,7 +610,7 @@ fn start_timesheet_refresh_socket(
     num_weeks: RwSignal<usize>,
     today: RwSignal<NaiveDate>,
     refresh_toasts: RwSignal<Vec<RefreshToastInfo>>,
-    pinned_work_item_keys: RwSignal<Vec<String>>,
+    pinned_work_items: RwSignal<Vec<WorkItem>>,
 ) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
@@ -599,7 +622,7 @@ fn start_timesheet_refresh_socket(
         num_weeks: RwSignal<usize>,
         today: RwSignal<NaiveDate>,
         refresh_toasts: RwSignal<Vec<RefreshToastInfo>>,
-        pinned_work_item_keys: RwSignal<Vec<String>>,
+        pinned_work_items: RwSignal<Vec<WorkItem>>,
     ) {
         let reconnect = Closure::wrap(Box::new(move || {
             start_timesheet_refresh_socket(
@@ -608,7 +631,7 @@ fn start_timesheet_refresh_socket(
                 num_weeks,
                 today,
                 refresh_toasts,
-                pinned_work_item_keys,
+                pinned_work_items,
             );
         }) as Box<dyn FnMut()>);
         if let Some(window) = web_sys::window() {
@@ -635,7 +658,7 @@ fn start_timesheet_refresh_socket(
             num_weeks,
             today,
             refresh_toasts,
-            pinned_work_item_keys,
+            pinned_work_items,
         );
         return;
     };
@@ -663,7 +686,7 @@ fn start_timesheet_refresh_socket(
                     }
                     let mut applied = false;
                     let mut toast_info = None;
-                    let mut newly_added_keys = Vec::<String>::new();
+                    let mut newly_added_items = Vec::<WorkItem>::new();
                     last_data.update(|opt| {
                         if let Some(ts) = opt.as_mut() {
                             let existing_keys = ts
@@ -673,24 +696,24 @@ fn start_timesheet_refresh_socket(
                                 .collect::<HashSet<_>>();
                             toast_info =
                                 build_refresh_toast_info(&diff, &existing_keys, &applied_at);
-                            newly_added_keys = diff
+                            newly_added_items = diff
                                 .work_items_upserted
                                 .iter()
                                 .filter(|item| {
                                     !existing_keys.contains(&item.key.trim().to_uppercase())
                                 })
-                                .map(|item| item.key.clone())
+                                .cloned()
                                 .collect();
                             apply_refresh_diff_to_timesheet(ts, &diff);
                             applied = true;
                         }
                     });
                     if applied {
-                        if !newly_added_keys.is_empty() {
-                            pinned_work_item_keys.update(|keys| {
-                                for key in newly_added_keys.into_iter().rev() {
-                                    keys.retain(|k| k != &key);
-                                    keys.insert(0, key);
+                        if !newly_added_items.is_empty() {
+                            pinned_work_items.update(|items| {
+                                for item in newly_added_items.into_iter().rev() {
+                                    items.retain(|i| i.key != item.key);
+                                    items.insert(0, item);
                                 }
                             });
                         }
@@ -715,7 +738,7 @@ fn start_timesheet_refresh_socket(
                 num_weeks,
                 today,
                 refresh_toasts,
-                pinned_work_item_keys,
+                pinned_work_items,
             );
         });
         ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
@@ -1821,9 +1844,10 @@ pub fn TimesheetView() -> impl IntoView {
     let error_msg = RwSignal::new(Option::<String>::None);
     let refresh_toasts = RwSignal::new(Vec::<RefreshToastInfo>::new());
     let toast_stack_offset = RwSignal::new((0.0_f64, 0.0_f64));
-    // Keys of work items added manually this session (search pick or live-refresh
-    // toast). They are always visible and pinned to the top of the grid.
-    let pinned_work_item_keys = RwSignal::new(Vec::<String>::new());
+    // Work items added manually this session (search pick or live-refresh toast).
+    // The full WorkItem is preserved so the row survives a refetch that no longer
+    // contains it; they are always visible and pinned to the top of the grid.
+    let pinned_work_items = RwSignal::new(Vec::<WorkItem>::new());
 
     #[cfg(feature = "hydrate")]
     start_timesheet_refresh_socket(
@@ -1832,7 +1856,7 @@ pub fn TimesheetView() -> impl IntoView {
         num_weeks,
         today,
         refresh_toasts,
-        pinned_work_item_keys,
+        pinned_work_items,
     );
 
     // ── Work-item search state ──
@@ -1858,6 +1882,8 @@ pub fn TimesheetView() -> impl IntoView {
             is_loading.set(true);
         }
         Some(Ok((ts, user_profile))) => {
+            let mut ts = ts;
+            merge_pinned_work_items(&mut ts, &pinned_work_items.get_untracked());
             last_data.set(Some(ts));
             if let Some((avatar, name)) = user_profile {
                 log::info!("Setting user_avatar: {}, user_name: {}", avatar, name);
@@ -2194,7 +2220,7 @@ pub fn TimesheetView() -> impl IntoView {
 
         // Add the item to the current timesheet data (if not already present)
         // and pin it so it renders as the first row.
-        let picked_key = item.key.clone();
+        let picked_item = item.clone();
         last_data.update(|opt| {
             if let Some(ts) = opt.as_mut() {
                 if !ts.work_items.iter().any(|w| w.key == item.key) {
@@ -2202,9 +2228,9 @@ pub fn TimesheetView() -> impl IntoView {
                 }
             }
         });
-        pinned_work_item_keys.update(|keys| {
-            keys.retain(|k| k != &picked_key);
-            keys.insert(0, picked_key);
+        pinned_work_items.update(|items| {
+            items.retain(|i| i.key != picked_item.key);
+            items.insert(0, picked_item);
         });
     };
 
@@ -2245,7 +2271,7 @@ pub fn TimesheetView() -> impl IntoView {
             let visible_rows = visible_timesheet_rows(
                 &ts,
                 &week_mondays,
-                &pinned_work_item_keys.get_untracked(),
+                &pinned_work_items.get_untracked(),
             );
             if row >= visible_rows.len() || col >= col_count {
                 return None;
@@ -3058,7 +3084,7 @@ pub fn TimesheetView() -> impl IntoView {
                     let m_l = i.t(keys::MINUTE_ABBR);
                     let multi = nw > 1;
                     let visible_rows =
-                        visible_timesheet_rows(&ts, &week_mondays, &pinned_work_item_keys.get());
+                        visible_timesheet_rows(&ts, &week_mondays, &pinned_work_items.get());
                     let nav_row_count = visible_rows.len();
                     let nav_col_count = nw * 6;
 
