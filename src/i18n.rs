@@ -126,6 +126,8 @@ pub mod keys {
     pub const POPUP_ERROR_DURATION_POSITIVE: &str = "popup_error_duration_positive";
     pub const POPUP_ERROR_DESCRIPTION_REQUIRED: &str = "popup_error_description_required";
     pub const POPUP_ERROR_DESCRIPTION_UNIQUE: &str = "popup_error_description_unique";
+    pub const POPUP_MOVE: &str = "popup_move";
+    pub const POPUP_MOVE_HELP: &str = "popup_move_help";
     pub const PULL_REQUESTS: &str = "pull_requests";
     pub const LANGUAGE: &str = "language";
     pub const SHOW_MERGED_PR_ACTIVITY: &str = "show_merged_pr_activity";
@@ -290,6 +292,11 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (
             keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
             "When multiple durations exist, descriptions must be unique",
+        ),
+        (keys::POPUP_MOVE, "Move"),
+        (
+            keys::POPUP_MOVE_HELP,
+            "Move mode: arrow keys move the dialog; Shift+Arrow moves 1 pixel. Enter or Alt+M finishes; Escape restores the position. Tab finishes and moves focus.",
         ),
         (keys::PULL_REQUESTS, "Pull requests"),
         (keys::LANGUAGE, "Language"),
@@ -482,6 +489,11 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
             keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
             "S’il y a plusieurs durées, les descriptions doivent être uniques",
         ),
+        (keys::POPUP_MOVE, "Déplacer"),
+        (
+            keys::POPUP_MOVE_HELP,
+            "Mode déplacement : les flèches déplacent la fenêtre ; Maj+Flèche déplace de 1 pixel. Entrée ou Alt+M termine ; Échap rétablit la position. Tab termine et déplace le focus.",
+        ),
         (keys::PULL_REQUESTS, "Demandes de tirage"),
         (keys::LANGUAGE, "Langue"),
         (keys::SHOW_MERGED_PR_ACTIVITY, "Afficher l\u{2019}activit\u{00E9} \u{AB}\u{00A0}fusionn\u{00E9}e\u{00A0}\u{BB}"),
@@ -654,6 +666,11 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (
             keys::POPUP_ERROR_DESCRIPTION_UNIQUE,
             "Bij meerdere duren moeten beschrijvingen uniek zijn",
+        ),
+        (keys::POPUP_MOVE, "Verplaatsen"),
+        (
+            keys::POPUP_MOVE_HELP,
+            "Verplaatsmodus: pijltjestoetsen verplaatsen het venster; Shift+Pijl verplaatst 1 pixel. Enter of Alt+M bevestigt; Escape herstelt de positie. Tab bevestigt en verplaatst de focus.",
         ),
         (keys::PULL_REQUESTS, "Pull requests"),
         (keys::LANGUAGE, "Taal"),

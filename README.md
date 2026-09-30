@@ -11,6 +11,14 @@ Each worklog entry can be edited by clicking on it, and a popup allows adding, r
 
 The duration of each worklog entry is displayed as a human-readable string (e.g. "2h 30m") in the popup window that appears when you edit a worklog entry. Longer durations may also include "d" for days and "w" for weeks. The values for days and weeks depend on the user settings for 'hours per week' and 'hours per day'. (e.g. if 'hours per week' is 40 and 'hours per day' is 8, then a duration of 32 hours will be displayed as "4d", whereas for 'hours per week' is 30 and 'hours per day' is 7.5, a duration of 40 hours will be displayed as "1w 1d 2h 30m").
 
+### Popup keyboard controls
+
+While focus is inside a popup, **Alt+M** activates its four-arrow **Move** button. You can also reach the button with Tab or click it. In move mode, arrow keys reposition the popup (8 pixels horizontally, 20 vertically); **Shift+Arrow** makes 1-pixel adjustments. **Enter**, **Space**, or **Alt+M** finishes moving and returns focus to the previous control. **Escape** cancels the move and restores the original position without closing the popup. Tabbing or clicking away from the Move button keeps the new position and exits move mode. Dragging the title bar still works.
+
+Outside move mode, **Ctrl+Left/Right** navigates words, **Ctrl+Shift+Left/Right** selects words, and **Enter** inserts a line break in a description. **Ctrl+Enter** saves valid changes and closes the popup, including while in move mode. **Escape** closes the popup when not moving.
+
+The Move icon is the unmodified [arrows-up-down-left-right](https://fontawesome.com/icons/arrows-up-down-left-right?f=classic&s=solid) from Font Awesome Free 6.7.2, copyright 2024 Fonticons, Inc., licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
 ### Time tracking
 
 To track time, simply click on a worklog entry **in the today column** to edit it. Next to the time input field, there is a button that allows you to start or stop tracking time. When tracking is started, the button changes to a pause button, and the time is automatically updated as you work. When tracking is paused, the button changes back to a start button, and time tracking is suspended until resumed by pressing the start button again.

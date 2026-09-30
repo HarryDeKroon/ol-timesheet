@@ -976,36 +976,131 @@ pub fn CellPopup(
         }
     };
 
+    let popup_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    let move_button_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+    let move_origin = RwSignal::new(None::<String>);
+    #[cfg(feature = "hydrate")]
+    let move_return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
+
+    let finish_move = move |cancel: bool, restore_focus: bool| {
+        let Some(origin) = move_origin.get_untracked() else {
+            return;
+        };
+        move_origin.set(None);
+        if cancel {
+            pos_sig.set(origin);
+        }
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+
+            let previous = move_return_focus.get_value();
+            move_return_focus.set_value(None);
+            if restore_focus {
+                // Blurring a duration can rebuild the new-entry rows.
+                let target = previous.filter(|el| el.is_connected()).or_else(|| {
+                    popup_ref.get_untracked().and_then(|popup| {
+                        popup
+                            .query_selector("input:not([disabled]),textarea:not([disabled])")
+                            .ok()
+                            .flatten()
+                            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+                    })
+                });
+                if let Some(target) = target {
+                    if let Err(error) = target.focus() {
+                        log::warn!("Could not restore popup focus after moving: {error:?}");
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = restore_focus;
+    };
+
+    let toggle_move = move || {
+        if move_origin.get_untracked().is_some() {
+            finish_move(false, true);
+            return;
+        }
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+
+            let Some(button) = move_button_ref.get_untracked() else {
+                log::warn!("Cannot start moving popup before its Move control is mounted");
+                return;
+            };
+            let previous = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.active_element())
+                .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok());
+            if let Err(error) = button.focus() {
+                log::warn!("Could not focus popup Move control: {error:?}");
+                return;
+            }
+            move_return_focus.set_value(previous);
+            move_origin.set(Some(pos_sig.get_untracked()));
+        }
+    };
+
+    let on_move_keydown = move |ev: leptos::ev::KeyboardEvent| {
+        if move_origin.get_untracked().is_none()
+            || ev.is_composing()
+            || ev.ctrl_key()
+            || ev.alt_key()
+            || ev.meta_key()
+        {
+            return;
+        }
+        let key = ev.key();
+        let delta = match key.as_str() {
+            "ArrowLeft" | "ArrowRight" if ev.shift_key() => 1.0,
+            "ArrowUp" | "ArrowDown" if ev.shift_key() => 1.0,
+            "ArrowLeft" | "ArrowRight" => 8.0,
+            "ArrowUp" | "ArrowDown" => 20.0,
+            "Enter" | " " | "Escape" if !ev.shift_key() => {
+                ev.prevent_default();
+                ev.stop_propagation();
+                finish_move(key == "Escape", true);
+                return;
+            }
+            _ => return,
+        };
+        ev.prevent_default();
+        ev.stop_propagation();
+        let (left, top) = parse_popup_pos(&pos_sig.get_untracked());
+        let (left, top) = match key.as_str() {
+            "ArrowLeft" => (left - delta, top),
+            "ArrowRight" => (left + delta, top),
+            "ArrowUp" => (left, top - delta),
+            "ArrowDown" => (left, top + delta),
+            _ => (left, top),
+        };
+        pos_sig.set(format!("left:{left:.0}px;top:{top:.0}px"));
+    };
+
     // ── Keyboard shortcuts ──────────────────────────────────────────────
     let on_keydown = {
         let on_save = on_save.clone();
         let on_close_with_timers = on_close_with_timers.clone();
         move |ev: leptos::ev::KeyboardEvent| {
+            if ev.is_composing() {
+                return;
+            }
             let key = ev.key();
-            // Ctrl+Arrow: move popup. Ctrl+Alt+Arrow: 1px; Ctrl+Arrow: 1 char/line.
-            if ev.ctrl_key() {
-                let delta: f64 = match key.as_str() {
-                    "ArrowLeft" | "ArrowRight" if ev.alt_key() => 1.0,
-                    "ArrowUp" | "ArrowDown" if ev.alt_key() => 1.0,
-                    "ArrowLeft" | "ArrowRight" => 8.0,
-                    "ArrowUp" | "ArrowDown" => 20.0,
-                    _ => 0.0,
-                };
-                if delta > 0.0 {
-                    ev.prevent_default();
-                    ev.stop_propagation();
-                    let cur = pos_sig.get_untracked();
-                    let (mut left, mut top) = parse_popup_pos(&cur);
-                    match key.as_str() {
-                        "ArrowLeft" => left -= delta,
-                        "ArrowRight" => left += delta,
-                        "ArrowUp" => top -= delta,
-                        "ArrowDown" => top += delta,
-                        _ => {}
-                    }
-                    pos_sig.set(format!("left:{:.0}px;top:{:.0}px", left, top));
-                    return;
+            if key.eq_ignore_ascii_case("m")
+                && ev.alt_key()
+                && !ev.ctrl_key()
+                && !ev.meta_key()
+                && !ev.shift_key()
+            {
+                ev.prevent_default();
+                ev.stop_propagation();
+                if !ev.repeat() {
+                    toggle_move();
                 }
+                return;
             }
             match key.as_str() {
                 "Enter" if ev.ctrl_key() => {
@@ -1244,8 +1339,6 @@ pub fn CellPopup(
         up_cb.forget();
     }
 
-    let popup_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-
     // Focus the first input after the popup mounts. We defer via
     // requestAnimationFrame so that child components (inputs) are in the DOM.
     // Restored timer popups open automatically on page load; skip stealing
@@ -1282,6 +1375,7 @@ pub fn CellPopup(
     let sl_md = drag_start_left.clone();
     let st_md = drag_start_top.clone();
     let on_header_mousedown = move |ev: leptos::ev::MouseEvent| {
+        finish_move(false, false);
         dragging_md.set(true);
         sx_md.set(ev.client_x() as f64);
         sy_md.set(ev.client_y() as f64);
@@ -1322,6 +1416,32 @@ pub fn CellPopup(
                 <span class="popup-date">{i18n.get_untracked().format_date(&date)}</span>
                 <span class="popup-title-actions" on:mousedown=on_title_action_mousedown>
                     <button
+                        type="button"
+                        class="popup-title-action popup-title-move"
+                        node_ref=move_button_ref
+                        aria-pressed=move || move_origin.get().is_some().to_string()
+                        aria-keyshortcuts="Alt+M"
+                        aria-describedby=move || move_origin.get().is_some()
+                            .then(|| format!("popup-move-help-{popup_id}"))
+                        on:click=move |_| toggle_move()
+                        on:keydown=on_move_keydown
+                        on:blur=move |_| finish_move(false, false)
+                        title=move || i18n.get().t(keys::POPUP_MOVE)
+                        aria-label=move || i18n.get().t(keys::POPUP_MOVE)
+                    >
+                        // Font Awesome Free 6.7.2 by @fontawesome; Copyright 2024 Fonticons, Inc.
+                        // Icon: CC BY 4.0 (https://fontawesome.com/license/free).
+                        <svg
+                            class="fa-arrows-up-down-left-right"
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 512 512"
+                            aria-hidden="true"
+                            focusable="false"
+                        >
+                            <path d="M278.6 9.4c-12.5-12.5-32.8-12.5-45.3 0l-64 64c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l9.4-9.4L224 224l-114.7 0 9.4-9.4c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-64 64c-12.5 12.5-12.5 32.8 0 45.3l64 64c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3l-9.4-9.4L224 288l0 114.7-9.4-9.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l64 64c12.5 12.5 32.8 12.5 45.3 0l64-64c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-9.4 9.4L288 288l114.7 0-9.4 9.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l64-64c12.5-12.5 12.5-32.8 0-45.3l-64-64c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l9.4 9.4L288 224l0-114.7 9.4 9.4c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3l-64-64z"/>
+                        </svg>
+                    </button>
+                    <button
                         class="popup-title-action popup-title-save"
                         tabindex="-1"
                         on:click=move |_| on_save(None)
@@ -1340,6 +1460,13 @@ pub fn CellPopup(
                     </button>
                 </span>
             </div>
+            <p class="popup-move-help" id=format!("popup-move-help-{popup_id}") role="status">
+                {move || if move_origin.get().is_some() {
+                    i18n.get().t(keys::POPUP_MOVE_HELP)
+                } else {
+                    String::new()
+                }}
+            </p>
         <div class="cell-popup-content" tabindex="0">
             <div class="popup-entries">
                 // ── Existing entry rows ─────────────────────────────────
