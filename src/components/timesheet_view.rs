@@ -165,6 +165,54 @@ fn merge_weekly_timesheets(chunks: Vec<TimesheetData>) -> TimesheetData {
     }
 }
 
+/// Replace possibly stale per-chunk assignment state with the current
+/// authoritative set. Cached week chunks each carry a copy of
+/// `active_assigned_keys` taken at write time; unioning or reusing those
+/// copies can resurrect issues that have since been unassigned. Work items
+/// for newly assigned issues missing from the cached data are fetched so
+/// their rows can render.
+#[cfg(feature = "ssr")]
+async fn overlay_current_assignments(
+    creds: &crate::api::jira::JiraCredentials,
+    ts: &mut TimesheetData,
+) {
+    match crate::api::jira::fetch_active_assigned_keys(creds, true).await {
+        Ok(current) => {
+            let known = ts
+                .work_items
+                .iter()
+                .map(|item| item.key.clone())
+                .collect::<HashSet<_>>();
+            let missing = current
+                .iter()
+                .filter(|key| !known.contains(*key))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                match crate::api::jira::fetch_work_items_by_keys(creds, &missing).await {
+                    Ok(found) => {
+                        ts.work_items.extend(found);
+                        crate::model::sort_work_items_for_timesheet(
+                            &mut ts.work_items,
+                            &ts.worklogs,
+                            &ts.bitbucket_activity,
+                        );
+                    }
+                    Err(e) => log::warn!(
+                        "[get_timesheet_data] fetch of newly assigned items failed: {}",
+                        e
+                    ),
+                }
+            }
+            ts.active_assigned_keys = current;
+        }
+        Err(e) => log::warn!(
+            "[get_timesheet_data] active-assignment refresh failed, keeping cached state: {}",
+            e
+        ),
+    }
+}
+
 #[cfg(feature = "hydrate")]
 fn timesheet_has_activity_for_issue(ts: &TimesheetData, issue_key: &str) -> bool {
     ts.worklogs.iter().any(|entry| entry.issue_key == issue_key)
@@ -751,7 +799,11 @@ pub async fn get_timesheet_data(
         .collect::<Vec<_>>();
 
     if week_chunks.len() == requested_mondays.len() && !week_chunks.is_empty() {
-        let merged = merge_weekly_timesheets(week_chunks);
+        let mut merged = merge_weekly_timesheets(week_chunks);
+        // Per-chunk assignment copies may be stale; the union above must not
+        // resurrect unassigned issues. Override with the current set.
+        overlay_current_assignments(&creds, &mut merged).await;
+        let merged = merged;
         if !missing_bitbucket_mondays.is_empty() {
             crate::api::periodic_refresh::queue_bitbucket_week_backfill(
                 creds.account_id.clone(),
@@ -785,8 +837,12 @@ pub async fn get_timesheet_data(
 
     // Check assembled-data cache first — this makes revisiting a week instant.
     if let Some(cached_json) = crate::api::cache::get(&cache_key) {
-        if let Ok(ts) = serde_json::from_str::<TimesheetData>(&cached_json) {
+        if let Ok(mut ts) = serde_json::from_str::<TimesheetData>(&cached_json) {
             log::info!("[get_timesheet_data] cache hit for {} .. {}", start, end);
+            // The cached copy of the assignment set may be stale; override
+            // with the current authoritative set.
+            overlay_current_assignments(&creds, &mut ts).await;
+            let ts = ts;
             if !missing_bitbucket_mondays.is_empty() {
                 crate::api::periodic_refresh::queue_bitbucket_week_backfill(
                     creds.account_id.clone(),
