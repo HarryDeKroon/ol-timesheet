@@ -30,6 +30,7 @@ cfg_if! {
     const MINUTES_TO_MILLISECONDS: u32 = 60_000;
 const TIMER_INTERVAL: u32 = 5 * MINUTES_TO_MILLISECONDS;
 const TIMER_INTERVAL_SHORT: u32 = TIMER_INTERVAL >> 1;
+const TIMER_SAVE_ROUNDING_THRESHOLD: u32 = MINUTES_TO_MILLISECONDS;
     }
 }
 #[cfg(feature = "hydrate")]
@@ -809,6 +810,63 @@ impl TimerManager {
         });
     }
 
+    /// Round a partial interval up by five minutes once at least one minute
+    /// has elapsed, then stop the timer.
+    #[cfg(feature = "hydrate")]
+    pub fn finalize(&self, id: &TimerId, decimal_sep: char) {
+        let finalized = self.inner.with_untracked(|map| {
+            let entry = map.get(id)?;
+            let elapsed_ms = match entry.phase {
+                TimerPhase::Running => {
+                    let segment_elapsed = (now_ms() - entry.interval_started_at).max(0.0) as u32;
+                    entry.accumulated_ms.saturating_add(segment_elapsed)
+                }
+                TimerPhase::Paused { .. } => entry.accumulated_ms,
+                TimerPhase::Stopped => return None,
+            };
+            Some((
+                elapsed_ms >= TIMER_SAVE_ROUNDING_THRESHOLD,
+                entry.hours_signal,
+                entry.hours_per_day,
+                entry.hours_per_week,
+            ))
+        });
+
+        let Some((should_round, hours_signal, hours_per_day, hours_per_week)) = finalized else {
+            return;
+        };
+        if should_round {
+            add_completed_intervals_to_hours(
+                hours_signal,
+                1,
+                hours_per_day,
+                hours_per_week,
+                decimal_sep,
+            );
+        }
+        self.stop(id);
+    }
+
+    /// Finalize and remove all timers belonging to one popup.
+    #[cfg(feature = "hydrate")]
+    pub fn finalize_all_for_popup(
+        &self,
+        issue_key: &str,
+        date: chrono::NaiveDate,
+        decimal_sep: char,
+    ) {
+        let ids = self.inner.with_untracked(|map| {
+            map.keys()
+                .filter(|id| id.issue_key == issue_key && id.date == date)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        for id in &ids {
+            self.finalize(id, decimal_sep);
+        }
+        self.stop_all_for_popup(issue_key, date);
+    }
+
     #[cfg(feature = "hydrate")]
     pub fn remove(&self, id: &TimerId) {
         self.inner.update(|map| {
@@ -872,6 +930,18 @@ impl TimerManager {
 
     #[cfg(not(feature = "hydrate"))]
     pub fn stop(&self, _id: &TimerId) {}
+
+    #[cfg(not(feature = "hydrate"))]
+    pub fn finalize(&self, _id: &TimerId, _decimal_sep: char) {}
+
+    #[cfg(not(feature = "hydrate"))]
+    pub fn finalize_all_for_popup(
+        &self,
+        _issue_key: &str,
+        _date: chrono::NaiveDate,
+        _decimal_sep: char,
+    ) {
+    }
 
     #[cfg(not(feature = "hydrate"))]
     pub fn remove(&self, _id: &TimerId) {}

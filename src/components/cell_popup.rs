@@ -993,9 +993,9 @@ pub fn CellPopup(
             let ml = w.t(keys::MINUTE_ABBR);
             let ik = ik.clone();
 
-            // Stop all timers for this popup on save
+            // Include a partial timer interval before collecting worklog values.
             saving_timer_rows.set(true);
-            timer_mgr.stop_all_for_popup(&issue_key_for_stop, date);
+            timer_mgr.finalize_all_for_popup(&issue_key_for_stop, date, dec_sep);
 
             let deletes: Vec<(String, String)> = existing_for_save
                 .iter()
@@ -1177,13 +1177,18 @@ pub fn CellPopup(
 
     let popup_ref: NodeRef<leptos::html::Div> = NodeRef::new();
     let import_anonymous_row = Callback::new(move |_: ()| {
-        let Some((id, hours, comment)) = transferable_anonymous_row.get_untracked() else {
+        let Some((id, _, _)) = transferable_anonymous_row.get_untracked() else {
             return;
         };
         let Some(source) = anonymous_drafts
             .with_untracked(|drafts| drafts.iter().find(|draft| draft.id == id).cloned())
         else {
             log::error!("[CellPopup] Anonymous source row is no longer available");
+            return;
+        };
+        let w = i18n.get_untracked();
+        timer_mgr.finalize(&id, w.decimal_separator);
+        let Some((hours, comment)) = transferable_anonymous_content(&source, &w) else {
             return;
         };
         let blank = new_entries.with_untracked(|rows| {
@@ -1212,7 +1217,6 @@ pub fn CellPopup(
             log::error!("[CellPopup] Cannot create a destination for the anonymous timer");
             return;
         };
-        let w = i18n.get_untracked();
         destination.hours_sig.set(transferred_duration_text(
             &source,
             hours,
