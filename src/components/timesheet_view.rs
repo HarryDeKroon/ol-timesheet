@@ -1,4 +1,5 @@
 use crate::components::cell_popup::CellPopup;
+use crate::components::cheatsheet_dialog::CheatsheetDialog;
 use crate::components::popup_flush::{provide_popup_flush_context, use_popup_flush};
 use crate::components::report_overlay::{ReportRibbonControls, ReportView, create_report_state};
 use crate::components::settings_dialog::SettingsDialog;
@@ -1340,6 +1341,25 @@ fn focus_grid_cell(row: usize, col: usize) {
 }
 
 #[cfg(feature = "hydrate")]
+fn event_target_is_editable(ev: &web_sys::KeyboardEvent) -> bool {
+    use wasm_bindgen::JsCast;
+
+    let Some(target) = ev.target() else {
+        return false;
+    };
+    let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() else {
+        return false;
+    };
+    if element.is_content_editable() {
+        return true;
+    }
+    matches!(
+        element.tag_name().to_ascii_uppercase().as_str(),
+        "INPUT" | "TEXTAREA" | "SELECT"
+    )
+}
+
+#[cfg(feature = "hydrate")]
 fn schedule_digit_fill_for_popup(popup_id: u32, digit: char) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
@@ -1435,7 +1455,7 @@ fn new_request_nonce() -> String {
     }
 }
 
-fn custom_action_title(action: &CustomAction) -> String {
+pub fn custom_action_title(action: &CustomAction) -> String {
     let key = action.work_item_key.trim();
     let description = action.description.trim();
     let duration = action.duration.trim();
@@ -2054,6 +2074,7 @@ pub fn TimesheetView() -> impl IntoView {
 
     // State for showing the settings dialog
     let show_settings = RwSignal::new(false);
+    let show_cheatsheet = RwSignal::new(false);
     let show_report = RwSignal::new(false);
     let report_state = create_report_state();
     let user_menu_open = RwSignal::new(false);
@@ -2672,10 +2693,30 @@ pub fn TimesheetView() -> impl IntoView {
         let flush_mgr_for_hotkey = flush_mgr.clone();
         let conn_for_hotkey = conn.clone();
         let trigger_custom_action_for_hotkey = trigger_custom_action;
+        let show_cheatsheet_for_hotkey = show_cheatsheet;
         let focus_last_cell_cb =
             wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
                 move |ev: web_sys::KeyboardEvent| {
                     let key = ev.key();
+                    if show_cheatsheet_for_hotkey.get_untracked() {
+                        if key == "Escape" {
+                            ev.prevent_default();
+                            show_cheatsheet_for_hotkey.set(false);
+                        }
+                        return;
+                    }
+                    if key == "?"
+                        && !ev.alt_key()
+                        && !ev.ctrl_key()
+                        && !ev.meta_key()
+                        && !ev.is_composing()
+                        && !show_settings.get_untracked()
+                        && !event_target_is_editable(&ev)
+                    {
+                        ev.prevent_default();
+                        show_cheatsheet_for_hotkey.set(true);
+                        return;
+                    }
                     if !ev.alt_key() || ev.ctrl_key() || ev.meta_key() {
                         return;
                     }
@@ -2893,6 +2934,14 @@ pub fn TimesheetView() -> impl IntoView {
                             move |_| show_report.set(false)
                         };
                         view! {
+                            <>
+                            <button class="nav-btn nav-icon-btn nav-cheatsheet-btn" on:click=move |_| show_cheatsheet.set(true) title=move || i18n.get().t(keys::CHEATSHEET_OPEN) aria-label=move || i18n.get().t(keys::CHEATSHEET_OPEN) aria-keyshortcuts="?">
+                                <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+                                    <path d="M9.4 9.2a2.7 2.7 0 1 1 3.4 2.6c-.6.2-.9.7-.9 1.3v.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                                    <circle cx="12" cy="16.6" r="1" fill="currentColor"></circle>
+                                </svg>
+                            </button>
                             <button class="nav-btn nav-icon-btn nav-view-btn" on:click=on_back title=move || i18n.get().t(keys::TIMESHEET_TITLE)>
                                 <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
                                     <rect x="3" y="4" width="18" height="16" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"></rect>
@@ -2900,11 +2949,19 @@ pub fn TimesheetView() -> impl IntoView {
                                     <rect x="9.8" y="10.2" width="4.4" height="2.2" rx="0.5" fill="currentColor" opacity="0.35"></rect>
                                 </svg>
                             </button>
+                            </>
                         }
                         .into_any()
                     } else {
                         view! {
                             <>
+                                <button class="nav-btn nav-icon-btn nav-cheatsheet-btn" on:click=move |_| show_cheatsheet.set(true) title=move || i18n.get().t(keys::CHEATSHEET_OPEN) aria-label=move || i18n.get().t(keys::CHEATSHEET_OPEN) aria-keyshortcuts="?">
+                                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+                                        <path d="M9.4 9.2a2.7 2.7 0 1 1 3.4 2.6c-.6.2-.9.7-.9 1.3v.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                                        <circle cx="12" cy="16.6" r="1" fill="currentColor"></circle>
+                                    </svg>
+                                </button>
                                 <button class="nav-btn nav-icon-btn nav-view-btn" on:click=on_open_report title=move || i18n.get().t(keys::USER_REPORT)>
                                     <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
                                         <rect class="report-icon-bar report-icon-bar-left" x="4" y="10" width="4" height="10" rx="1"></rect>
@@ -4234,6 +4291,9 @@ pub fn TimesheetView() -> impl IntoView {
             // Settings dialog modal
             {move || show_settings.get().then(|| view! {
                 <SettingsDialog on_ok=on_settings_saved on_cancel=on_close_settings />
+            })}
+            {move || show_cheatsheet.get().then(|| view! {
+                <CheatsheetDialog show=show_cheatsheet show_report=show_report custom_actions=custom_actions />
             })}
             {move || show_report.get().then(|| view! {
                 <ReportView

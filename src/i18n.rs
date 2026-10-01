@@ -136,6 +136,44 @@ pub mod keys {
     pub const PULL_REQUESTS: &str = "pull_requests";
     pub const LANGUAGE: &str = "language";
     pub const SHOW_MERGED_PR_ACTIVITY: &str = "show_merged_pr_activity";
+    pub const CHEATSHEET_TITLE: &str = "cheatsheet_title";
+    pub const CHEATSHEET_OPEN: &str = "cheatsheet_open";
+    pub const CHEATSHEET_SECTION_GENERAL: &str = "cheatsheet_section_general";
+    pub const CHEATSHEET_SECTION_NAVIGATION: &str = "cheatsheet_section_navigation";
+    pub const CHEATSHEET_SECTION_GRID: &str = "cheatsheet_section_grid";
+    pub const CHEATSHEET_SECTION_POPUP: &str = "cheatsheet_section_popup";
+    pub const CHEATSHEET_SECTION_POPUP_MOVE: &str = "cheatsheet_section_popup_move";
+    pub const CHEATSHEET_SECTION_REPORT: &str = "cheatsheet_section_report";
+    pub const CHEATSHEET_SHOW: &str = "cheatsheet_show";
+    pub const CHEATSHEET_CLOSE_DIALOG: &str = "cheatsheet_close_dialog";
+    pub const CHEATSHEET_PREVIOUS_WEEK: &str = "cheatsheet_previous_week";
+    pub const CHEATSHEET_NEXT_WEEK: &str = "cheatsheet_next_week";
+    pub const CHEATSHEET_PICK_DATE: &str = "cheatsheet_pick_date";
+    pub const CHEATSHEET_TODAY: &str = "cheatsheet_today";
+    pub const CHEATSHEET_FOCUS_LAST_CELL: &str = "cheatsheet_focus_last_cell";
+    pub const CHEATSHEET_ANONYMOUS_TIMER: &str = "cheatsheet_anonymous_timer";
+    pub const CHEATSHEET_OPEN_REPORT: &str = "cheatsheet_open_report";
+    pub const CHEATSHEET_OPEN_SETTINGS: &str = "cheatsheet_open_settings";
+    pub const CHEATSHEET_REFRESH: &str = "cheatsheet_refresh";
+    pub const CHEATSHEET_LOGOUT: &str = "cheatsheet_logout";
+    pub const CHEATSHEET_GRID_MOVE: &str = "cheatsheet_grid_move";
+    pub const CHEATSHEET_GRID_OPEN: &str = "cheatsheet_grid_open";
+    pub const CHEATSHEET_GRID_DIGIT: &str = "cheatsheet_grid_digit";
+    pub const CHEATSHEET_GRID_LETTER: &str = "cheatsheet_grid_letter";
+    pub const CHEATSHEET_POPUP_SAVE: &str = "cheatsheet_popup_save";
+    pub const CHEATSHEET_POPUP_CLOSE: &str = "cheatsheet_popup_close";
+    pub const CHEATSHEET_POPUP_MOVE: &str = "cheatsheet_popup_move";
+    pub const CHEATSHEET_POPUP_IMPORT: &str = "cheatsheet_popup_import";
+    pub const CHEATSHEET_MOVE_ARROWS: &str = "cheatsheet_move_arrows";
+    pub const CHEATSHEET_MOVE_ARROWS_FINE: &str = "cheatsheet_move_arrows_fine";
+    pub const CHEATSHEET_MOVE_FINISH: &str = "cheatsheet_move_finish";
+    pub const CHEATSHEET_MOVE_CANCEL: &str = "cheatsheet_move_cancel";
+    pub const CHEATSHEET_REPORT_PREVIOUS: &str = "cheatsheet_report_previous";
+    pub const CHEATSHEET_REPORT_NEXT: &str = "cheatsheet_report_next";
+    pub const CHEATSHEET_REPORT_PERIOD: &str = "cheatsheet_report_period";
+    pub const CHEATSHEET_REPORT_TODAY: &str = "cheatsheet_report_today";
+    pub const CHEATSHEET_REPORT_BACK: &str = "cheatsheet_report_back";
+    pub const CHEATSHEET_NO_CUSTOM_ACTIONS: &str = "cheatsheet_no_custom_actions";
 }
 
 type TranslationMap = HashMap<&'static str, HashMap<&'static str, &'static str>>;
@@ -320,6 +358,74 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::PULL_REQUESTS, "Pull requests"),
         (keys::LANGUAGE, "Language"),
         (keys::SHOW_MERGED_PR_ACTIVITY, "Show \u{2018}merged\u{2019} activity"),
+        (keys::CHEATSHEET_TITLE, "Keyboard shortcuts"),
+        (keys::CHEATSHEET_OPEN, "Keyboard shortcuts"),
+        (keys::CHEATSHEET_SECTION_GENERAL, "General"),
+        (keys::CHEATSHEET_SECTION_NAVIGATION, "Navigation"),
+        (keys::CHEATSHEET_SECTION_GRID, "Timesheet grid"),
+        (keys::CHEATSHEET_SECTION_POPUP, "Entry dialog"),
+        (keys::CHEATSHEET_SECTION_POPUP_MOVE, "Entry dialog: move mode"),
+        (keys::CHEATSHEET_SECTION_REPORT, "Report"),
+        (keys::CHEATSHEET_SHOW, "Show this list of keyboard shortcuts"),
+        (keys::CHEATSHEET_CLOSE_DIALOG, "Close this dialog"),
+        (keys::CHEATSHEET_PREVIOUS_WEEK, "Go to the previous week"),
+        (keys::CHEATSHEET_NEXT_WEEK, "Go to the next week"),
+        (keys::CHEATSHEET_PICK_DATE, "Open the date picker"),
+        (keys::CHEATSHEET_TODAY, "Jump back to the current week"),
+        (keys::CHEATSHEET_FOCUS_LAST_CELL, "Focus the last selected cell"),
+        (keys::CHEATSHEET_ANONYMOUS_TIMER, "Start an anonymous timer"),
+        (keys::CHEATSHEET_OPEN_REPORT, "Open the user report"),
+        (keys::CHEATSHEET_OPEN_SETTINGS, "Open the settings"),
+        (keys::CHEATSHEET_REFRESH, "Clear the cache and reload the timesheet"),
+        (keys::CHEATSHEET_LOGOUT, "Log out"),
+        (keys::CHEATSHEET_GRID_MOVE, "Move the selection between cells"),
+        (
+            keys::CHEATSHEET_GRID_OPEN,
+            "Open the entry dialog for the selected cell",
+        ),
+        (
+            keys::CHEATSHEET_GRID_DIGIT,
+            "Open the entry dialog and start typing a duration",
+        ),
+        (
+            keys::CHEATSHEET_GRID_LETTER,
+            "Open the entry dialog and start typing a description",
+        ),
+        (keys::CHEATSHEET_POPUP_SAVE, "Save the entries"),
+        (keys::CHEATSHEET_POPUP_CLOSE, "Close the entry dialog"),
+        (keys::CHEATSHEET_POPUP_MOVE, "Toggle move mode for the dialog"),
+        (
+            keys::CHEATSHEET_POPUP_IMPORT,
+            "Import the anonymous timer entry",
+        ),
+        (keys::CHEATSHEET_MOVE_ARROWS, "Move the dialog"),
+        (
+            keys::CHEATSHEET_MOVE_ARROWS_FINE,
+            "Move the dialog by one pixel",
+        ),
+        (
+            keys::CHEATSHEET_MOVE_FINISH,
+            "Finish moving and keep the position",
+        ),
+        (
+            keys::CHEATSHEET_MOVE_CANCEL,
+            "Cancel moving and restore the position",
+        ),
+        (
+            keys::CHEATSHEET_REPORT_PREVIOUS,
+            "Go to the previous month or year",
+        ),
+        (keys::CHEATSHEET_REPORT_NEXT, "Go to the next month or year"),
+        (keys::CHEATSHEET_REPORT_PERIOD, "Open the period selector"),
+        (
+            keys::CHEATSHEET_REPORT_TODAY,
+            "Jump back to the current period",
+        ),
+        (keys::CHEATSHEET_REPORT_BACK, "Back to the timesheet"),
+        (
+            keys::CHEATSHEET_NO_CUSTOM_ACTIONS,
+            "No custom actions configured",
+        ),
     ]
     .into_iter()
     .collect();
@@ -533,6 +639,98 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::PULL_REQUESTS, "Demandes de tirage"),
         (keys::LANGUAGE, "Langue"),
         (keys::SHOW_MERGED_PR_ACTIVITY, "Afficher l\u{2019}activit\u{00E9} \u{AB}\u{00A0}fusionn\u{00E9}e\u{00A0}\u{BB}"),
+        (keys::CHEATSHEET_TITLE, "Raccourcis clavier"),
+        (keys::CHEATSHEET_OPEN, "Raccourcis clavier"),
+        (keys::CHEATSHEET_SECTION_GENERAL, "G\u{00E9}n\u{00E9}ral"),
+        (keys::CHEATSHEET_SECTION_NAVIGATION, "Navigation"),
+        (keys::CHEATSHEET_SECTION_GRID, "Grille de la feuille de temps"),
+        (keys::CHEATSHEET_SECTION_POPUP, "Bo\u{00EE}te de saisie"),
+        (
+            keys::CHEATSHEET_SECTION_POPUP_MOVE,
+            "Bo\u{00EE}te de saisie\u{00A0}: mode d\u{00E9}placement",
+        ),
+        (keys::CHEATSHEET_SECTION_REPORT, "Rapport"),
+        (
+            keys::CHEATSHEET_SHOW,
+            "Afficher cette liste de raccourcis clavier",
+        ),
+        (keys::CHEATSHEET_CLOSE_DIALOG, "Fermer cette bo\u{00EE}te de dialogue"),
+        (keys::CHEATSHEET_PREVIOUS_WEEK, "Aller \u{00E0} la semaine pr\u{00E9}c\u{00E9}dente"),
+        (keys::CHEATSHEET_NEXT_WEEK, "Aller \u{00E0} la semaine suivante"),
+        (keys::CHEATSHEET_PICK_DATE, "Ouvrir le s\u{00E9}lecteur de date"),
+        (keys::CHEATSHEET_TODAY, "Revenir \u{00E0} la semaine en cours"),
+        (
+            keys::CHEATSHEET_FOCUS_LAST_CELL,
+            "Donner le focus \u{00E0} la derni\u{00E8}re cellule s\u{00E9}lectionn\u{00E9}e",
+        ),
+        (keys::CHEATSHEET_ANONYMOUS_TIMER, "D\u{00E9}marrer un minuteur anonyme"),
+        (keys::CHEATSHEET_OPEN_REPORT, "Ouvrir le rapport utilisateur"),
+        (keys::CHEATSHEET_OPEN_SETTINGS, "Ouvrir les param\u{00E8}tres"),
+        (
+            keys::CHEATSHEET_REFRESH,
+            "Vider le cache et recharger la feuille de temps",
+        ),
+        (keys::CHEATSHEET_LOGOUT, "Se d\u{00E9}connecter"),
+        (
+            keys::CHEATSHEET_GRID_MOVE,
+            "D\u{00E9}placer la s\u{00E9}lection entre les cellules",
+        ),
+        (
+            keys::CHEATSHEET_GRID_OPEN,
+            "Ouvrir la bo\u{00EE}te de saisie de la cellule s\u{00E9}lectionn\u{00E9}e",
+        ),
+        (
+            keys::CHEATSHEET_GRID_DIGIT,
+            "Ouvrir la bo\u{00EE}te de saisie et commencer \u{00E0} saisir une dur\u{00E9}e",
+        ),
+        (
+            keys::CHEATSHEET_GRID_LETTER,
+            "Ouvrir la bo\u{00EE}te de saisie et commencer \u{00E0} saisir une description",
+        ),
+        (keys::CHEATSHEET_POPUP_SAVE, "Enregistrer les saisies"),
+        (keys::CHEATSHEET_POPUP_CLOSE, "Fermer la bo\u{00EE}te de saisie"),
+        (
+            keys::CHEATSHEET_POPUP_MOVE,
+            "Activer ou d\u{00E9}sactiver le mode d\u{00E9}placement",
+        ),
+        (
+            keys::CHEATSHEET_POPUP_IMPORT,
+            "Importer la saisie du minuteur anonyme",
+        ),
+        (keys::CHEATSHEET_MOVE_ARROWS, "D\u{00E9}placer la bo\u{00EE}te de dialogue"),
+        (
+            keys::CHEATSHEET_MOVE_ARROWS_FINE,
+            "D\u{00E9}placer la bo\u{00EE}te de dialogue d\u{2019}un pixel",
+        ),
+        (
+            keys::CHEATSHEET_MOVE_FINISH,
+            "Terminer le d\u{00E9}placement et conserver la position",
+        ),
+        (
+            keys::CHEATSHEET_MOVE_CANCEL,
+            "Annuler le d\u{00E9}placement et r\u{00E9}tablir la position",
+        ),
+        (
+            keys::CHEATSHEET_REPORT_PREVIOUS,
+            "Aller au mois ou \u{00E0} l\u{2019}ann\u{00E9}e pr\u{00E9}c\u{00E9}dente",
+        ),
+        (
+            keys::CHEATSHEET_REPORT_NEXT,
+            "Aller au mois ou \u{00E0} l\u{2019}ann\u{00E9}e suivante",
+        ),
+        (
+            keys::CHEATSHEET_REPORT_PERIOD,
+            "Ouvrir le s\u{00E9}lecteur de p\u{00E9}riode",
+        ),
+        (
+            keys::CHEATSHEET_REPORT_TODAY,
+            "Revenir \u{00E0} la p\u{00E9}riode en cours",
+        ),
+        (keys::CHEATSHEET_REPORT_BACK, "Retour \u{00E0} la feuille de temps"),
+        (
+            keys::CHEATSHEET_NO_CUSTOM_ACTIONS,
+            "Aucune action personnalis\u{00E9}e configur\u{00E9}e",
+        ),
     ]
     .into_iter()
     .collect();
@@ -725,6 +923,86 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::PULL_REQUESTS, "Pull requests"),
         (keys::LANGUAGE, "Taal"),
         (keys::SHOW_MERGED_PR_ACTIVITY, "Toon \u{2018}samengevoegde\u{2019} activiteit"),
+        (keys::CHEATSHEET_TITLE, "Sneltoetsen"),
+        (keys::CHEATSHEET_OPEN, "Sneltoetsen"),
+        (keys::CHEATSHEET_SECTION_GENERAL, "Algemeen"),
+        (keys::CHEATSHEET_SECTION_NAVIGATION, "Navigatie"),
+        (keys::CHEATSHEET_SECTION_GRID, "Urenstaatraster"),
+        (keys::CHEATSHEET_SECTION_POPUP, "Invoervenster"),
+        (
+            keys::CHEATSHEET_SECTION_POPUP_MOVE,
+            "Invoervenster: verplaatsmodus",
+        ),
+        (keys::CHEATSHEET_SECTION_REPORT, "Rapport"),
+        (keys::CHEATSHEET_SHOW, "Toon deze lijst met sneltoetsen"),
+        (keys::CHEATSHEET_CLOSE_DIALOG, "Dit venster sluiten"),
+        (keys::CHEATSHEET_PREVIOUS_WEEK, "Ga naar de vorige week"),
+        (keys::CHEATSHEET_NEXT_WEEK, "Ga naar de volgende week"),
+        (keys::CHEATSHEET_PICK_DATE, "Open de datumkiezer"),
+        (keys::CHEATSHEET_TODAY, "Terug naar de huidige week"),
+        (
+            keys::CHEATSHEET_FOCUS_LAST_CELL,
+            "Focus op de laatst geselecteerde cel",
+        ),
+        (keys::CHEATSHEET_ANONYMOUS_TIMER, "Start een anonieme timer"),
+        (keys::CHEATSHEET_OPEN_REPORT, "Open het gebruikersrapport"),
+        (keys::CHEATSHEET_OPEN_SETTINGS, "Open de instellingen"),
+        (
+            keys::CHEATSHEET_REFRESH,
+            "Wis de cache en herlaad de urenstaat",
+        ),
+        (keys::CHEATSHEET_LOGOUT, "Afmelden"),
+        (keys::CHEATSHEET_GRID_MOVE, "Verplaats de selectie tussen cellen"),
+        (
+            keys::CHEATSHEET_GRID_OPEN,
+            "Open het invoervenster van de geselecteerde cel",
+        ),
+        (
+            keys::CHEATSHEET_GRID_DIGIT,
+            "Open het invoervenster en begin een duur te typen",
+        ),
+        (
+            keys::CHEATSHEET_GRID_LETTER,
+            "Open het invoervenster en begin een omschrijving te typen",
+        ),
+        (keys::CHEATSHEET_POPUP_SAVE, "Sla de invoer op"),
+        (keys::CHEATSHEET_POPUP_CLOSE, "Sluit het invoervenster"),
+        (
+            keys::CHEATSHEET_POPUP_MOVE,
+            "Verplaatsmodus van het venster aan- of uitzetten",
+        ),
+        (
+            keys::CHEATSHEET_POPUP_IMPORT,
+            "Importeer de regel van de anonieme timer",
+        ),
+        (keys::CHEATSHEET_MOVE_ARROWS, "Verplaats het venster"),
+        (
+            keys::CHEATSHEET_MOVE_ARROWS_FINE,
+            "Verplaats het venster met \u{00E9}\u{00E9}n pixel",
+        ),
+        (
+            keys::CHEATSHEET_MOVE_FINISH,
+            "Verplaatsen be\u{00EB}indigen en positie behouden",
+        ),
+        (
+            keys::CHEATSHEET_MOVE_CANCEL,
+            "Verplaatsen annuleren en positie herstellen",
+        ),
+        (
+            keys::CHEATSHEET_REPORT_PREVIOUS,
+            "Ga naar de vorige maand of het vorige jaar",
+        ),
+        (
+            keys::CHEATSHEET_REPORT_NEXT,
+            "Ga naar de volgende maand of het volgende jaar",
+        ),
+        (keys::CHEATSHEET_REPORT_PERIOD, "Open de periodekiezer"),
+        (keys::CHEATSHEET_REPORT_TODAY, "Terug naar de huidige periode"),
+        (keys::CHEATSHEET_REPORT_BACK, "Terug naar de urenstaat"),
+        (
+            keys::CHEATSHEET_NO_CUSTOM_ACTIONS,
+            "Geen aangepaste acties ingesteld",
+        ),
     ]
     .into_iter()
     .collect();
