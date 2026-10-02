@@ -810,22 +810,34 @@ impl TimerManager {
         });
     }
 
+    /// `true` when [`finalize`](Self::finalize) would currently add a rounded
+    /// partial interval to the row's duration. Subscribes to timer state
+    /// changes, but not to elapsed time; callers needing live updates must
+    /// re-evaluate periodically.
+    #[cfg(feature = "hydrate")]
+    pub fn finalize_would_round(&self, id: &TimerId) -> bool {
+        self.inner
+            .with(|map| map.get(id).is_some_and(entry_finalize_would_round))
+    }
+
+    /// Untracked variant of [`finalize_would_round`](Self::finalize_would_round).
+    #[cfg(feature = "hydrate")]
+    pub fn finalize_would_round_untracked(&self, id: &TimerId) -> bool {
+        self.inner
+            .with_untracked(|map| map.get(id).is_some_and(entry_finalize_would_round))
+    }
+
     /// Round a partial interval up by five minutes once at least one minute
     /// has elapsed, then stop the timer.
     #[cfg(feature = "hydrate")]
     pub fn finalize(&self, id: &TimerId, decimal_sep: char) {
         let finalized = self.inner.with_untracked(|map| {
             let entry = map.get(id)?;
-            let elapsed_ms = match entry.phase {
-                TimerPhase::Running => {
-                    let segment_elapsed = (now_ms() - entry.interval_started_at).max(0.0) as u32;
-                    entry.accumulated_ms.saturating_add(segment_elapsed)
-                }
-                TimerPhase::Paused { .. } => entry.accumulated_ms,
-                TimerPhase::Stopped => return None,
-            };
+            if entry.phase == TimerPhase::Stopped {
+                return None;
+            }
             Some((
-                elapsed_ms >= TIMER_SAVE_ROUNDING_THRESHOLD,
+                entry_finalize_would_round(entry),
                 entry.hours_signal,
                 entry.hours_per_day,
                 entry.hours_per_week,
@@ -935,6 +947,16 @@ impl TimerManager {
     pub fn finalize(&self, _id: &TimerId, _decimal_sep: char) {}
 
     #[cfg(not(feature = "hydrate"))]
+    pub fn finalize_would_round(&self, _id: &TimerId) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    pub fn finalize_would_round_untracked(&self, _id: &TimerId) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "hydrate"))]
     pub fn finalize_all_for_popup(
         &self,
         _issue_key: &str,
@@ -996,6 +1018,20 @@ pub fn use_anonymous_timer_drafts() -> AnonymousTimerDrafts {
 // ---------------------------------------------------------------------------
 // Browser helpers (hydrate-only)
 // ---------------------------------------------------------------------------
+
+/// Whether finalizing this entry now would round the partial interval up.
+#[cfg(feature = "hydrate")]
+fn entry_finalize_would_round(entry: &TimerEntry) -> bool {
+    let elapsed_ms = match entry.phase {
+        TimerPhase::Running => {
+            let segment_elapsed = (now_ms() - entry.interval_started_at).max(0.0) as u32;
+            entry.accumulated_ms.saturating_add(segment_elapsed)
+        }
+        TimerPhase::Paused { .. } => entry.accumulated_ms,
+        TimerPhase::Stopped => return false,
+    };
+    elapsed_ms >= TIMER_SAVE_ROUNDING_THRESHOLD
+}
 
 /// Schedule a JS `setTimeout` that, when it fires:
 /// 1. Bumps the hours signal by 5 minutes.

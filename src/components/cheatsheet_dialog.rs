@@ -148,12 +148,27 @@ pub fn CheatsheetDialog(
 
     let close = move || show.set(false);
 
-    let on_keydown = move |ev: leptos::ev::KeyboardEvent| {
-        if ev.key() == "Escape" {
+    let close_button_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+
+    let on_keydown = move |ev: leptos::ev::KeyboardEvent| match ev.key().as_str() {
+        "Escape" => {
             ev.prevent_default();
             ev.stop_propagation();
             close();
         }
+        // Trap focus: Close is the only tabbable control, so Tab and
+        // Shift+Tab both keep focus on it instead of reaching the background.
+        "Tab" => {
+            ev.prevent_default();
+            ev.stop_propagation();
+            #[cfg(feature = "hydrate")]
+            if let Some(button) = close_button_ref.get_untracked() {
+                if let Err(err) = button.focus() {
+                    log::error!("Failed to focus the cheatsheet close button: {err:?}");
+                }
+            }
+        }
+        _ => {}
     };
 
     view! {
@@ -175,6 +190,7 @@ pub fn CheatsheetDialog(
                     <button
                         type="button"
                         class="popup-title-action popup-title-close cheatsheet-close"
+                        node_ref=close_button_ref
                         on:click=move |_| close()
                         title=move || i18n.get().t(keys::CLOSE)
                         aria-label=move || i18n.get().t(keys::CLOSE)
