@@ -1036,15 +1036,14 @@ pub fn CellPopup(
 
         let alive = alive.clone();
         let popup_has_active_timers = popup_has_active_timers.clone();
-        Interval::new(1_000, move || {
+        let _validation_interval = StoredValue::new_local(Interval::new(1_000, move || {
             if !alive.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
             if popup_has_active_timers() {
                 validation_tick.update(|tick| *tick = tick.wrapping_add(1));
             }
-        })
-        .forget();
+        }));
     }
 
     let compute_validation_for_memo = compute_validation.clone();
