@@ -146,6 +146,27 @@ pub fn CheatsheetDialog(
         });
     });
 
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+
+        let return_focus = StoredValue::new_local(
+            web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.active_element())
+                .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok()),
+        );
+        on_cleanup(move || {
+            let previous = return_focus.get_value();
+            request_animation_frame(move || {
+                if let Some(element) = previous.filter(|element| element.is_connected()) {
+                    if let Err(err) = element.focus() {
+                        log::warn!("Failed to restore focus after closing keyboard shortcuts: {err:?}");
+                    }
+                }
+            });
+        });
+    }
     let close = move || show.set(false);
 
     let close_button_ref: NodeRef<leptos::html::Button> = NodeRef::new();
