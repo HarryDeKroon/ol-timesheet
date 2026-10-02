@@ -710,8 +710,17 @@ fn start_timesheet_refresh_socket(
                         }
                     });
                     if applied {
-                        if !newly_added_items.is_empty() {
+                        if !diff.work_items_upserted.is_empty() {
                             pinned_work_items.update(|items| {
+                                for pinned in items.iter_mut() {
+                                    if let Some(updated) = diff
+                                        .work_items_upserted
+                                        .iter()
+                                        .find(|item| item.key == pinned.key)
+                                    {
+                                        *pinned = updated.clone();
+                                    }
+                                }
                                 for item in newly_added_items.into_iter().rev() {
                                     items.retain(|w| w.key != item.key);
                                     items.insert(0, item);
