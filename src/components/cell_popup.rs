@@ -201,6 +201,112 @@ fn normalize_popup_description(text: &str) -> String {
         .to_lowercase()
 }
 
+/// Snapshot of one popup row used for Save validation.
+struct PopupValidationRow {
+    hours: String,
+    description: String,
+    /// `true` when finalizing this row's timer would add a rounded interval,
+    /// so validation must use the projected (finalized) duration.
+    timer_rounds: bool,
+}
+
+struct PopupValidationMessages {
+    duration_positive: String,
+    description_required: String,
+    description_unique: String,
+}
+
+type PopupValidationResult = (bool, Vec<PopupRowValidation>, Vec<PopupRowValidation>);
+
+/// Validate popup rows using the durations they will have once all timers are
+/// finalized. `existing` entries that are `None` have been marked deleted.
+fn validate_popup_rows(
+    existing: &[Option<PopupValidationRow>],
+    new_rows: &[PopupValidationRow],
+    parse: impl Fn(&str) -> Option<f64>,
+    messages: &PopupValidationMessages,
+) -> PopupValidationResult {
+    const TIMER_ROUNDING_HOURS: f64 = 5.0 / 60.0;
+
+    // `Err(())` = invalid duration, `Ok(None)` = blank row (ignored),
+    // `Ok(Some(description))` = row with a positive duration.
+    let check_row = |row: &PopupValidationRow| -> Result<Option<String>, ()> {
+        let hours_blank = row.hours.trim().is_empty();
+        if hours_blank && row.description.trim().is_empty() && !row.timer_rounds {
+            return Ok(None);
+        }
+        let parsed = parse(&row.hours);
+        let projected = if row.timer_rounds {
+            Some(parsed.unwrap_or(0.0) + TIMER_ROUNDING_HOURS)
+        } else {
+            parsed
+        };
+        match projected {
+            Some(hours) if hours > 0.0 => Ok(Some(row.description.clone())),
+            _ => Err(()),
+        }
+    };
+
+    let existing_checks = existing
+        .iter()
+        .map(|row| row.as_ref().map_or(Ok(None), &check_row))
+        .collect::<Vec<_>>();
+    let new_checks = new_rows.iter().map(&check_row).collect::<Vec<_>>();
+
+    let hours_validation = |check: &Result<Option<String>, ()>| PopupRowValidation {
+        hours_error: check.is_err().then(|| messages.duration_positive.clone()),
+        description_error: None,
+    };
+    let mut existing_validations = existing_checks.iter().map(hours_validation).collect::<Vec<_>>();
+    let mut new_validations = new_checks.iter().map(hours_validation).collect::<Vec<_>>();
+
+    let duration_rows = existing_checks
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, check)| check.as_ref().ok()?.as_ref().map(|d| (true, idx, d)))
+        .chain(
+            new_checks
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, check)| check.as_ref().ok()?.as_ref().map(|d| (false, idx, d))),
+        )
+        .collect::<Vec<_>>();
+
+    if duration_rows.len() > 1 {
+        let mut seen: HashMap<String, (bool, usize)> = HashMap::new();
+        for (is_existing, row_idx, description) in &duration_rows {
+            let mut set_error = |is_existing: bool, idx: usize, error: &String| {
+                let target = if is_existing {
+                    &mut existing_validations[idx]
+                } else {
+                    &mut new_validations[idx]
+                };
+                target.description_error = Some(error.clone());
+            };
+            let trimmed = description.trim();
+            if trimmed.is_empty() {
+                set_error(*is_existing, *row_idx, &messages.description_required);
+                continue;
+            }
+            let normalized = normalize_popup_description(trimmed);
+            if let Some((prior_existing, prior_idx)) = seen.get(&normalized) {
+                set_error(*is_existing, *row_idx, &messages.description_unique);
+                set_error(*prior_existing, *prior_idx, &messages.description_unique);
+            } else {
+                seen.insert(normalized, (*is_existing, *row_idx));
+            }
+        }
+    }
+
+    let has_errors = existing_validations.iter().any(|v| !v.is_valid())
+        || new_validations.iter().any(|v| !v.is_valid());
+    let has_non_blank_row = !duration_rows.is_empty();
+    let has_deletes = existing.iter().any(Option::is_none);
+    let can_save = !has_errors && (has_non_blank_row || has_deletes);
+
+    (can_save, existing_validations, new_validations)
+}
+
 #[derive(Clone, Copy)]
 struct NewEntry {
     row_index: usize,
@@ -824,146 +930,124 @@ pub fn CellPopup(
     }
 
     // ── Validation (Save enablement) ────────────────────────────────────
-    let existing_for_validation = existing.clone();
-    let popup_validations = Memo::new(move |_| {
-        if is_anonymous {
-            return (
-                false,
-                vec![PopupRowValidation::default(); existing_for_validation.len()],
-                vec![PopupRowValidation::default(); new_entries.get().len()],
-            );
-        }
-        let w = i18n.get();
-        let dec_sep = w.decimal_separator;
-        let wl = w.t(keys::WEEK_ABBR);
-        let dl = w.t(keys::DAY_ABBR);
-        let hl = w.t(keys::HOUR_ABBR);
-        let ml = w.t(keys::MINUTE_ABBR);
-        let duration_positive_error = i18n.get().t(keys::POPUP_ERROR_DURATION_POSITIVE);
-        let description_required_error = i18n.get().t(keys::POPUP_ERROR_DESCRIPTION_REQUIRED);
-        let description_unique_error = i18n.get().t(keys::POPUP_ERROR_DESCRIPTION_UNIQUE);
-
-        let mut existing_validations =
-            vec![PopupRowValidation::default(); existing_for_validation.len()];
-        let rows = new_entries.get();
-        let mut new_validations = vec![PopupRowValidation::default(); rows.len()];
-        let mut duration_rows: Vec<(bool, usize, String)> = Vec::new();
-        let mut has_non_blank_row = false;
-        let has_deletes = existing_for_validation.iter().any(|e| e.deleted.get());
-
-        for (idx, entry) in existing_for_validation.iter().enumerate() {
-            if entry.deleted.get() {
-                continue;
-            }
-            let hours = entry.hours_sig.get();
-            let description = if !entry.comment_html.is_empty() {
-                entry.display_comment.clone()
-            } else {
-                entry.comment_sig.get()
+    // Validation uses projected durations: a timer that would round up on
+    // finalize contributes its finalized value, so Save enablement matches
+    // what will actually be written to Jira.
+    let validation_tick = RwSignal::new(0u64);
+    let compute_validation: Arc<dyn Fn(bool) -> PopupValidationResult + Send + Sync> = {
+        let existing = existing.clone();
+        let issue_key = issue_key.clone();
+        Arc::new(move |tracked: bool| {
+            let read = |sig: RwSignal<String>| if tracked { sig.get() } else { sig.get_untracked() };
+            let rounds = |row_index: usize| {
+                let id = TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index,
+                };
+                if tracked {
+                    timer_mgr.finalize_would_round(&id)
+                } else {
+                    timer_mgr.finalize_would_round_untracked(&id)
+                }
             };
-            let blank_row = hours.trim().is_empty() && description.trim().is_empty();
-            if blank_row {
-                continue;
-            }
-            has_non_blank_row = true;
-            let parsed = parse_hours(
-                &hours,
-                hours_per_day,
-                hours_per_week,
-                dec_sep,
-                &wl,
-                &dl,
-                &hl,
-                &ml,
-            );
-            if let Some(parsed_hours) = parsed {
-                if parsed_hours > 0.0 {
-                    duration_rows.push((true, idx, description));
-                } else {
-                    existing_validations[idx].hours_error = Some(duration_positive_error.clone());
-                }
+            let w = if tracked { i18n.get() } else { i18n.get_untracked() };
+            let rows = if tracked {
+                new_entries.get()
             } else {
-                existing_validations[idx].hours_error = Some(duration_positive_error.clone());
+                new_entries.get_untracked()
+            };
+            if tracked {
+                let _ = validation_tick.get();
             }
-        }
+            if is_anonymous {
+                return (
+                    false,
+                    vec![PopupRowValidation::default(); existing.len()],
+                    vec![PopupRowValidation::default(); rows.len()],
+                );
+            }
+            let dec_sep = w.decimal_separator;
+            let wl = w.t(keys::WEEK_ABBR);
+            let dl = w.t(keys::DAY_ABBR);
+            let hl = w.t(keys::HOUR_ABBR);
+            let ml = w.t(keys::MINUTE_ABBR);
+            let messages = PopupValidationMessages {
+                duration_positive: w.t(keys::POPUP_ERROR_DURATION_POSITIVE),
+                description_required: w.t(keys::POPUP_ERROR_DESCRIPTION_REQUIRED),
+                description_unique: w.t(keys::POPUP_ERROR_DESCRIPTION_UNIQUE),
+            };
 
-        for (idx, row) in rows.iter().enumerate() {
-            let hours = row.hours_sig.get();
-            let description = row.comment_sig.get();
-            let blank_row = hours.trim().is_empty() && description.trim().is_empty();
-            if blank_row {
-                continue;
-            }
-            has_non_blank_row = true;
-            let parsed = parse_hours(
-                &hours,
-                hours_per_day,
-                hours_per_week,
-                dec_sep,
-                &wl,
-                &dl,
-                &hl,
-                &ml,
-            );
-            if let Some(parsed_hours) = parsed {
-                if parsed_hours > 0.0 {
-                    duration_rows.push((false, idx, description));
-                } else {
-                    new_validations[idx].hours_error = Some(duration_positive_error.clone());
-                }
-            } else {
-                new_validations[idx].hours_error = Some(duration_positive_error.clone());
-            }
-        }
-
-        if duration_rows.len() > 1 {
-            let mut seen: HashMap<String, (bool, usize)> = HashMap::new();
-            for (is_existing, row_idx, description) in &duration_rows {
-                let trimmed = description.trim();
-                if trimmed.is_empty() {
-                    if *is_existing {
-                        existing_validations[*row_idx].description_error =
-                            Some(description_required_error.clone());
+            let existing_rows = existing
+                .iter()
+                .enumerate()
+                .map(|(idx, entry)| {
+                    let deleted = if tracked {
+                        entry.deleted.get()
                     } else {
-                        new_validations[*row_idx].description_error =
-                            Some(description_required_error.clone());
-                    }
-                    continue;
-                }
-                let normalized = normalize_popup_description(trimmed);
-                if let Some((prior_existing, prior_idx)) = seen.get(&normalized) {
-                    if *is_existing {
-                        existing_validations[*row_idx].description_error =
-                            Some(description_unique_error.clone());
-                    } else {
-                        new_validations[*row_idx].description_error =
-                            Some(description_unique_error.clone());
-                    }
-                    if *prior_existing {
-                        existing_validations[*prior_idx].description_error =
-                            Some(description_unique_error.clone());
-                    } else {
-                        new_validations[*prior_idx].description_error =
-                            Some(description_unique_error.clone());
-                    }
-                } else {
-                    seen.insert(normalized, (*is_existing, *row_idx));
-                }
+                        entry.deleted.get_untracked()
+                    };
+                    (!deleted).then(|| PopupValidationRow {
+                        hours: read(entry.hours_sig),
+                        description: if !entry.comment_html.is_empty() {
+                            entry.display_comment.clone()
+                        } else {
+                            read(entry.comment_sig)
+                        },
+                        timer_rounds: rounds(idx),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let new_rows = rows
+                .iter()
+                .map(|row| PopupValidationRow {
+                    hours: read(row.hours_sig),
+                    description: read(row.comment_sig),
+                    timer_rounds: rounds(row.row_index),
+                })
+                .collect::<Vec<_>>();
+
+            validate_popup_rows(
+                &existing_rows,
+                &new_rows,
+                |text| {
+                    parse_hours(
+                        text,
+                        hours_per_day,
+                        hours_per_week,
+                        dec_sep,
+                        &wl,
+                        &dl,
+                        &hl,
+                        &ml,
+                    )
+                },
+                &messages,
+            )
+        })
+    };
+
+    // Elapsed time is not reactive, so re-evaluate validation every second
+    // while any timer in this popup is active (a timer crossing the rounding
+    // threshold changes its projected duration).
+    #[cfg(feature = "hydrate")]
+    {
+        use gloo_timers::callback::Interval;
+
+        let alive = alive.clone();
+        let popup_has_active_timers = popup_has_active_timers.clone();
+        let _validation_interval = StoredValue::new_local(Interval::new(1_000, move || {
+            if !alive.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
             }
-        }
+            if popup_has_active_timers() {
+                validation_tick.update(|tick| *tick = tick.wrapping_add(1));
+            }
+        }));
+    }
 
-        let has_errors = existing_validations.iter().any(|v| !v.is_valid())
-            || new_validations.iter().any(|v| !v.is_valid());
-        let can_save = if has_errors {
-            false
-        } else if has_non_blank_row {
-            true
-        } else {
-            has_deletes
-        };
-
-        (can_save, existing_validations, new_validations)
-    });
+    let compute_validation_for_memo = compute_validation.clone();
+    let popup_validations = Memo::new(move |_| compute_validation_for_memo(true));
 
     let popup_validations_for_save = popup_validations.clone();
     let save_enabled = Memo::new(move |_| popup_validations_for_save.get().0);
@@ -977,6 +1061,7 @@ pub fn CellPopup(
         let ik = issue_key.clone();
         let issue_key_for_stop = issue_key.clone();
         let saving_timer_rows = saving_timer_rows.clone();
+        let compute_validation_for_save = compute_validation.clone();
         move |latch: Option<FlushLatch>| {
             if is_anonymous {
                 log::warn!("[CellPopup] Anonymous timers cannot be saved to Jira");
@@ -993,9 +1078,32 @@ pub fn CellPopup(
             let ml = w.t(keys::MINUTE_ABBR);
             let ik = ik.clone();
 
+            // Validate against projected finalized durations before touching
+            // timers, so a rejected save leaves running timers untouched.
+            if !compute_validation_for_save(false).0 {
+                log::warn!("[CellPopup] Save rejected: projected timer durations are invalid");
+                if let Some(latch) = latch {
+                    latch.arrive();
+                }
+                return;
+            }
+
             // Include a partial timer interval before collecting worklog values.
             saving_timer_rows.set(true);
             timer_mgr.finalize_all_for_popup(&issue_key_for_stop, date, dec_sep);
+
+            // Re-validate the finalized draft (elapsed time may have crossed the
+            // rounding threshold since the check above). Timers are stopped now,
+            // so the validation memo shows the errors on the actual values.
+            if !compute_validation_for_save(false).0 {
+                log::warn!("[CellPopup] Save rejected: finalized timer durations are invalid");
+                saving_timer_rows.set(false);
+                remove_persisted_timer_popup(&issue_key_for_stop, date);
+                if let Some(latch) = latch {
+                    latch.arrive();
+                }
+                return;
+            }
 
             let deletes: Vec<(String, String)> = existing_for_save
                 .iter()
