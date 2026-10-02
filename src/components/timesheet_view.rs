@@ -1,4 +1,5 @@
 use crate::components::cell_popup::CellPopup;
+use crate::components::cheatsheet_dialog::CheatsheetDialog;
 use crate::components::popup_flush::{provide_popup_flush_context, use_popup_flush};
 use crate::components::report_overlay::{ReportRibbonControls, ReportView, create_report_state};
 use crate::components::settings_dialog::SettingsDialog;
@@ -255,6 +256,15 @@ fn visible_timesheet_rows(
         .filter(|item| visible_keys.contains(&item.key))
         .cloned()
         .collect::<Vec<_>>();
+    // Pinned items that are absent from the current dataset (e.g. a search-picked
+    // item with no activity, after a navigation refetch) still render from the
+    // preserved WorkItem value.
+    let missing_pinned = pinned_items
+        .iter()
+        .filter(|item| !rows.iter().any(|row| row.key == item.key))
+        .cloned()
+        .collect::<Vec<_>>();
+    rows.extend(missing_pinned);
     crate::model::sort_work_items_for_timesheet(&mut rows, &ts.worklogs, &ts.bitbucket_activity);
     // Pinned items go to the top, in pinned order (most recently added first).
     let (mut pinned, rest): (Vec<_>, Vec<_>) = rows
@@ -1073,6 +1083,7 @@ struct PopupInfo {
     popup_id: u32,
     issue_key: String,
     issue_summary: String,
+    is_anonymous: bool,
     date: NaiveDate,
     entries: Vec<WorklogEntry>,
     hours_per_day: f64,
@@ -1127,6 +1138,7 @@ impl Clone for PopupInfo {
             popup_id: self.popup_id,
             issue_key: self.issue_key.clone(),
             issue_summary: self.issue_summary.clone(),
+            is_anonymous: self.is_anonymous,
             date: self.date,
             entries: self.entries.clone(),
             hours_per_day: self.hours_per_day,
@@ -1315,6 +1327,25 @@ fn focus_grid_cell(row: usize, col: usize) {
 }
 
 #[cfg(feature = "hydrate")]
+fn event_target_is_editable(ev: &web_sys::KeyboardEvent) -> bool {
+    use wasm_bindgen::JsCast;
+
+    let Some(target) = ev.target() else {
+        return false;
+    };
+    let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() else {
+        return false;
+    };
+    if element.is_content_editable() {
+        return true;
+    }
+    matches!(
+        element.tag_name().to_ascii_uppercase().as_str(),
+        "INPUT" | "TEXTAREA" | "SELECT"
+    )
+}
+
+#[cfg(feature = "hydrate")]
 fn schedule_digit_fill_for_popup(popup_id: u32, digit: char) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
@@ -1410,7 +1441,7 @@ fn new_request_nonce() -> String {
     }
 }
 
-fn custom_action_title(action: &CustomAction) -> String {
+pub fn custom_action_title(action: &CustomAction) -> String {
     let key = action.work_item_key.trim();
     let description = action.description.trim();
     let duration = action.duration.trim();
@@ -1856,6 +1887,8 @@ pub fn TimesheetView() -> impl IntoView {
             is_loading.set(true);
         }
         Some(Ok((ts, user_profile))) => {
+            let mut ts = ts;
+            merge_pinned_work_items(&mut ts, &pinned_work_items.get_untracked());
             last_data.set(Some(ts));
             if let Some((avatar, name)) = user_profile {
                 log::info!("Setting user_avatar: {}, user_name: {}", avatar, name);
@@ -1873,6 +1906,7 @@ pub fn TimesheetView() -> impl IntoView {
 
     // ── Popup state — multiple popups can be open simultaneously ──
     let open_popups: RwSignal<Vec<PopupInfo>> = RwSignal::new(Vec::new());
+    let anonymous_timer_trigger = RwSignal::new(0u64);
     let restored_timer_popups_loaded = RwSignal::new(false);
     // Capture component-level owner so signals created during restore are not
     // owned by the Effect's reactive scope (which gets disposed on re-runs).
@@ -1949,6 +1983,7 @@ pub fn TimesheetView() -> impl IntoView {
                     popup_id: NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     issue_key: draft.issue_key.clone(),
                     issue_summary,
+                    is_anonymous: draft.is_anonymous,
                     date: draft.date,
                     entries,
                     hours_per_day: ts.hours_per_day,
@@ -1983,8 +2018,48 @@ pub fn TimesheetView() -> impl IntoView {
         });
     });
 
+    let component_owner_for_anonymous = component_owner.clone();
+    let start_anonymous_timer = Callback::new(move |_: ()| {
+        if open_popups.with_untracked(|popups| popups.iter().any(|popup| popup.is_anonymous)) {
+            anonymous_timer_trigger.update(|generation| *generation = generation.wrapping_add(1));
+            return;
+        }
+        let popup_id = NEXT_POPUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (hours_per_day, hours_per_week) = last_data
+            .with_untracked(|ts| ts.as_ref().map(|ts| (ts.hours_per_day, ts.hours_per_week)))
+            .unwrap_or((8.0, 40.0));
+        let popup = PopupInfo {
+            popup_id,
+            // This namespace cannot be a Jira key and stays unique across restored popups.
+            issue_key: format!("anonymous:{}:{popup_id}", chrono::Utc::now().timestamp_micros()),
+            issue_summary: String::new(),
+            is_anonymous: true,
+            date: Local::now().date_naive(),
+            entries: Vec::new(),
+            hours_per_day,
+            hours_per_week,
+            suggested_comments: Vec::new(),
+            suggested_comment: None,
+            commit_messages: Vec::new(),
+            commit_links: Vec::new(),
+            test_result_links: Vec::new(),
+            pr_links: Vec::new(),
+            is_git_log: false,
+            is_weekend: false,
+            is_today: true,
+            position_style: component_owner_for_anonymous.with(|| {
+                RwSignal::new(restored_popup_style(open_popups.with_untracked(Vec::len)))
+            }),
+            site_url: String::new(),
+            restored_timer_popup: None,
+            initial_digit: None,
+        };
+        open_popups.update(|popups| popups.push(popup));
+    });
+
     // State for showing the settings dialog
     let show_settings = RwSignal::new(false);
+    let show_cheatsheet = RwSignal::new(false);
     let show_report = RwSignal::new(false);
     let report_state = create_report_state();
     let user_menu_open = RwSignal::new(false);
@@ -2496,6 +2571,7 @@ pub fn TimesheetView() -> impl IntoView {
                 popup_id,
                 issue_key: target_issue.clone(),
                 issue_summary,
+                is_anonymous: false,
                 date: target_date,
                 entries: target_entries.clone(),
                 hours_per_day: ts.hours_per_day,
@@ -2602,10 +2678,30 @@ pub fn TimesheetView() -> impl IntoView {
         let flush_mgr_for_hotkey = flush_mgr.clone();
         let conn_for_hotkey = conn.clone();
         let trigger_custom_action_for_hotkey = trigger_custom_action;
+        let show_cheatsheet_for_hotkey = show_cheatsheet;
         let focus_last_cell_cb =
             wasm_bindgen::closure::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
                 move |ev: web_sys::KeyboardEvent| {
                     let key = ev.key();
+                    if show_cheatsheet_for_hotkey.get_untracked() {
+                        if key == "Escape" {
+                            ev.prevent_default();
+                            show_cheatsheet_for_hotkey.set(false);
+                        }
+                        return;
+                    }
+                    if key == "?"
+                        && !ev.alt_key()
+                        && !ev.ctrl_key()
+                        && !ev.meta_key()
+                        && !ev.is_composing()
+                        && !show_settings.get_untracked()
+                        && !event_target_is_editable(&ev)
+                    {
+                        ev.prevent_default();
+                        show_cheatsheet_for_hotkey.set(true);
+                        return;
+                    }
                     if !ev.alt_key() || ev.ctrl_key() || ev.meta_key() {
                         return;
                     }
@@ -2696,6 +2792,12 @@ pub fn TimesheetView() -> impl IntoView {
                             }
                         }
                         match key_lower.as_str() {
+                            "a" if !ev.shift_key() && !ev.is_composing() => {
+                                ev.prevent_default();
+                                if !ev.repeat() {
+                                    start_anonymous_timer.run(());
+                                }
+                            }
                             "l" => {
                                 ev.prevent_default();
                                 if let Some((row, col)) = focused_cell_for_hotkey.get_untracked() {
@@ -2817,6 +2919,14 @@ pub fn TimesheetView() -> impl IntoView {
                             move |_| show_report.set(false)
                         };
                         view! {
+                            <>
+                            <button class="nav-btn nav-icon-btn nav-cheatsheet-btn" on:click=move |_| show_cheatsheet.set(true) title=move || i18n.get().t(keys::CHEATSHEET_OPEN) aria-label=move || i18n.get().t(keys::CHEATSHEET_OPEN) aria-keyshortcuts="?">
+                                <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+                                    <path d="M9.4 9.2a2.7 2.7 0 1 1 3.4 2.6c-.6.2-.9.7-.9 1.3v.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                                    <circle cx="12" cy="16.6" r="1" fill="currentColor"></circle>
+                                </svg>
+                            </button>
                             <button class="nav-btn nav-icon-btn nav-view-btn" on:click=on_back title=move || i18n.get().t(keys::TIMESHEET_TITLE)>
                                 <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
                                     <rect x="3" y="4" width="18" height="16" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"></rect>
@@ -2824,11 +2934,19 @@ pub fn TimesheetView() -> impl IntoView {
                                     <rect x="9.8" y="10.2" width="4.4" height="2.2" rx="0.5" fill="currentColor" opacity="0.35"></rect>
                                 </svg>
                             </button>
+                            </>
                         }
                         .into_any()
                     } else {
                         view! {
                             <>
+                                <button class="nav-btn nav-icon-btn nav-cheatsheet-btn" on:click=move |_| show_cheatsheet.set(true) title=move || i18n.get().t(keys::CHEATSHEET_OPEN) aria-label=move || i18n.get().t(keys::CHEATSHEET_OPEN) aria-keyshortcuts="?">
+                                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+                                        <path d="M9.4 9.2a2.7 2.7 0 1 1 3.4 2.6c-.6.2-.9.7-.9 1.3v.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                                        <circle cx="12" cy="16.6" r="1" fill="currentColor"></circle>
+                                    </svg>
+                                </button>
                                 <button class="nav-btn nav-icon-btn nav-view-btn" on:click=on_open_report title=move || i18n.get().t(keys::USER_REPORT)>
                                     <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
                                         <rect class="report-icon-bar report-icon-bar-left" x="4" y="10" width="4" height="10" rx="1"></rect>
@@ -2859,6 +2977,19 @@ pub fn TimesheetView() -> impl IntoView {
                                     }
                                 } disabled=move || is_refreshing.get() title=move || i18n.get().t(keys::REFRESH_CACHED)>
                                     <span class="icon-refresh">{"🔄"}</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    class="nav-btn nav-icon-btn nav-anonymous-timer"
+                                    on:click=move |_| start_anonymous_timer.run(())
+                                    title=move || i18n.get().t(keys::ANONYMOUS_TIMER_START)
+                                    aria-label=move || i18n.get().t(keys::ANONYMOUS_TIMER_START)
+                                    aria-keyshortcuts="Alt+A"
+                                >
+                                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                                        <circle cx="12" cy="14" r="8" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+                                        <path d="M9 2h6M12 2v4M18 6l2-2M12 10v4l3 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+                                    </svg>
                                 </button>
                                 {move || {
                                     let actions = custom_actions.get();
@@ -3242,6 +3373,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                 ),
                                                 issue_key: ck2.clone(),
                                                 issue_summary,
+                                                is_anonymous: false,
                                                 date: cell_date,
                                                 entries: entries2.clone(),
                                                 hours_per_day: hpd,
@@ -3638,6 +3770,7 @@ pub fn TimesheetView() -> impl IntoView {
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                                             issue_key: we_key2.clone(),
                                             issue_summary,
+                                            is_anonymous: false,
                                             date: sat,
                                             entries: we_entries2.clone(),
                                             hours_per_day: hpd,
@@ -4116,6 +4249,8 @@ pub fn TimesheetView() -> impl IntoView {
                            pos_sig={pos_sig.clone()}
                            issue_key={info.issue_key}
                            issue_summary={info.issue_summary}
+                           is_anonymous={info.is_anonymous}
+                           anonymous_timer_trigger=anonymous_timer_trigger
                            date={info.date}
                            entries={info.entries}
                            hours_per_day={info.hours_per_day}
@@ -4141,6 +4276,9 @@ pub fn TimesheetView() -> impl IntoView {
             // Settings dialog modal
             {move || show_settings.get().then(|| view! {
                 <SettingsDialog on_ok=on_settings_saved on_cancel=on_close_settings />
+            })}
+            {move || show_cheatsheet.get().then(|| view! {
+                <CheatsheetDialog show=show_cheatsheet show_report=show_report custom_actions=custom_actions />
             })}
             {move || show_report.get().then(|| view! {
                 <ReportView

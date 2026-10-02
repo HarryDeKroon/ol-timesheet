@@ -30,6 +30,7 @@ cfg_if! {
     const MINUTES_TO_MILLISECONDS: u32 = 60_000;
 const TIMER_INTERVAL: u32 = 5 * MINUTES_TO_MILLISECONDS;
 const TIMER_INTERVAL_SHORT: u32 = TIMER_INTERVAL >> 1;
+const TIMER_SAVE_ROUNDING_THRESHOLD: u32 = MINUTES_TO_MILLISECONDS;
     }
 }
 #[cfg(feature = "hydrate")]
@@ -47,6 +48,19 @@ pub struct TimerId {
     /// Index of the worklog entry row inside the popup (0-based).
     pub row_index: usize,
 }
+
+#[derive(Clone)]
+pub struct AnonymousTimerDraft {
+    pub id: TimerId,
+    pub hours_signal: RwSignal<String>,
+    pub comment_signal: RwSignal<String>,
+    pub hours_per_day: f64,
+    pub hours_per_week: f64,
+    pub remove: Callback<usize>,
+}
+
+#[derive(Clone, Copy)]
+pub struct AnonymousTimerDrafts(pub RwSignal<Vec<AnonymousTimerDraft>>);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum PersistedTimerPhase {
@@ -80,6 +94,8 @@ pub struct PersistedTimerRow {
 pub struct PersistedTimerPopup {
     pub issue_key: String,
     pub issue_summary: String,
+    #[serde(default)]
+    pub is_anonymous: bool,
     pub date: chrono::NaiveDate,
     #[serde(default)]
     pub suggested_comment: Option<String>,
@@ -292,6 +308,7 @@ pub fn save_persisted_timer_popup(_popup: PersistedTimerPopup) {}
 pub fn upsert_persisted_timer_row(
     issue_key: &str,
     issue_summary: &str,
+    is_anonymous: bool,
     date: chrono::NaiveDate,
     suggested_comment: Option<String>,
     is_git_log: bool,
@@ -306,6 +323,7 @@ pub fn upsert_persisted_timer_row(
         .find(|p| p.issue_key == issue_key && p.date == date)
     {
         popup.issue_summary = issue_summary.to_string();
+        popup.is_anonymous = is_anonymous;
         popup.suggested_comment = suggested_comment;
         popup.is_git_log = is_git_log;
         popup.is_weekend = is_weekend;
@@ -324,6 +342,7 @@ pub fn upsert_persisted_timer_row(
         file.popups.push(PersistedTimerPopup {
             issue_key: issue_key.to_string(),
             issue_summary: issue_summary.to_string(),
+            is_anonymous,
             date,
             suggested_comment,
             is_git_log,
@@ -339,6 +358,7 @@ pub fn upsert_persisted_timer_row(
 pub fn upsert_persisted_timer_row(
     _issue_key: &str,
     _issue_summary: &str,
+    _is_anonymous: bool,
     _date: chrono::NaiveDate,
     _suggested_comment: Option<String>,
     _is_git_log: bool,
@@ -377,6 +397,21 @@ pub fn remove_persisted_timer_popup(issue_key: &str, date: chrono::NaiveDate) {
 
 #[cfg(not(feature = "hydrate"))]
 pub fn remove_persisted_timer_popup(_issue_key: &str, _date: chrono::NaiveDate) {}
+
+#[cfg(feature = "hydrate")]
+pub fn remove_persisted_timer_row(id: &TimerId) {
+    let mut file = read_persisted_timer_file();
+    for popup in &mut file.popups {
+        if popup.issue_key == id.issue_key && popup.date == id.date {
+            popup.rows.retain(|row| row.row_index != id.row_index);
+        }
+    }
+    file.popups.retain(|popup| !popup.rows.is_empty());
+    write_persisted_timer_file(&file);
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub fn remove_persisted_timer_row(_id: &TimerId) {}
 
 // ---------------------------------------------------------------------------
 // TimerManager — the global singleton
@@ -775,6 +810,72 @@ impl TimerManager {
         });
     }
 
+    /// Round a partial interval up by five minutes once at least one minute
+    /// has elapsed, then stop the timer.
+    #[cfg(feature = "hydrate")]
+    pub fn finalize(&self, id: &TimerId, decimal_sep: char) {
+        let finalized = self.inner.with_untracked(|map| {
+            let entry = map.get(id)?;
+            let elapsed_ms = match entry.phase {
+                TimerPhase::Running => {
+                    let segment_elapsed = (now_ms() - entry.interval_started_at).max(0.0) as u32;
+                    entry.accumulated_ms.saturating_add(segment_elapsed)
+                }
+                TimerPhase::Paused { .. } => entry.accumulated_ms,
+                TimerPhase::Stopped => return None,
+            };
+            Some((
+                elapsed_ms >= TIMER_SAVE_ROUNDING_THRESHOLD,
+                entry.hours_signal,
+                entry.hours_per_day,
+                entry.hours_per_week,
+            ))
+        });
+
+        let Some((should_round, hours_signal, hours_per_day, hours_per_week)) = finalized else {
+            return;
+        };
+        if should_round {
+            add_completed_intervals_to_hours(
+                hours_signal,
+                1,
+                hours_per_day,
+                hours_per_week,
+                decimal_sep,
+            );
+        }
+        self.stop(id);
+    }
+
+    /// Finalize and remove all timers belonging to one popup.
+    #[cfg(feature = "hydrate")]
+    pub fn finalize_all_for_popup(
+        &self,
+        issue_key: &str,
+        date: chrono::NaiveDate,
+        decimal_sep: char,
+    ) {
+        let ids = self.inner.with_untracked(|map| {
+            map.keys()
+                .filter(|id| id.issue_key == issue_key && id.date == date)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        for id in &ids {
+            self.finalize(id, decimal_sep);
+        }
+        self.stop_all_for_popup(issue_key, date);
+    }
+
+    #[cfg(feature = "hydrate")]
+    pub fn remove(&self, id: &TimerId) {
+        self.inner.update(|map| {
+            if let Some(entry) = map.remove(id) {
+                cancel_timeout(entry.timeout_handle);
+            }
+        });
+    }
+
     /// Stop and remove **all** timers. Called when a popup is closed.
     #[cfg(feature = "hydrate")]
     pub fn stop_all_for_popup(&self, issue_key: &str, date: chrono::NaiveDate) {
@@ -831,6 +932,21 @@ impl TimerManager {
     pub fn stop(&self, _id: &TimerId) {}
 
     #[cfg(not(feature = "hydrate"))]
+    pub fn finalize(&self, _id: &TimerId, _decimal_sep: char) {}
+
+    #[cfg(not(feature = "hydrate"))]
+    pub fn finalize_all_for_popup(
+        &self,
+        _issue_key: &str,
+        _date: chrono::NaiveDate,
+        _decimal_sep: char,
+    ) {
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    pub fn remove(&self, _id: &TimerId) {}
+
+    #[cfg(not(feature = "hydrate"))]
     pub fn stop_all_for_popup(&self, _issue_key: &str, _date: chrono::NaiveDate) {}
 
     #[cfg(not(feature = "hydrate"))]
@@ -858,6 +974,7 @@ impl TimerManager {
 pub fn provide_timer_context() -> TimerManager {
     let mgr = TimerManager::new();
     provide_context(mgr);
+    provide_context(AnonymousTimerDrafts(RwSignal::new(Vec::new())));
     mgr
 }
 
@@ -866,6 +983,13 @@ pub fn use_timer() -> TimerManager {
     use_context::<TimerManager>().unwrap_or_else(|| {
         log::error!("TimerManager context not provided, using fallback manager");
         TimerManager::new()
+    })
+}
+
+pub fn use_anonymous_timer_drafts() -> AnonymousTimerDrafts {
+    use_context::<AnonymousTimerDrafts>().unwrap_or_else(|| {
+        log::error!("AnonymousTimerDrafts context not provided, using empty registry");
+        AnonymousTimerDrafts(RwSignal::new(Vec::new()))
     })
 }
 

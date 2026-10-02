@@ -1,8 +1,9 @@
 use crate::components::popup_flush::{FlushLatch, use_popup_flush};
 use crate::components::timer::{
-    PersistedTimerPhase, PersistedTimerPopup, PersistedTimerRow, PersistedTimerState, ProgressInfo,
-    TimerId, TimerPhase, ensure_timer_storage_initialized, remove_persisted_timer_popup,
-    save_persisted_timer_popup, upsert_persisted_timer_row, use_timer,
+    AnonymousTimerDraft, PersistedTimerPhase, PersistedTimerPopup, PersistedTimerRow,
+    PersistedTimerState, ProgressInfo, TimerId, TimerPhase, ensure_timer_storage_initialized,
+    remove_persisted_timer_popup, remove_persisted_timer_row, save_persisted_timer_popup,
+    upsert_persisted_timer_row, use_anonymous_timer_drafts, use_timer,
 };
 use crate::connection::use_connection;
 use crate::formatting::{format_hours_long, parse_hours};
@@ -200,12 +201,66 @@ fn normalize_popup_description(text: &str) -> String {
         .to_lowercase()
 }
 
+#[derive(Clone, Copy)]
+struct NewEntry {
+    row_index: usize,
+    hours_sig: RwSignal<String>,
+    comment_sig: RwSignal<String>,
+}
+
+fn remove_new_entry(rows: &mut Vec<NewEntry>, row_index: usize) {
+    if !rows.iter().any(|row| row.row_index == row_index) {
+        log::error!("[CellPopup] Cannot remove missing row {row_index}");
+        return;
+    }
+    if rows.len() == 1 {
+        if let Some(row) = rows.first() {
+            row.hours_sig.set(String::new());
+            row.comment_sig.set(String::new());
+        }
+    } else {
+        rows.retain(|row| row.row_index != row_index);
+    }
+}
+
+fn transferable_anonymous_content(draft: &AnonymousTimerDraft, i18n: &I18n) -> Option<(f64, String)> {
+    let comment = draft.comment_signal.get();
+    let hours = parse_hours(
+        &draft.hours_signal.get(),
+        draft.hours_per_day,
+        draft.hours_per_week,
+        i18n.decimal_separator,
+        &i18n.t(keys::WEEK_ABBR),
+        &i18n.t(keys::DAY_ABBR),
+        &i18n.t(keys::HOUR_ABBR),
+        &i18n.t(keys::MINUTE_ABBR),
+    )?;
+    (hours.is_finite() && hours > 0.0 && !comment.trim().is_empty())
+        .then_some((hours, comment))
+}
+
+fn transferred_duration_text(
+    draft: &AnonymousTimerDraft,
+    hours: f64,
+    hours_per_day: f64,
+    hours_per_week: f64,
+    decimal_separator: char,
+) -> String {
+    if draft.hours_per_day == hours_per_day && draft.hours_per_week == hours_per_week {
+        draft.hours_signal.get_untracked()
+    } else {
+        hours.to_string().replace('.', &decimal_separator.to_string())
+    }
+}
+
 #[component]
 pub fn CellPopup(
     popup_id: u32,
     pos_sig: RwSignal<String>,
     issue_key: String,
     issue_summary: String,
+    #[prop(default = false)] is_anonymous: bool,
+    anonymous_timer_trigger: RwSignal<u64>,
     date: NaiveDate,
     entries: Vec<WorklogEntry>,
     hours_per_day: f64,
@@ -233,6 +288,7 @@ pub fn CellPopup(
     });
     let conn = use_connection();
     let timer_mgr = use_timer();
+    let anonymous_drafts = use_anonymous_timer_drafts().0;
     let flush_mgr = use_popup_flush();
 
     let issue_key_for_close = issue_key.clone();
@@ -366,31 +422,85 @@ pub fn CellPopup(
         .map(|comment| (RwSignal::new(String::new()), RwSignal::new(comment)))
         .collect();
     initial_rows.push((RwSignal::new(String::new()), RwSignal::new(String::new())));
-    let initial_new_entries: Vec<(RwSignal<String>, RwSignal<String>)> =
-        if restored_new_rows.is_empty() {
-            initial_rows
-        } else {
-            let mut restored = restored_new_rows
-                .iter()
-                .map(|row| {
-                    (
-                        RwSignal::new(row.hours_text.clone()),
-                        RwSignal::new(row.comment_text.clone()),
-                    )
-                })
-                .collect::<Vec<_>>();
-            restored.push((
-                RwSignal::new(String::new()),
-                RwSignal::new(if is_git_log {
-                    suggested_comment.clone().unwrap_or_default()
-                } else {
-                    String::new()
-                }),
-            ));
-            restored
+    let initial_new_entries: Vec<NewEntry> = if restored_new_rows.is_empty() {
+        initial_rows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (hours_sig, comment_sig))| NewEntry {
+                row_index: existing.len() + 1000 + idx,
+                hours_sig,
+                comment_sig,
+            })
+            .collect()
+    } else {
+        let mut restored = restored_new_rows
+            .iter()
+            .map(|row| NewEntry {
+                row_index: row.row_index,
+                hours_sig: RwSignal::new(row.hours_text.clone()),
+                comment_sig: RwSignal::new(row.comment_text.clone()),
+            })
+            .collect::<Vec<_>>();
+        let next_index = restored
+            .iter()
+            .map(|row| row.row_index)
+            .max()
+            .map_or(existing.len() + 1000, |index| index + 1);
+        restored.push(NewEntry {
+            row_index: next_index,
+            hours_sig: RwSignal::new(String::new()),
+            comment_sig: RwSignal::new(if is_git_log {
+                suggested_comment.clone().unwrap_or_default()
+            } else {
+                String::new()
+            }),
+        });
+        restored
+    };
+    let next_new_row_index = RwSignal::new(
+        initial_new_entries
+            .iter()
+            .map(|row| row.row_index)
+            .max()
+            .map_or(existing.len() + 1000, |index| index + 1),
+    );
+    let new_entries = RwSignal::new(initial_new_entries);
+    let popup_owner_for_rows = Owner::current();
+    let append_new_row = Callback::new(move |last_index: usize| {
+        let Some(owner) = popup_owner_for_rows.as_ref() else {
+            log::error!("[CellPopup] Cannot add a row without a reactive owner");
+            return;
         };
-    let new_entries: RwSignal<Vec<(RwSignal<String>, RwSignal<String>)>> =
-        RwSignal::new(initial_new_entries);
+        if new_entries.with_untracked(|rows| {
+            rows.last().is_some_and(|row| row.row_index == last_index)
+        }) {
+            // Rows must outlive the render scope of the button that creates them.
+            let row = owner.with(|| NewEntry {
+                row_index: next_new_row_index.get_untracked(),
+                hours_sig: RwSignal::new(String::new()),
+                comment_sig: RwSignal::new(String::new()),
+            });
+            next_new_row_index.update(|index| *index += 1);
+            new_entries.update(|rows| rows.push(row));
+        }
+    });
+
+    if is_anonymous && restored_popup.is_none() {
+        if let Some(row) = new_entries.with_untracked(|rows| rows.first().copied()) {
+            timer_mgr.start(
+                TimerId {
+                    issue_key: issue_key.clone(),
+                    date,
+                    row_index: row.row_index,
+                },
+                row.hours_sig,
+                hours_per_day,
+                hours_per_week,
+                i18n.get_untracked().decimal_separator,
+            );
+            append_new_row.run(row.row_index);
+        }
+    }
 
     // ── Drag support ──
     // We use Rc<Cell<>> for drag state because these closures
@@ -467,34 +577,37 @@ pub fn CellPopup(
                 });
             }
 
-            let existing_count = existing.len();
             let new_rows = new_entries.get_untracked();
-            for (idx, (hours_sig, comment_sig)) in new_rows.iter().enumerate() {
+            for row in &new_rows {
                 let timer_id = TimerId {
                     issue_key: issue_key.clone(),
                     date,
-                    row_index: existing_count + 1000 + idx,
+                    row_index: row.row_index,
                 };
                 let Some(timer_state) = timer_mgr.persisted_state(&timer_id) else {
                     continue;
                 };
 
                 rows.push(PersistedTimerRow {
-                    row_index: existing_count + 1000 + idx,
+                    row_index: row.row_index,
                     worklog_id: None,
-                    hours_text: hours_sig.get_untracked(),
-                    comment_text: comment_sig.get_untracked(),
+                    hours_text: row.hours_sig.get_untracked(),
+                    comment_text: row.comment_sig.get_untracked(),
                     timer_state,
                 });
             }
 
             if rows.is_empty() {
+                if is_anonymous {
+                    remove_persisted_timer_popup(&issue_key, date);
+                }
                 return;
             }
 
             save_persisted_timer_popup(PersistedTimerPopup {
                 issue_key: issue_key.clone(),
                 issue_summary: issue_summary.clone(),
+                is_anonymous,
                 date,
                 suggested_comment: suggested_comment.clone(),
                 is_git_log,
@@ -504,6 +617,85 @@ pub fn CellPopup(
             });
         })
     };
+
+    // ── Close handler that also stops timers ────────────────────────────
+    let close_timer_popup = {
+        let ik = issue_key_for_close.clone();
+        Callback::new(move |_: ()| {
+            timer_mgr.stop_all_for_popup(&ik, date_for_close);
+            remove_persisted_timer_popup(&ik, date_for_close);
+            on_close.run(());
+        })
+    };
+
+    if is_anonymous {
+        let issue_key_for_remove = issue_key.clone();
+        let remove_row = Callback::new(move |row_index: usize| {
+            let id = TimerId {
+                issue_key: issue_key_for_remove.clone(),
+                date,
+                row_index,
+            };
+            timer_mgr.remove(&id);
+            anonymous_drafts.update(|drafts| drafts.retain(|draft| draft.id != id));
+            new_entries.update(|rows| remove_new_entry(rows, row_index));
+            remove_persisted_timer_row(&id);
+            let has_remaining_rows = new_entries.with_untracked(|rows| {
+                rows.iter().any(|row| {
+                    !row.hours_sig.get_untracked().trim().is_empty()
+                        || !row.comment_sig.get_untracked().trim().is_empty()
+                        || timer_mgr.is_active_untracked(&TimerId {
+                            issue_key: issue_key_for_remove.clone(),
+                            date,
+                            row_index: row.row_index,
+                        })
+                })
+            });
+            if !has_remaining_rows {
+                close_timer_popup.run(());
+            }
+        });
+        let issue_key_for_registry = issue_key.clone();
+        Effect::new(move |_| {
+            let rows = new_entries.get();
+            anonymous_drafts.update(|drafts| {
+                drafts.retain(|draft| {
+                    draft.id.issue_key != issue_key_for_registry || draft.id.date != date
+                });
+                drafts.extend(rows.iter().map(|row| AnonymousTimerDraft {
+                    id: TimerId {
+                        issue_key: issue_key_for_registry.clone(),
+                        date,
+                        row_index: row.row_index,
+                    },
+                    hours_signal: row.hours_sig,
+                    comment_signal: row.comment_sig,
+                    hours_per_day,
+                    hours_per_week,
+                    remove: remove_row,
+                }));
+            });
+        });
+        let issue_key_for_cleanup = issue_key.clone();
+        on_cleanup(move || {
+            anonymous_drafts.update(|drafts| {
+                drafts.retain(|draft| {
+                    draft.id.issue_key != issue_key_for_cleanup || draft.id.date != date
+                });
+            });
+        });
+    }
+
+    let transferable_anonymous_row = Memo::new(move |_| {
+        if is_anonymous {
+            return None;
+        }
+        let w = i18n.get();
+        anonymous_drafts.get().iter().find_map(|draft| {
+            transferable_anonymous_content(draft, &w)
+                .map(|(hours, comment)| (draft.id.clone(), hours, comment))
+        })
+    });
 
     let popup_has_active_timers: Rc<dyn Fn() -> bool> = {
         let existing = existing.clone();
@@ -525,13 +717,12 @@ pub fn CellPopup(
                 }
             }
 
-            let existing_count = existing.len();
             let new_rows = new_entries.get_untracked();
-            for idx in 0..new_rows.len() {
+            for row in &new_rows {
                 let timer_id = TimerId {
                     issue_key: issue_key.clone(),
                     date,
-                    row_index: existing_count + 1000 + idx,
+                    row_index: row.row_index,
                 };
                 if timer_mgr.is_active_untracked(&timer_id) {
                     return true;
@@ -563,16 +754,15 @@ pub fn CellPopup(
     }
 
     let restored_new_entries = new_entries.get_untracked();
-    let existing_count = existing.len();
     for (idx, restored_row) in restored_new_rows_for_restore.iter().enumerate() {
-        if let Some((hours_sig, _)) = restored_new_entries.get(idx) {
+        if let Some(row) = restored_new_entries.get(idx) {
             timer_mgr.restore_persisted_state(
                 TimerId {
                     issue_key: issue_key.clone(),
                     date,
-                    row_index: existing_count + 1000 + idx,
+                    row_index: row.row_index,
                 },
-                *hours_sig,
+                row.hours_sig,
                 hours_per_day,
                 hours_per_week,
                 i18n.get_untracked().decimal_separator,
@@ -602,15 +792,14 @@ pub fn CellPopup(
                 let _ = timer_mgr.phase(&timer_id);
             }
 
-            let existing_count = existing.len();
             let rows = new_entries.get();
-            for (idx, (hours_sig, comment_sig)) in rows.iter().enumerate() {
-                let _ = hours_sig.get();
-                let _ = comment_sig.get();
+            for row in &rows {
+                let _ = row.hours_sig.get();
+                let _ = row.comment_sig.get();
                 let timer_id = TimerId {
                     issue_key: issue_key.clone(),
                     date,
-                    row_index: existing_count + 1000 + idx,
+                    row_index: row.row_index,
                 };
                 let _ = timer_mgr.phase(&timer_id);
             }
@@ -637,6 +826,13 @@ pub fn CellPopup(
     // ── Validation (Save enablement) ────────────────────────────────────
     let existing_for_validation = existing.clone();
     let popup_validations = Memo::new(move |_| {
+        if is_anonymous {
+            return (
+                false,
+                vec![PopupRowValidation::default(); existing_for_validation.len()],
+                vec![PopupRowValidation::default(); new_entries.get().len()],
+            );
+        }
         let w = i18n.get();
         let dec_sep = w.decimal_separator;
         let wl = w.t(keys::WEEK_ABBR);
@@ -691,9 +887,9 @@ pub fn CellPopup(
             }
         }
 
-        for (idx, (hours_sig, comment_sig)) in rows.iter().enumerate() {
-            let hours = hours_sig.get();
-            let description = comment_sig.get();
+        for (idx, row) in rows.iter().enumerate() {
+            let hours = row.hours_sig.get();
+            let description = row.comment_sig.get();
             let blank_row = hours.trim().is_empty() && description.trim().is_empty();
             if blank_row {
                 continue;
@@ -782,6 +978,13 @@ pub fn CellPopup(
         let issue_key_for_stop = issue_key.clone();
         let saving_timer_rows = saving_timer_rows.clone();
         move |latch: Option<FlushLatch>| {
+            if is_anonymous {
+                log::warn!("[CellPopup] Anonymous timers cannot be saved to Jira");
+                if let Some(latch) = latch {
+                    latch.arrive();
+                }
+                return;
+            }
             let w = i18n.get_untracked();
             let dec_sep = w.decimal_separator;
             let wl = w.t(keys::WEEK_ABBR);
@@ -790,9 +993,9 @@ pub fn CellPopup(
             let ml = w.t(keys::MINUTE_ABBR);
             let ik = ik.clone();
 
-            // Stop all timers for this popup on save
+            // Include a partial timer interval before collecting worklog values.
             saving_timer_rows.set(true);
-            timer_mgr.stop_all_for_popup(&issue_key_for_stop, date);
+            timer_mgr.finalize_all_for_popup(&issue_key_for_stop, date, dec_sep);
 
             let deletes: Vec<(String, String)> = existing_for_save
                 .iter()
@@ -835,9 +1038,9 @@ pub fn CellPopup(
 
             let rows = new_entries.get_untracked();
             let mut creates: Vec<(String, NaiveDate, f64, String)> = Vec::new();
-            for (idx, (h_sig, c_sig)) in rows.iter().enumerate() {
-                let h_text = h_sig.get_untracked();
-                let c_text = c_sig.get_untracked();
+            for (idx, row) in rows.iter().enumerate() {
+                let h_text = row.hours_sig.get_untracked();
+                let c_text = row.comment_sig.get_untracked();
                 let is_last = idx == rows.len() - 1;
                 if is_last && h_text.is_empty() && c_text.is_empty() {
                     continue;
@@ -906,7 +1109,7 @@ pub fn CellPopup(
     // Build is_dirty / is_valid closures that inspect popup signals without
     // subscribing (get_untracked), then register with PopupDraftManager so
     // navigation actions can auto-save this popup.
-    {
+    if !is_anonymous {
         let existing_for_dirty = existing.clone();
         let popup_has_active_timers = popup_has_active_timers.clone();
         let is_dirty: Rc<dyn Fn() -> bool> = Rc::new(move || {
@@ -930,8 +1133,8 @@ pub fn CellPopup(
             }
             // Any new entry row with non-empty hours?
             let rows = new_entries.get_untracked();
-            for (idx, (h_sig, _)) in rows.iter().enumerate() {
-                let h = h_sig.get_untracked();
+            for (idx, row) in rows.iter().enumerate() {
+                let h = row.hours_sig.get_untracked();
                 let is_last = idx == rows.len() - 1;
                 if is_last && h.is_empty() {
                     continue;
@@ -964,16 +1167,187 @@ pub fn CellPopup(
         );
     }
 
-    // ── Close handler that also stops timers ────────────────────────────
     let on_close_with_timers = {
-        let ik = issue_key_for_close.clone();
         let saving_timer_rows = saving_timer_rows.clone();
         move || {
             saving_timer_rows.set(false);
-            timer_mgr.stop_all_for_popup(&ik, date_for_close);
-            remove_persisted_timer_popup(&ik, date_for_close);
-            on_close.run(());
+            close_timer_popup.run(());
         }
+    };
+
+    let popup_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    let import_anonymous_row = Callback::new(move |_: ()| {
+        let Some((id, _, _)) = transferable_anonymous_row.get_untracked() else {
+            return;
+        };
+        let Some(source) = anonymous_drafts
+            .with_untracked(|drafts| drafts.iter().find(|draft| draft.id == id).cloned())
+        else {
+            log::error!("[CellPopup] Anonymous source row is no longer available");
+            return;
+        };
+        let w = i18n.get_untracked();
+        timer_mgr.finalize(&id, w.decimal_separator);
+        let Some((hours, comment)) = transferable_anonymous_content(&source, &w) else {
+            return;
+        };
+        let blank = new_entries.with_untracked(|rows| {
+            rows.iter()
+                .find(|row| {
+                    row.hours_sig.get_untracked().trim().is_empty()
+                        && row.comment_sig.get_untracked().trim().is_empty()
+                        && !timer_mgr.is_active_untracked(&TimerId {
+                            issue_key: issue_key_for_close.clone(),
+                            date,
+                            row_index: row.row_index,
+                        })
+                })
+                .copied()
+        });
+        let destination = blank.or_else(|| {
+            if let Some(last) = new_entries.with_untracked(|rows| rows.last().copied()) {
+                append_new_row.run(last.row_index);
+                new_entries.with_untracked(|rows| rows.last().copied())
+                    .filter(|row| row.row_index != last.row_index)
+            } else {
+                None
+            }
+        });
+        let Some(destination) = destination else {
+            log::error!("[CellPopup] Cannot create a destination for the anonymous timer");
+            return;
+        };
+        destination.hours_sig.set(transferred_duration_text(
+            &source,
+            hours,
+            hours_per_day,
+            hours_per_week,
+            w.decimal_separator,
+        ));
+        destination.comment_sig.set(comment);
+        append_new_row.run(destination.row_index);
+        source.remove.run(id.row_index);
+        #[cfg(feature = "hydrate")]
+        if let Some(popup) = popup_ref.get_untracked() {
+            let index = new_entries.with_untracked(|rows| {
+                rows.iter().position(|row| row.row_index == destination.row_index)
+            });
+            if let Some(index) = index {
+                request_animation_frame(move || {
+                    use wasm_bindgen::JsCast;
+                    if popup.is_connected()
+                        && let Some(node) = popup
+                            .get_elements_by_class_name("popup-comment-new")
+                            .item(index as u32)
+                        && let Some(input) = node.dyn_ref::<web_sys::HtmlElement>()
+                    {
+                        let _ = input.focus();
+                    }
+                });
+            }
+        }
+    });
+    let move_button_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+    let move_origin = RwSignal::new(None::<String>);
+    #[cfg(feature = "hydrate")]
+    let move_return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
+
+    let finish_move = move |cancel: bool, restore_focus: bool| {
+        let Some(origin) = move_origin.get_untracked() else {
+            return;
+        };
+        move_origin.set(None);
+        if cancel {
+            pos_sig.set(origin);
+        }
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+
+            let previous = move_return_focus.get_value();
+            move_return_focus.set_value(None);
+            if restore_focus {
+                // Blurring a duration can rebuild the new-entry rows.
+                let target = previous.filter(|el| el.is_connected()).or_else(|| {
+                    popup_ref.get_untracked().and_then(|popup| {
+                        popup
+                            .query_selector("input:not([disabled]),textarea:not([disabled])")
+                            .ok()
+                            .flatten()
+                            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+                    })
+                });
+                if let Some(target) = target {
+                    if let Err(error) = target.focus() {
+                        log::warn!("Could not restore popup focus after moving: {error:?}");
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = restore_focus;
+    };
+
+    let toggle_move = move || {
+        if move_origin.get_untracked().is_some() {
+            finish_move(false, true);
+            return;
+        }
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+
+            let Some(button) = move_button_ref.get_untracked() else {
+                log::warn!("Cannot start moving popup before its Move control is mounted");
+                return;
+            };
+            let previous = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.active_element())
+                .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok());
+            if let Err(error) = button.focus() {
+                log::warn!("Could not focus popup Move control: {error:?}");
+                return;
+            }
+            move_return_focus.set_value(previous);
+            move_origin.set(Some(pos_sig.get_untracked()));
+        }
+    };
+
+    let on_move_keydown = move |ev: leptos::ev::KeyboardEvent| {
+        if move_origin.get_untracked().is_none()
+            || ev.is_composing()
+            || ev.ctrl_key()
+            || ev.alt_key()
+            || ev.meta_key()
+        {
+            return;
+        }
+        let key = ev.key();
+        let delta = match key.as_str() {
+            "ArrowLeft" | "ArrowRight" if ev.shift_key() => 1.0,
+            "ArrowUp" | "ArrowDown" if ev.shift_key() => 1.0,
+            "ArrowLeft" | "ArrowRight" => 8.0,
+            "ArrowUp" | "ArrowDown" => 20.0,
+            "Enter" | " " | "Escape" if !ev.shift_key() => {
+                ev.prevent_default();
+                ev.stop_propagation();
+                finish_move(key == "Escape", true);
+                return;
+            }
+            _ => return,
+        };
+        ev.prevent_default();
+        ev.stop_propagation();
+        let (left, top) = parse_popup_pos(&pos_sig.get_untracked());
+        let (left, top) = match key.as_str() {
+            "ArrowLeft" => (left - delta, top),
+            "ArrowRight" => (left + delta, top),
+            "ArrowUp" => (left, top - delta),
+            "ArrowDown" => (left, top + delta),
+            _ => (left, top),
+        };
+        pos_sig.set(format!("left:{left:.0}px;top:{top:.0}px"));
     };
 
     // ── Keyboard shortcuts ──────────────────────────────────────────────
@@ -981,34 +1355,82 @@ pub fn CellPopup(
         let on_save = on_save.clone();
         let on_close_with_timers = on_close_with_timers.clone();
         move |ev: leptos::ev::KeyboardEvent| {
+            if ev.is_composing() {
+                return;
+            }
             let key = ev.key();
-            // Ctrl+Arrow: move popup. Ctrl+Alt+Arrow: 1px; Ctrl+Arrow: 1 char/line.
-            if ev.ctrl_key() {
-                let delta: f64 = match key.as_str() {
-                    "ArrowLeft" | "ArrowRight" if ev.alt_key() => 1.0,
-                    "ArrowUp" | "ArrowDown" if ev.alt_key() => 1.0,
-                    "ArrowLeft" | "ArrowRight" => 8.0,
-                    "ArrowUp" | "ArrowDown" => 20.0,
-                    _ => 0.0,
-                };
-                if delta > 0.0 {
-                    ev.prevent_default();
-                    ev.stop_propagation();
-                    let cur = pos_sig.get_untracked();
-                    let (mut left, mut top) = parse_popup_pos(&cur);
-                    match key.as_str() {
-                        "ArrowLeft" => left -= delta,
-                        "ArrowRight" => left += delta,
-                        "ArrowUp" => top -= delta,
-                        "ArrowDown" => top += delta,
-                        _ => {}
+            if key.eq_ignore_ascii_case("t")
+                && ev.alt_key()
+                && !ev.ctrl_key()
+                && !ev.meta_key()
+                && !ev.shift_key()
+            {
+                ev.prevent_default();
+                ev.stop_propagation();
+                if !ev.repeat() {
+                    #[cfg(feature = "hydrate")]
+                    {
+                        use wasm_bindgen::JsCast;
+
+                        let focused_row = ev
+                            .target()
+                            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                            .and_then(|target| target.closest("[data-timer-row]").ok().flatten());
+                        let row = focused_row.or_else(|| {
+                            popup_ref.get_untracked().and_then(|popup| {
+                                popup.query_selector("[data-timer-row]").ok().flatten()
+                            })
+                        });
+                        if let Some(row) = row
+                            && let Ok(Some(button)) = row.query_selector(".timer-play-pause")
+                            && let Some(button) = button.dyn_ref::<web_sys::HtmlElement>()
+                        {
+                            button.click();
+                            // Starting a timer disables the hours input; keep focus in its row.
+                            if let Err(error) = button.focus() {
+                                log::warn!("Could not focus popup timer control: {error:?}");
+                            }
+                        }
                     }
-                    pos_sig.set(format!("left:{:.0}px;top:{:.0}px", left, top));
-                    return;
                 }
+                return;
+            }
+            if !is_anonymous
+                && key.eq_ignore_ascii_case("i")
+                && ev.alt_key()
+                && !ev.ctrl_key()
+                && !ev.meta_key()
+                && !ev.shift_key()
+                && transferable_anonymous_row.get_untracked().is_some()
+            {
+                ev.prevent_default();
+                ev.stop_propagation();
+                if !ev.repeat() {
+                    finish_move(false, false);
+                    import_anonymous_row.run(());
+                }
+                return;
+            }
+            if key.eq_ignore_ascii_case("m")
+                && ev.alt_key()
+                && !ev.ctrl_key()
+                && !ev.meta_key()
+                && !ev.shift_key()
+            {
+                ev.prevent_default();
+                ev.stop_propagation();
+                if !ev.repeat() {
+                    toggle_move();
+                }
+                return;
             }
             match key.as_str() {
                 "Enter" if ev.ctrl_key() => {
+                    if is_anonymous {
+                        ev.prevent_default();
+                        ev.stop_propagation();
+                        return;
+                    }
                     if save_enabled.get() && conn.is_available() {
                         ev.prevent_default();
                         ev.stop_propagation();
@@ -1034,11 +1456,11 @@ pub fn CellPopup(
         let hl = w.t(keys::HOUR_ABBR);
         let ml = w.t(keys::MINUTE_ABBR);
         let rows = new_entries.get_untracked();
-        if idx != rows.len() - 1 {
+        if !rows.last().is_some_and(|row| row.row_index == idx) {
             return;
         }
-        if let Some((hours_sig, _)) = rows.last() {
-            let hours = hours_sig.get_untracked();
+        if let Some(row) = rows.last() {
+            let hours = row.hours_sig.get_untracked();
             if !hours.is_empty()
                 && parse_hours(
                     &hours,
@@ -1053,38 +1475,22 @@ pub fn CellPopup(
                 .is_some()
             {
                 leptos::task::spawn_local(async move {
-                    new_entries.update(|vec| {
-                        vec.push((RwSignal::new(String::new()), RwSignal::new(String::new())));
-                    });
+                    append_new_row.run(idx);
                 });
             }
         }
     };
 
-    // ── Helper: build timer buttons for a row ───────────────────────────
-    // Returns a view fragment with play/pause + stop buttons, or an empty
-    // spacer when timers are not applicable.
-    let build_timer_buttons = move |timer_id: TimerId, hours_sig: RwSignal<String>| {
-        if !is_today && !timer_mgr.is_active_untracked(&timer_id) {
-            return view! { <span class="popup-spacer"></span> }.into_any();
-        }
-
-        let tid_for_phase = timer_id.clone();
-        let tid_start = timer_id.clone();
-        let tid_pause = timer_id.clone();
-        let tid_resume = timer_id.clone();
-        let tid_persist = timer_id.clone();
-        let persist_tick = persist_tick;
+    let toggle_timer = {
         let issue_summary = issue_summary_for_persist.clone();
         let suggested_comment = suggested_comment_for_persist.clone();
-        let pos_sig = pos_sig;
-        let on_play_pause = move |_| {
-            let phase = timer_mgr.phase_untracked(&tid_for_phase);
+        Callback::new(move |(tid_persist, hours_sig): (TimerId, RwSignal<String>)| {
+            let phase = timer_mgr.phase_untracked(&tid_persist);
             let dec_sep = i18n.get_untracked().decimal_separator;
             match phase {
                 None | Some(TimerPhase::Stopped) => {
                     timer_mgr.start(
-                        tid_start.clone(),
+                        tid_persist.clone(),
                         hours_sig,
                         hours_per_day,
                         hours_per_week,
@@ -1092,11 +1498,11 @@ pub fn CellPopup(
                     );
                 }
                 Some(TimerPhase::Running) => {
-                    timer_mgr.pause(&tid_pause);
+                    timer_mgr.pause(&tid_persist);
                 }
                 Some(TimerPhase::Paused { .. }) => {
                     let dec_sep = i18n.get_untracked().decimal_separator;
-                    timer_mgr.resume(&tid_resume, dec_sep);
+                    timer_mgr.resume(&tid_persist, dec_sep);
                 }
             }
             ensure_timer_storage_initialized();
@@ -1104,6 +1510,7 @@ pub fn CellPopup(
                 upsert_persisted_timer_row(
                     &tid_persist.issue_key,
                     &issue_summary,
+                    is_anonymous,
                     tid_persist.date,
                     suggested_comment.clone(),
                     is_git_log,
@@ -1143,6 +1550,7 @@ pub fn CellPopup(
                 upsert_persisted_timer_row(
                     &tid_persist.issue_key,
                     &issue_summary,
+                    is_anonymous,
                     tid_persist.date,
                     suggested_comment.clone(),
                     is_git_log,
@@ -1158,10 +1566,63 @@ pub fn CellPopup(
                 );
             }
             persist_tick.update(|value| *value += 1);
-        };
+            if is_anonymous {
+                append_new_row.run(tid_persist.row_index);
+            }
+        })
+    };
 
+    if is_anonymous {
+        let issue_key = issue_key.clone();
+        Effect::new(move |previous: Option<u64>| {
+            let generation = anonymous_timer_trigger.get();
+            if previous.is_some() && previous != Some(generation) {
+                let rows = new_entries.get_untracked();
+                let selected = rows.iter().enumerate().find(|(_, row)| {
+                    !row.hours_sig.get_untracked().trim().is_empty()
+                        || !row.comment_sig.get_untracked().trim().is_empty()
+                        || timer_mgr.is_active_untracked(&TimerId {
+                            issue_key: issue_key.clone(),
+                            date,
+                            row_index: row.row_index,
+                        })
+                });
+                if let Some((_idx, row)) =
+                    selected.or_else(|| rows.first().map(|row| (0, row)))
+                {
+                    toggle_timer.run((
+                        TimerId {
+                            issue_key: issue_key.clone(),
+                            date,
+                            row_index: row.row_index,
+                        },
+                        row.hours_sig,
+                    ));
+                    #[cfg(feature = "hydrate")]
+                    if let Some(popup) = popup_ref.get_untracked() {
+                        use wasm_bindgen::JsCast;
+                        if let Some(node) = popup
+                            .get_elements_by_class_name("popup-comment-new")
+                            .item(_idx as u32)
+                            && let Some(input) = node.dyn_ref::<web_sys::HtmlElement>()
+                        {
+                            let _ = input.focus();
+                        }
+                    }
+                }
+            }
+            generation
+        });
+    }
+
+    // ── Helper: build timer buttons for a row ───────────────────────────
+    let build_timer_buttons = move |timer_id: TimerId, hours_sig: RwSignal<String>| {
+        if !is_anonymous && !is_today && !timer_mgr.is_active_untracked(&timer_id) {
+            return view! { <span class="popup-spacer"></span> }.into_any();
+        }
         let tid_phase_display = timer_id.clone();
         let tid_phase_display2 = timer_id.clone();
+        let on_play_pause = move |_| toggle_timer.run((timer_id.clone(), hours_sig));
 
         view! {
             <span class="timer-controls">
@@ -1244,8 +1705,6 @@ pub fn CellPopup(
         up_cb.forget();
     }
 
-    let popup_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-
     // Focus the first input after the popup mounts. We defer via
     // requestAnimationFrame so that child components (inputs) are in the DOM.
     // Restored timer popups open automatically on page load; skip stealing
@@ -1282,6 +1741,7 @@ pub fn CellPopup(
     let sl_md = drag_start_left.clone();
     let st_md = drag_start_top.clone();
     let on_header_mousedown = move |ev: leptos::ev::MouseEvent| {
+        finish_move(false, false);
         dragging_md.set(true);
         sx_md.set(ev.client_x() as f64);
         sy_md.set(ev.client_y() as f64);
@@ -1305,11 +1765,13 @@ pub fn CellPopup(
         let next = POPUP_Z_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         z_index.set(next);
     };
+    let issue_summary_title = issue_summary.clone();
 
     //
     view! {
          <div
             class="cell-popup"
+            class:cell-popup-anonymous=is_anonymous
             node_ref=popup_ref
             data-popup-id={popup_id.to_string()}
             style=move || format!("{};z-index:{}", pos_sig.get(), z_index.get())
@@ -1317,16 +1779,63 @@ pub fn CellPopup(
             on:focusin=on_focusin
          >
             <div class="popup-draggable-title" on:mousedown=on_header_mousedown>
-                <span class="popup-key">{issue_key}</span>
-                <span class="popup-summary" title={issue_summary}>{issue_summary.clone()}</span>
+                <span class="popup-key">{if is_anonymous { String::new() } else { issue_key }}</span>
+                <span class="popup-summary" title={issue_summary_title}>{move || {
+                    if is_anonymous {
+                        i18n.get().t(keys::ANONYMOUS_TIMER)
+                    } else {
+                        issue_summary.clone()
+                    }
+                }}</span>
                 <span class="popup-date">{i18n.get_untracked().format_date(&date)}</span>
                 <span class="popup-title-actions" on:mousedown=on_title_action_mousedown>
+                    <Show when=move || !is_anonymous && transferable_anonymous_row.get().is_some()>
+                        <button
+                            type="button"
+                            class="popup-title-action popup-title-move popup-title-import"
+                            on:click=move |_| import_anonymous_row.run(())
+                            title=move || i18n.get().t(keys::ANONYMOUS_TIMER_IMPORT)
+                            aria-label=move || i18n.get().t(keys::ANONYMOUS_TIMER_IMPORT)
+                            aria-keyshortcuts="Alt+I"
+                        >
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                <path d="M4 12h12m-5-5 5 5-5 5M18 4h3v16h-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                            </svg>
+                        </button>
+                    </Show>
+                    <button
+                        type="button"
+                        class="popup-title-action popup-title-move"
+                        node_ref=move_button_ref
+                        aria-pressed=move || move_origin.get().is_some().to_string()
+                        aria-keyshortcuts="Alt+M"
+                        aria-describedby=move || move_origin.get().is_some()
+                            .then(|| format!("popup-move-help-{popup_id}"))
+                        on:click=move |_| toggle_move()
+                        on:keydown=on_move_keydown
+                        on:blur=move |_| finish_move(false, false)
+                        title=move || i18n.get().t(keys::POPUP_MOVE)
+                        aria-label=move || i18n.get().t(keys::POPUP_MOVE)
+                    >
+                        // Font Awesome Free 6.7.2 by @fontawesome; Copyright 2024 Fonticons, Inc.
+                        // Icon: CC BY 4.0 (https://fontawesome.com/license/free).
+                        <svg
+                            class="fa-arrows-up-down-left-right"
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 512 512"
+                            aria-hidden="true"
+                            focusable="false"
+                        >
+                            <path d="M278.6 9.4c-12.5-12.5-32.8-12.5-45.3 0l-64 64c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l9.4-9.4L224 224l-114.7 0 9.4-9.4c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-64 64c-12.5 12.5-12.5 32.8 0 45.3l64 64c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3l-9.4-9.4L224 288l0 114.7-9.4-9.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l64 64c12.5 12.5 32.8 12.5 45.3 0l64-64c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-9.4 9.4L288 288l114.7 0-9.4 9.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l64-64c12.5-12.5 12.5-32.8 0-45.3l-64-64c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l9.4 9.4L288 224l0-114.7 9.4 9.4c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3l-64-64z"/>
+                        </svg>
+                    </button>
                     <button
                         class="popup-title-action popup-title-save"
                         tabindex="-1"
                         on:click=move |_| on_save(None)
                         disabled=move || !save_enabled.get() || !conn.is_available()
-                        title=move || i18n.get().t(keys::SAVE)
+                        title=move || i18n.get().t(if is_anonymous { keys::ANONYMOUS_TIMER_NO_SAVE } else { keys::SAVE })
+                        aria-label=move || i18n.get().t(keys::SAVE)
                     >
                         {"✓"}
                     </button>
@@ -1340,6 +1849,16 @@ pub fn CellPopup(
                     </button>
                 </span>
             </div>
+            <p class="popup-move-help" id=format!("popup-move-help-{popup_id}") role="status">
+                {move || if move_origin.get().is_some() {
+                    i18n.get().t(keys::POPUP_MOVE_HELP)
+                } else {
+                    String::new()
+                }}
+            </p>
+            {is_anonymous.then(|| view! {
+                <p class="popup-anonymous-help">{move || i18n.get().t(keys::ANONYMOUS_TIMER_HELP)}</p>
+            })}
         <div class="cell-popup-content" tabindex="0">
             <div class="popup-entries">
                 // ── Existing entry rows ─────────────────────────────────
@@ -1372,6 +1891,7 @@ pub fn CellPopup(
                         view! {
                             <div
                                 class="popup-entry-group"
+                                data-timer-row=move || (!deleted.get()).then_some(row_idx)
                                 style:display=move || if deleted.get() { "none" } else { "" }
                             >
                                 <div class="popup-entry">
@@ -1496,17 +2016,18 @@ pub fn CellPopup(
                     .collect::<Vec<_>>()}
 
                 // ── Dynamic new entry rows ──────────────────────────────
-                {move || {
-                    let rows = new_entries.get();
-                    let existing_count = existing.len();
-                    rows.into_iter().enumerate().map(|(idx, (hours_sig, comment_sig))| {
+                <For
+                    each={move || new_entries.get().into_iter().enumerate().collect::<Vec<_>>()}
+                    key={|(_, row)| row.row_index}
+                    children={move |(idx, row)| {
+                        let hours_sig = row.hours_sig;
+                        let comment_sig = row.comment_sig;
                         let on_blur = on_new_hours_blur.clone();
-                        // New rows get timer IDs offset by existing count + 1000 to
-                        // avoid collisions with existing entry indices.
+                        // Removing anonymous rows must not renumber surviving timers.
                         let timer_id = TimerId {
                             issue_key: issue_key_clone.clone(),
                             date,
-                            row_index: existing_count + 1000 + idx,
+                            row_index: row.row_index,
                         };
                         let tid_for_disabled = timer_id.clone();
                         let tid_for_progress = timer_id.clone();
@@ -1514,7 +2035,7 @@ pub fn CellPopup(
                         let row_link = suggested_row_links.get(idx).cloned().flatten();
 
                         view! {
-                            <div class="popup-entry popup-new">
+                            <div class="popup-entry popup-new" data-timer-row=row.row_index>
                                 <div class="popup-hours-container">
                                     <input
                                         type="text"
@@ -1528,9 +2049,9 @@ pub fn CellPopup(
                                         }
                                         prop:value={move || hours_sig.get()}
                                         on:input=move |ev| hours_sig.set(event_target_value(&ev))
-                                        on:blur=move |_| on_blur(idx)
+                                        on:blur=move |_| on_blur(row.row_index)
                                         placeholder={move || i18n.get().t(keys::HOURS)}
-                                        disabled=move || !conn.is_available() || timer_mgr.is_active(&tid_for_disabled)
+                                        disabled=move || (!is_anonymous && !conn.is_available()) || timer_mgr.is_active(&tid_for_disabled)
                                     />
                                     {move || {
                                         new_row_validations
@@ -1572,7 +2093,7 @@ pub fn CellPopup(
                                         prop:value={move || comment_sig.get()}
                                         on:input=move |ev| comment_sig.set(event_target_value(&ev))
                                         placeholder={move || i18n.get().t(keys::DESCRIPTION)}
-                                        disabled=move || !conn.is_available()
+                                        disabled=move || !is_anonymous && !conn.is_available()
                                         rows="1"
                                     />
                                     {move || {
@@ -1610,8 +2131,8 @@ pub fn CellPopup(
                                 </span>
                             </div>
                         }
-                    }).collect::<Vec<_>>()
-                }}
+                    }}
+                />
             </div>
 
             <div class="popup-buttons">

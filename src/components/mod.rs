@@ -1,4 +1,5 @@
 pub mod cell_popup;
+pub mod cheatsheet_dialog;
 pub mod folder_field;
 pub mod password_field;
 pub mod popup_flush;

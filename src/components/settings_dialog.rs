@@ -378,8 +378,19 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     let lbl_hpw = ti.t(keys::HOURS_PER_WEEK);
     let lbl_hpd = ti.t(keys::HOURS_PER_DAY);
 
-    let settings_resource = Resource::new(|| (), |_| get_settings());
-    let reporting_options_resource = Resource::new(|| (), |_| get_reporting_options());
+    let settings_result = RwSignal::new(None::<Result<Settings, ServerFnError>>);
+    let reporting_options_result = RwSignal::new(None::<Result<ReportingOptions, ServerFnError>>);
+
+    // These reads must not suspend the parent view and detach the focused dialog.
+    #[cfg(feature = "hydrate")]
+    {
+        leptos::task::spawn_local_scoped_with_cancellation(async move {
+            settings_result.set(Some(get_settings().await));
+        });
+        leptos::task::spawn_local_scoped_with_cancellation(async move {
+            reporting_options_result.set(Some(get_reporting_options().await));
+        });
+    }
 
     let hours_per_week = RwSignal::new(40.0_f64);
     let hours_per_day = RwSignal::new(8.0_f64);
@@ -400,21 +411,17 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     let loaded_settings = RwSignal::new(false);
     let loaded_reporting_options = RwSignal::new(false);
     let dialog_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    let language_ref: NodeRef<leptos::html::Button> = NodeRef::new();
 
-    // Focus the dialog container after mount so keyboard events are captured
-    // immediately, even when opened via global hotkeys.
     #[cfg(feature = "hydrate")]
-    dialog_ref.on_load(move |el| {
-        use leptos::wasm_bindgen::JsCast;
-        use leptos::wasm_bindgen::closure::Closure;
-        let dialog_html: web_sys::HtmlElement = el.unchecked_ref::<web_sys::HtmlElement>().clone();
-        let cb = Closure::once(move || {
-            let _ = dialog_html.focus();
+    language_ref.on_load(move |button| {
+        request_animation_frame(move || {
+            if button.is_connected() {
+                if let Err(err) = button.focus() {
+                    log::error!("Failed to focus the settings language button: {err:?}");
+                }
+            }
         });
-        if let Some(window) = web_sys::window() {
-            let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
-        }
-        cb.forget();
     });
 
     let non_billable_options =
@@ -698,7 +705,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     });
 
     Effect::new(move |_| {
-        settings_resource.get().map(|result| match result {
+        settings_result.get().map(|result| match result {
             Ok(s) => {
                 hours_per_week.set(s.hours_per_week);
                 hours_per_day.set(s.hours_per_day);
@@ -710,30 +717,6 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                 show_merged_pr_activity.set(s.show_merged_pr_activity);
                 custom_actions.set(ensure_custom_action_rows(&s.custom_actions));
                 loaded_settings.set(true);
-
-                #[cfg(feature = "hydrate")]
-                {
-                    use leptos::wasm_bindgen::JsCast;
-                    use leptos::wasm_bindgen::closure::Closure;
-
-                    if let Some(dialog) = dialog_ref.get() {
-                        let dialog_html: web_sys::HtmlElement =
-                            dialog.unchecked_ref::<web_sys::HtmlElement>().clone();
-                        let cb = Closure::once(move || {
-                            let inputs =
-                                dialog_html.get_elements_by_class_name("settings-initial-focus");
-                            if let Some(node) = inputs.item(0) {
-                                if let Some(input) = node.dyn_ref::<web_sys::HtmlElement>() {
-                                    let _ = input.focus();
-                                }
-                            }
-                        });
-                        if let Some(window) = web_sys::window() {
-                            let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
-                        }
-                        cb.forget();
-                    }
-                }
             }
             Err(err) => {
                 error_msg.set(Some(err.to_string()));
@@ -742,7 +725,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
     });
 
     Effect::new(move |_| {
-        reporting_options_resource.get().map(|result| match result {
+        reporting_options_result.get().map(|result| match result {
             Ok(options) => {
                 active_work_items.set(options.active_items);
                 loaded_reporting_options.set(true);
@@ -775,7 +758,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                         let Some(el) = node.dyn_ref::<web_sys::HtmlElement>() else {
                             continue;
                         };
-                        if el.offset_parent().is_some() {
+                        if !el.has_attribute("disabled") && el.offset_parent().is_some() {
                             focusables.push(el.clone());
                         }
                     }
@@ -811,7 +794,7 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
                         let Some(el) = node.dyn_ref::<web_sys::HtmlElement>() else {
                             continue;
                         };
-                        if el.offset_parent().is_some() {
+                        if !el.has_attribute("disabled") && el.offset_parent().is_some() {
                             focusables.push(el.clone());
                         }
                     }
@@ -857,93 +840,69 @@ pub fn SettingsDialog(on_ok: Callback<()>, on_cancel: Callback<()>) -> impl Into
         _ => {}
     };
 
-    let on_overlay_keydown = {
-        let on_dialog_keydown = on_dialog_keydown.clone();
-        move |ev: leptos::ev::KeyboardEvent| {
-            on_dialog_keydown(ev);
-        }
-    };
-
-    #[cfg(feature = "hydrate")]
-    Effect::new(move |_| {
-        use leptos::wasm_bindgen::JsCast;
-
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let Some(document) = window.document() else {
-            return;
-        };
-        let Some(dialog) = dialog_ref.get() else {
-            return;
-        };
-
-        let active_inside_dialog = document
-            .active_element()
-            .map(|active| {
-                let active_node: &web_sys::Node = active.unchecked_ref();
-                dialog.contains(Some(active_node))
-            })
-            .unwrap_or(false);
-        if !active_inside_dialog {
-            let _ = dialog.unchecked_ref::<web_sys::HtmlElement>().focus();
-        }
-    });
-
     view! {
-        <div class="settings-overlay" tabindex="0" on:keydown=on_overlay_keydown>
+        <div class="settings-overlay">
             <div class="settings-backdrop" on:click=move |_| on_cancel.run(())></div>
             <div
                 class="settings-dialog"
                 node_ref=dialog_ref
                 tabindex="-1"
-role="dialog"
+                role="dialog"
                 aria-modal="true"
                 aria-labelledby="settings-dialog-title"
                 on:keydown=on_dialog_keydown
             >
                 <h2 id="settings-dialog-title">{move || i18n.get().t(keys::SETTINGS_TITLE)}</h2>
 
-                <Suspense fallback=move || view! { <p>{move || i18n.get().t(keys::LOADING_SETTINGS)}</p> }>
-                    <SettingsGroup title=title_language.clone()>
-                        <div class="lang-dropdown">
-                            <button class="lang-btn settings-lang-btn settings-initial-focus" on:click=move |_| lang_menu_open.update(|open| *open = !*open)>
-                                <span inner_html={move || {
-                                    langs_for_button
-                                        .iter()
-                                        .find(|(code, _, _)| *code == current_lang.get())
-                                        .map(|(_, _, flag)| *flag)
-                                        .unwrap_or(FLAG_UK)
-                                }}></span>
-                                <span class="lang-caret">{move || if lang_menu_open.get() { "▲" } else { "▼" }}</span>
-                            </button>
-                            <div class=move || if lang_menu_open.get() { "lang-menu lang-menu-open" } else { "lang-menu" }>
-                                {supported_langs.iter().map(|(code, name, flag)| {
-                                    let code = code.to_string();
-                                    let on_click = {
-                                        let code = code.clone();
-                                        let on_lang_change = on_lang_change.clone();
-                                        let lang_menu_open = lang_menu_open.clone();
-                                        move |_| {
-                                            on_lang_change(code.clone());
-                                            lang_menu_open.set(false);
-                                        }
-                                    };
-                                    view! {
-                                        <div
-                                            class="lang-menu-item"
-                                            class:lang-menu-item-selected=move || current_lang.get() == code
-                                            on:click=on_click
-                                        >
-                                            <span inner_html={*flag} title={*name}></span>
-                                            <span>{*name}</span>
-                                        </div>
+                <SettingsGroup title=title_language.clone()>
+                    <div class="lang-dropdown">
+                        <button
+                            class="lang-btn settings-lang-btn"
+                            node_ref=language_ref
+                            aria-label=move || i18n.get().t(keys::LANGUAGE)
+                            aria-expanded=move || lang_menu_open.get()
+                            on:click=move |_| lang_menu_open.update(|open| *open = !*open)
+                        >
+                            <span inner_html={move || {
+                                langs_for_button
+                                    .iter()
+                                    .find(|(code, _, _)| *code == current_lang.get())
+                                    .map(|(_, _, flag)| *flag)
+                                    .unwrap_or(FLAG_UK)
+                            }}></span>
+                            <span class="lang-caret">{move || if lang_menu_open.get() { "▲" } else { "▼" }}</span>
+                        </button>
+                        <div class=move || if lang_menu_open.get() { "lang-menu lang-menu-open" } else { "lang-menu" }>
+                            {supported_langs.iter().map(|(code, name, flag)| {
+                                let code = code.to_string();
+                                let on_click = {
+                                    let code = code.clone();
+                                    let on_lang_change = on_lang_change.clone();
+                                    let lang_menu_open = lang_menu_open.clone();
+                                    move |_| {
+                                        on_lang_change(code.clone());
+                                        lang_menu_open.set(false);
                                     }
-                                }).collect::<Vec<_>>()}
-                            </div>
+                                };
+                                view! {
+                                    <div
+                                        class="lang-menu-item"
+                                        class:lang-menu-item-selected=move || current_lang.get() == code
+                                        on:click=on_click
+                                    >
+                                        <span inner_html={*flag} title={*name}></span>
+                                        <span>{*name}</span>
+                                    </div>
+                                }
+                            }).collect::<Vec<_>>()}
                         </div>
-                    </SettingsGroup>
-                    <SettingsGroup title=title_prefs.clone()>
+                    </div>
+                </SettingsGroup>
+                <Show
+                    when=move || settings_result.get().is_some() && reporting_options_result.get().is_some()
+                    fallback=move || view! { <p>{move || i18n.get().t(keys::LOADING_SETTINGS)}</p> }
+                >
+                    <SettingsGroup title=title_prefs.clone() clone:lbl_hpw clone:lbl_hpd>
                         <label>{lbl_hpw.clone()}":"</label>
                         <div class="settings-range-field" class:settings-field-invalid=move || hpw_error.get().is_some()>
                             <div class="settings-range-row">
@@ -1177,7 +1136,7 @@ role="dialog"
                             {move || i18n.get().t(keys::SHOW_MERGED_PR_ACTIVITY)}
                         </label>
                     </SettingsGroup>
-                </Suspense>
+                </Show>
 
                 {move || error_msg.get().map(|msg| view! {
                     <p class="error">{msg}</p>
