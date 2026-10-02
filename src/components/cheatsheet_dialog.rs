@@ -73,6 +73,7 @@ fn timesheet_sections(i18n: &I18n, actions: &[CustomAction]) -> Vec<Section> {
                 shortcut("Esc", i18n.t(keys::CHEATSHEET_POPUP_CLOSE)),
                 shortcut("Alt+M", i18n.t(keys::CHEATSHEET_POPUP_MOVE)),
                 shortcut("Alt+I", i18n.t(keys::CHEATSHEET_POPUP_IMPORT)),
+                shortcut("Alt+T", i18n.t(keys::CHEATSHEET_POPUP_TIMER)),
             ],
         },
         Section {

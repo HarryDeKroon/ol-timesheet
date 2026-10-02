@@ -17,6 +17,8 @@ While focus is inside a popup, **Alt+M** activates its four-arrow **Move** butto
 
 Outside move mode, **Ctrl+Left/Right** navigates words, **Ctrl+Shift+Left/Right** selects words, and **Enter** inserts a line break in a description. **Ctrl+Enter** saves valid changes and closes the popup, including while in move mode. **Escape** closes the popup when not moving.
 
+With focus inside a popup, **Alt+T** starts, pauses, or resumes the timer of the active row, or the top visible row if focus is outside the rows. This also works in the Anonymous timer popup, including while offline. It uses the same timer availability as the row's button: new work-item timers can only start on today's entries. Outside a popup, **Alt+T** still jumps to the current week.
+
 The Move icon is the unmodified [arrows-up-down-left-right](https://fontawesome.com/icons/arrows-up-down-left-right?f=classic&s=solid) from Font Awesome Free 6.7.2, copyright 2024 Fonticons, Inc., licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ### Time tracking

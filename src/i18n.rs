@@ -164,6 +164,7 @@ pub mod keys {
     pub const CHEATSHEET_POPUP_CLOSE: &str = "cheatsheet_popup_close";
     pub const CHEATSHEET_POPUP_MOVE: &str = "cheatsheet_popup_move";
     pub const CHEATSHEET_POPUP_IMPORT: &str = "cheatsheet_popup_import";
+    pub const CHEATSHEET_POPUP_TIMER: &str = "cheatsheet_popup_timer";
     pub const CHEATSHEET_MOVE_ARROWS: &str = "cheatsheet_move_arrows";
     pub const CHEATSHEET_MOVE_ARROWS_FINE: &str = "cheatsheet_move_arrows_fine";
     pub const CHEATSHEET_MOVE_FINISH: &str = "cheatsheet_move_finish";
@@ -393,6 +394,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         ),
         (keys::CHEATSHEET_POPUP_SAVE, "Save the entries"),
         (keys::CHEATSHEET_POPUP_CLOSE, "Close the entry dialog"),
+        (
+            keys::CHEATSHEET_POPUP_TIMER,
+            "Start, pause or resume the active row's timer (or the top row), including anonymous timers",
+        ),
         (keys::CHEATSHEET_POPUP_MOVE, "Toggle move mode for the dialog"),
         (
             keys::CHEATSHEET_POPUP_IMPORT,
@@ -690,6 +695,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         (keys::CHEATSHEET_POPUP_SAVE, "Enregistrer les saisies"),
         (keys::CHEATSHEET_POPUP_CLOSE, "Fermer la bo\u{00EE}te de saisie"),
         (
+            keys::CHEATSHEET_POPUP_TIMER,
+            "D\u{00E9}marrer, suspendre ou reprendre le minuteur de la ligne active (ou de la premi\u{00E8}re ligne), y compris les minuteurs anonymes",
+        ),
+        (
             keys::CHEATSHEET_POPUP_MOVE,
             "Activer ou d\u{00E9}sactiver le mode d\u{00E9}placement",
         ),
@@ -967,6 +976,10 @@ static TRANSLATIONS: LazyLock<TranslationMap> = LazyLock::new(|| {
         ),
         (keys::CHEATSHEET_POPUP_SAVE, "Sla de invoer op"),
         (keys::CHEATSHEET_POPUP_CLOSE, "Sluit het invoervenster"),
+        (
+            keys::CHEATSHEET_POPUP_TIMER,
+            "Start, pauzeer of hervat de timer van de actieve regel (of de bovenste regel), ook voor anonieme timers",
+        ),
         (
             keys::CHEATSHEET_POPUP_MOVE,
             "Verplaatsmodus van het venster aan- of uitzetten",

@@ -1359,6 +1359,42 @@ pub fn CellPopup(
                 return;
             }
             let key = ev.key();
+            if key.eq_ignore_ascii_case("t")
+                && ev.alt_key()
+                && !ev.ctrl_key()
+                && !ev.meta_key()
+                && !ev.shift_key()
+            {
+                ev.prevent_default();
+                ev.stop_propagation();
+                if !ev.repeat() {
+                    #[cfg(feature = "hydrate")]
+                    {
+                        use wasm_bindgen::JsCast;
+
+                        let focused_row = ev
+                            .target()
+                            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                            .and_then(|target| target.closest("[data-timer-row]").ok().flatten());
+                        let row = focused_row.or_else(|| {
+                            popup_ref.get_untracked().and_then(|popup| {
+                                popup.query_selector("[data-timer-row]").ok().flatten()
+                            })
+                        });
+                        if let Some(row) = row
+                            && let Ok(Some(button)) = row.query_selector(".timer-play-pause")
+                            && let Some(button) = button.dyn_ref::<web_sys::HtmlElement>()
+                        {
+                            button.click();
+                            // Starting a timer disables the hours input; keep focus in its row.
+                            if let Err(error) = button.focus() {
+                                log::warn!("Could not focus popup timer control: {error:?}");
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             if !is_anonymous
                 && key.eq_ignore_ascii_case("i")
                 && ev.alt_key()
@@ -1855,6 +1891,7 @@ pub fn CellPopup(
                         view! {
                             <div
                                 class="popup-entry-group"
+                                data-timer-row=move || (!deleted.get()).then_some(row_idx)
                                 style:display=move || if deleted.get() { "none" } else { "" }
                             >
                                 <div class="popup-entry">
@@ -1998,7 +2035,7 @@ pub fn CellPopup(
                         let row_link = suggested_row_links.get(idx).cloned().flatten();
 
                         view! {
-                            <div class="popup-entry popup-new">
+                            <div class="popup-entry popup-new" data-timer-row=row.row_index>
                                 <div class="popup-hours-container">
                                     <input
                                         type="text"
